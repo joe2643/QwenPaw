@@ -315,7 +315,7 @@ class WhatsAppChannel(BaseChannel):
             try:
                 self._media_dir.mkdir(parents=True, exist_ok=True)
                 path = self._media_dir / f"wa_img_{msg_id}.jpg"
-                await client.download_media_with_path(msg, str(path))
+                data = await client.download_any(msg, str(path)); path.write_bytes(data) if data and not path.exists() else None
                 content_parts.append(ImageContent(type=ContentType.IMAGE, image_url=str(path)))
             except Exception as e:
                 logger.warning("whatsapp: image download failed: %s", e)
@@ -326,7 +326,7 @@ class WhatsAppChannel(BaseChannel):
                 self._media_dir.mkdir(parents=True, exist_ok=True)
                 ext = "ogg" if msg.audioMessage.ptt else "m4a"
                 path = self._media_dir / f"wa_audio_{msg_id}.{ext}"
-                await client.download_media_with_path(msg, str(path))
+                data = await client.download_any(msg, str(path)); path.write_bytes(data) if data and not path.exists() else None
                 content_parts.append(AudioContent(type=ContentType.AUDIO, data=str(path)))
             except Exception as e:
                 logger.warning("whatsapp: audio download failed: %s", e)
@@ -337,7 +337,7 @@ class WhatsAppChannel(BaseChannel):
                 self._media_dir.mkdir(parents=True, exist_ok=True)
                 fname = msg.documentMessage.fileName or f"wa_doc_{msg_id}"
                 path = self._media_dir / fname
-                await client.download_media_with_path(msg, str(path))
+                data = await client.download_any(msg, str(path)); path.write_bytes(data) if data and not path.exists() else None
                 content_parts.append(FileContent(type=ContentType.FILE, file_url=str(path)))
             except Exception as e:
                 logger.warning("whatsapp: document download failed: %s", e)
