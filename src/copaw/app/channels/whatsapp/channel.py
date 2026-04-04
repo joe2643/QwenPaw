@@ -403,6 +403,22 @@ class WhatsAppChannel(BaseChannel):
 
             # Access control (sync checks: group allowlist, mention)
             if not self._check_access(is_group, chat_str, sender_str, sender_jid, client, msg, body):
+                # Record non-mentioned group messages in history buffer
+                if is_group and (body or content_parts):
+                    resolved = self._lid_cache.get(sender_str, {})
+                    sender_label = f"+{resolved.get('phone', '')}" if resolved.get('phone') else sender_str
+                    media_paths = []
+                    for p in content_parts:
+                        for attr in ("image_url", "video_url", "data", "file_url"):
+                            v = getattr(p, attr, None)
+                            if v:
+                                media_paths.append(v)
+                                break
+                    history = self._group_history.setdefault(chat_str, [])
+                    history.append({"sender": sender_label, "body": body or "[media]", "ts": timestamp, "media": media_paths})
+                    if len(history) > self._group_history_limit:
+                        self._group_history[chat_str] = history[-self._group_history_limit:]
+                    logger.info("whatsapp: recorded in group history (%d entries)", len(history))
                 return
 
             # Async DM allowlist check (needs LID resolution)
