@@ -29,7 +29,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
     RunStatus,
 )
 
-from ....config.config import WhatsAppConfig
+from ....config.config import BaseChannelConfig as WhatsAppConfig
 from ..base import (
     BaseChannel,
     OnReplySent,

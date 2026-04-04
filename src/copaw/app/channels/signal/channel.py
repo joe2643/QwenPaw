@@ -32,7 +32,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
     RunStatus,
 )
 
-from ....config.config import SignalConfig
+from ....config.config import BaseChannelConfig as SignalConfig
 from ..base import (
     BaseChannel,
     OnReplySent,
