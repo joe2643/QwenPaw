@@ -1,0 +1,812 @@
+# -*- coding: utf-8 -*-
+"""Signal channel: HTTP JSON-RPC + SSE with signal-cli daemon.
+
+Features:
+- Text messages (DM + group)
+- Quote/reply-to (inbound parse + outbound send)
+- Attachments/images (inbound download + outbound send)
+- Reactions (inbound + outbound)
+- Mention detection for groups
+- Access control (DM allowlist, group allowlist)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import aiohttp
+import base64
+import json
+import logging
+import os
+import time
+import tempfile
+from pathlib import Path
+from typing import Any, Optional, Dict, List, Union
+
+from agentscope_runtime.engine.schemas.agent_schemas import (
+    TextContent,
+    ImageContent,
+    AudioContent,
+    FileContent,
+    ContentType,
+    RunStatus,
+)
+
+from ....config.config import SignalConfig
+from ..base import (
+    BaseChannel,
+    OnReplySent,
+    ProcessHandler,
+    OutgoingContentPart,
+)
+
+
+import re as _re
+
+def _markdown_to_signal(text):
+    """Convert markdown to plain text + Signal text-style ranges."""
+    patterns = [
+        (_re.compile(r"```(?:\w*\n)?(.*?)```", _re.DOTALL), "MONOSPACE"),
+        (_re.compile(r"`([^`]+)`"), "MONOSPACE"),
+        (_re.compile(r"\*\*(.+?)\*\*"), "BOLD"),
+        (_re.compile(r"__(.+?)__"), "BOLD"),
+        (_re.compile(r"~~(.+?)~~"), "STRIKETHROUGH"),
+    ]
+    all_matches = []
+    for pat, style in patterns:
+        for m in pat.finditer(text):
+            all_matches.append((m.start(), m.end(), m.group(1), style))
+    all_matches.sort(key=lambda x: x[0])
+    # Remove overlaps
+    filtered = []
+    for s, e, inner, style in all_matches:
+        if filtered and s < filtered[-1][1]:
+            continue
+        filtered.append((s, e, inner, style))
+    # Build result
+    parts = []
+    styles = []
+    cursor = 0
+    offset = 0
+    for s, e, inner, style in filtered:
+        before = text[cursor:s]
+        parts.append(before)
+        offset += len(before)
+        styles.append({"start": offset, "length": len(inner), "style": style})
+        parts.append(inner)
+        offset += len(inner)
+        cursor = e
+    parts.append(text[cursor:])
+    return "".join(parts), styles
+
+
+def _parse_mentions(text):
+    """Parse @+number or @uuid and build Signal mention params."""
+    pat = _re.compile(r"@(\+\d{7,15}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
+    mentions = []
+    result = text
+    shift = 0
+    for m in pat.finditer(text):
+        target = m.group(1)
+        pos = m.start() - shift
+        replacement = "\ufffc"
+        result = result[:pos] + replacement + result[pos + len(m.group(0)):]
+        shift += len(m.group(0)) - 1
+        mention = {"start": pos, "length": 1}
+        if target.startswith("+"):
+            mention["number"] = target
+        else:
+            mention["uuid"] = target
+        mentions.append(mention)
+    return result, mentions
+
+
+logger = logging.getLogger(__name__)
+
+SIGNAL_MAX_TEXT_LENGTH = 4000
+_MEDIA_DIR = Path(tempfile.gettempdir()) / "copaw_signal_media"
+
+
+class SignalDaemon:
+    """Manages signal-cli via HTTP JSON-RPC + SSE."""
+
+    def __init__(self, account: str, http_url: str):
+        self.account = account
+        self.http_url = http_url
+        self.connected = False
+        self.connecting = False
+        self.sse_task: Optional[asyncio.Task] = None
+        self.session: Optional[aiohttp.ClientSession] = None
+
+    async def connect(self) -> bool:
+        if self.connecting or self.connected:
+            return self.connected
+        self.connecting = True
+        try:
+            self.session = aiohttp.ClientSession()
+            async with self.session.get(
+                f"{self.http_url}/api/v1/check",
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status == 200:
+                    logger.info("Signal bridge connected: %s", self.http_url)
+                    self.connected = True
+                    return True
+                logger.error("Signal bridge check failed: %s", resp.status)
+                return False
+        except Exception as e:
+            logger.error("Signal bridge not available at %s: %s", self.http_url, e)
+            return False
+        finally:
+            self.connecting = False
+
+    async def disconnect(self):
+        if self.sse_task:
+            self.sse_task.cancel()
+            try:
+                await self.sse_task
+            except asyncio.CancelledError:
+                pass
+            self.sse_task = None
+        if self.session:
+            await self.session.close()
+            self.session = None
+        self.connected = False
+        logger.info("Signal disconnected")
+
+    async def _rpc_call(self, method: str, params: Optional[Dict] = None) -> Optional[Any]:
+        if not self.session or not self.connected:
+            return None
+        try:
+            rpc_payload: Dict[str, Any] = {
+                "jsonrpc": "2.0",
+                "id": int(time.time() * 1000),
+                "method": method,
+            }
+            if params:
+                rpc_payload["params"] = params
+            async with self.session.post(
+                f"{self.http_url}/api/v1/rpc",
+                json=rpc_payload,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                result = await resp.json()
+                if "error" in result:
+                    logger.error("Signal RPC error [%s]: %s", method, result["error"])
+                    return None
+                return result.get("result")
+        except Exception as e:
+            logger.error("Signal RPC [%s] failed: %s", method, e)
+            return None
+
+    # ── Send ──────────────────────────────────────────────────────────
+
+    async def send_message(
+        self,
+        target: str,
+        text: str,
+        is_group: bool = False,
+        quote_timestamp: int = 0,
+        quote_author: str = "",
+        attachments: Optional[List[str]] = None,
+        text_style: Optional[List[str]] = None,
+        mentions: Optional[List[str]] = None,
+    ) -> Optional[int]:
+        """Send message. Returns sent timestamp on success."""
+        params: Dict[str, Any] = {"account": self.account}
+        if text:
+            params["message"] = text
+        if text_style:
+            params["text-style"] = text_style
+        if mentions:
+            params["mention"] = mentions
+        if is_group:
+            params["groupId"] = target
+        else:
+            params["recipients"] = [target]
+        if quote_timestamp and quote_author:
+            params["quoteTimestamp"] = quote_timestamp
+            params["quoteAuthor"] = quote_author
+        if attachments:
+            params["attachments"] = attachments
+        result = await self._rpc_call("send", params)
+        if result and "timestamp" in result:
+            return result["timestamp"]
+        logger.error("Signal send failed to %s", target)
+        return None
+
+    async def send_reaction(
+        self,
+        target: str,
+        emoji: str,
+        target_author: str,
+        target_timestamp: int,
+        is_group: bool = False,
+        remove: bool = False,
+    ) -> bool:
+        """Send emoji reaction to a message."""
+        params: Dict[str, Any] = {
+            "account": self.account,
+            "emoji": emoji,
+            "targetAuthor": target_author,
+            "targetTimestamp": target_timestamp,
+        }
+        if remove:
+            params["remove"] = True
+        if is_group:
+            params["groupId"] = target
+        else:
+            params["recipients"] = [target]
+        result = await self._rpc_call("sendReaction", params)
+        return result is not None
+
+    async def send_typing(self, target: str, start: bool = True, is_group: bool = False):
+        try:
+            method = "sendTyping" if start else "stopTyping"
+            params = {"account": self.account}
+            if is_group:
+                params["groupId"] = target
+            else:
+                params["recipients"] = [target]
+            await self._rpc_call(method, params)
+        except Exception:
+            pass
+
+    # ── Receive ───────────────────────────────────────────────────────
+
+    async def start_receive(self, message_callback):
+        if self.sse_task:
+            return
+        self.sse_task = asyncio.create_task(
+            self._sse_loop(message_callback), name="signal_sse",
+        )
+
+    async def _sse_loop(self, message_callback):
+        backoff = 5
+        while True:
+            try:
+                url = f"{self.http_url}/api/v1/events"
+                if self.account:
+                    url += f"?account={self.account}"
+                logger.info("Signal SSE connecting: %s", url)
+                async with self.session.get(
+                    url, timeout=aiohttp.ClientTimeout(total=None, connect=10),
+                ) as resp:
+                    if resp.status != 200:
+                        logger.error("Signal SSE failed: %s", resp.status)
+                        await asyncio.sleep(backoff)
+                        backoff = min(backoff * 2, 60)
+                        continue
+                    logger.info("Signal SSE connected, listening...")
+                    backoff = 5  # Reset on successful connect
+                    async for line in resp.content:
+                        line = line.decode("utf-8").strip()
+                        if not line or not line.startswith("data:"):
+                            continue
+                        try:
+                            event = json.loads(line[5:].strip())
+                            await message_callback(event)
+                        except json.JSONDecodeError:
+                            pass
+            except asyncio.CancelledError:
+                logger.info("Signal SSE loop cancelled")
+                break
+            except Exception as e:
+                logger.error("Signal SSE error: %s, reconnecting in %ds...", e, backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+
+    # ── Attachment download ───────────────────────────────────────────
+
+    async def download_attachment(self, attachment_id: str, dest_dir: Path) -> Optional[Path]:
+        """Download attachment via getAttachment RPC."""
+        result = await self._rpc_call("getAttachment", {
+            "account": self.account,
+            "id": attachment_id,
+        })
+        if not result:
+            return None
+        # result may contain base64 data or file path
+        if isinstance(result, str):
+            # It's a file path
+            return Path(result) if os.path.exists(result) else None
+        if isinstance(result, dict) and result.get("data"):
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            ext = result.get("contentType", "application/octet-stream").split("/")[-1]
+            dest = dest_dir / f"signal_att_{attachment_id[:8]}.{ext}"
+            dest.write_bytes(base64.b64decode(result["data"]))
+            return dest
+        return None
+
+    async def whoami(self) -> Optional[Dict]:
+        return await self._rpc_call("whoami")
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  SignalChannel
+# ══════════════════════════════════════════════════════════════════════
+
+class SignalChannel(BaseChannel):
+    """Signal channel: JSON-RPC + SSE via signal-cli daemon."""
+
+    channel = "signal"
+    uses_manager_queue = True
+
+    def __init__(
+        self,
+        process: ProcessHandler,
+        enabled: bool = False,
+        account: str = "",
+        http_url: str = "",
+        http_host: str = "127.0.0.1",
+        http_port: int = 8080,
+        auto_start: bool = False,
+        on_reply_sent: OnReplySent = None,
+        show_tool_details: bool = True,
+        filter_tool_messages: bool = False,
+        filter_thinking: bool = False,
+        dm_policy: str = "open",
+        group_policy: str = "open",
+        allow_from: Optional[list] = None,
+        deny_message: str = "",
+        require_mention: bool = False,
+        send_read_receipts: bool = True,
+        text_chunk_limit: int = SIGNAL_MAX_TEXT_LENGTH,
+        **kwargs,
+    ):
+        super().__init__(
+            process,
+            on_reply_sent=on_reply_sent,
+            show_tool_details=show_tool_details,
+            filter_tool_messages=filter_tool_messages,
+            filter_thinking=filter_thinking,
+            dm_policy=dm_policy,
+            group_policy=group_policy,
+            allow_from=allow_from,
+            deny_message=deny_message,
+            require_mention=require_mention,
+        )
+        self.enabled = enabled
+        self._account = account
+        self._send_read_receipts = send_read_receipts
+        self._text_chunk_limit = text_chunk_limit
+        self._groups: List[str] = kwargs.get("groups") or []
+        self._group_allow_from: List[str] = kwargs.get("group_allow_from") or []
+        self._account_uuid: str = kwargs.get("account_uuid") or ""
+        self._media_dir = _MEDIA_DIR
+
+        daemon_url = http_url or f"http://{http_host}:{http_port}"
+        self.daemon = SignalDaemon(account=account, http_url=daemon_url)
+
+        if self.enabled:
+            logger.info("signal: initialized (account=%s, url=%s)", account, daemon_url)
+
+    @classmethod
+    def from_config(
+        cls,
+        process: ProcessHandler,
+        config: Union[SignalConfig, dict],
+        on_reply_sent: OnReplySent = None,
+        show_tool_details: bool = True,
+        filter_tool_messages: bool = False,
+        filter_thinking: bool = False,
+        workspace_dir: Path | None = None,
+        **kwargs,
+    ) -> "SignalChannel":
+        c = config if isinstance(config, dict) else config.model_dump()
+        return cls(
+            process=process,
+            enabled=bool(c.get("enabled", False)),
+            account=c.get("account") or "",
+            http_url=c.get("http_url") or "",
+            http_host=c.get("http_host") or "127.0.0.1",
+            http_port=c.get("http_port") or 8080,
+            auto_start=c.get("auto_start", False),
+            on_reply_sent=on_reply_sent,
+            show_tool_details=show_tool_details,
+            filter_tool_messages=filter_tool_messages,
+            filter_thinking=filter_thinking,
+            dm_policy=c.get("dm_policy") or "open",
+            group_policy=c.get("group_policy") or "open",
+            allow_from=c.get("allow_from") or [],
+            deny_message=c.get("deny_message") or "",
+            require_mention=c.get("require_mention", False),
+            send_read_receipts=c.get("send_read_receipts", True),
+            text_chunk_limit=c.get("text_chunk_limit", SIGNAL_MAX_TEXT_LENGTH),
+            groups=c.get("groups") or [],
+            group_allow_from=c.get("group_allow_from") or [],
+            account_uuid=c.get("account_uuid") or c.get("accountUuid") or "",
+        )
+
+    # ── Lifecycle ─────────────────────────────────────────────────────
+
+    async def start(self) -> None:
+        if not self.enabled:
+            return
+        if not await self.daemon.connect():
+            logger.error("signal: failed to connect to daemon")
+            return
+        await self.daemon.start_receive(self._on_sse_event)
+        logger.info("signal: channel started (SSE receive active)")
+
+    async def stop(self) -> None:
+        if not self.enabled:
+            return
+        await self.daemon.disconnect()
+        logger.info("signal: channel stopped")
+
+    # ── Inbound SSE event handler ─────────────────────────────────────
+
+    async def _on_sse_event(self, event: Dict) -> None:
+        try:
+            envelope = event.get("envelope", event)
+            source = envelope.get("sourceNumber") or envelope.get("source") or ""
+            source_uuid = envelope.get("sourceUuid") or ""
+            timestamp = envelope.get("timestamp", 0)
+
+            # Handle reactions
+            reaction_msg = envelope.get("reactionMessage")
+            if reaction_msg:
+                await self._handle_inbound_reaction(source, source_uuid, reaction_msg, envelope)
+                return
+
+            data_message = envelope.get("dataMessage") or {}
+            body = data_message.get("message") or ""
+
+            # Detect group
+            group_info = data_message.get("groupInfo") or {}
+            group_id = group_info.get("groupId") or ""
+
+            # Need body or attachments to proceed
+            attachments_raw = data_message.get("attachments") or []
+            if attachments_raw:
+                logger.info("signal: attachments found: %s", json.dumps(attachments_raw)[:500])
+            if not body and not attachments_raw:
+                return
+
+            # ── Access control ────────────────────────────────────────
+            if group_id:
+                if self.group_policy == "allowlist" and self._groups:
+                    if group_id not in self._groups:
+                        return
+                if self.require_mention:
+                    if not self._is_bot_mentioned(data_message, body):
+                        return
+            else:
+                if self.dm_policy == "allowlist" and self.allow_from:
+                    if not self._is_source_allowed(source, source_uuid):
+                        return
+
+            logger.info("signal: from %s%s: %s",
+                        source or source_uuid[:12],
+                        f" (group)" if group_id else "",
+                        body[:80] if body else f"[{len(attachments_raw)} attachment(s)]")
+
+            # ── Build content parts ───────────────────────────────────
+            content_parts: List[Any] = []
+            if body:
+                content_parts.append(TextContent(type=ContentType.TEXT, text=body))
+
+            # Parse quote/reply-to
+            quote = data_message.get("quote")
+            quote_text = ""
+            if quote:
+                quote_text = quote.get("text") or ""
+                quote_author = quote.get("author") or quote.get("authorUuid") or ""
+                if quote_text:
+                    content_parts.insert(0, TextContent(
+                        type=ContentType.TEXT,
+                        text=f"[Replying to {quote_author[:12]}: {quote_text[:100]}]",
+                    ))
+
+            # Download and attach inbound attachments
+            for att in attachments_raw:
+                att_id = att.get("id") or ""
+                content_type = att.get("contentType") or ""
+                if att_id and content_type.startswith("image/"):
+                    local = await self.daemon.download_attachment(att_id, self._media_dir)
+                    if local:
+                        content_parts.append(ImageContent(
+                            type=ContentType.IMAGE,
+                            image_url=str(local),
+                        ))
+                elif att_id:
+                    local = await self.daemon.download_attachment(att_id, self._media_dir)
+                    if local:
+                        content_parts.append(FileContent(
+                            type=ContentType.FILE,
+                            file_url=str(local),
+                        ))
+
+            if not content_parts:
+                return
+
+            # ── Build request and enqueue ─────────────────────────────
+            channel_meta = {
+                "platform": "signal",
+                "account": self._account,
+                "timestamp": timestamp,
+                "group_id": group_id,
+                "source": source or source_uuid,
+                "source_uuid": source_uuid,
+                # For outbound quote-reply
+                "quote_timestamp": timestamp,
+                "quote_author": source or source_uuid,
+            }
+            session_id = self.resolve_session_id(source or source_uuid, channel_meta)
+            # For groups: use group_id as sender_id so all members share one session
+            effective_sender = f"group:{group_id}" if group_id else (source or source_uuid)
+            request = self.build_agent_request_from_user_content(
+                channel_id=self.channel,
+                sender_id=effective_sender,
+                session_id=session_id,
+                content_parts=content_parts,
+                channel_meta=channel_meta,
+            )
+            request.channel_meta = channel_meta
+            # Send typing indicator while processing
+            is_group = bool(group_id)
+            typing_target = group_id if is_group else (source or source_uuid)
+            asyncio.create_task(self.daemon.send_typing(typing_target, start=True, is_group=is_group))
+
+            await self.consume_one(request)
+
+        except Exception:
+            logger.exception("signal: error processing SSE event")
+
+    # ── Inbound reaction ──────────────────────────────────────────────
+
+    async def _handle_inbound_reaction(
+        self, source: str, source_uuid: str, reaction: Dict, envelope: Dict,
+    ) -> None:
+        emoji = reaction.get("emoji") or ""
+        is_remove = reaction.get("isRemove", False)
+        target_author = reaction.get("targetAuthor") or reaction.get("targetAuthorUuid") or ""
+        target_ts = reaction.get("targetSentTimestamp") or 0
+        group_info = reaction.get("groupInfo") or {}
+        group_id = group_info.get("groupId") or ""
+
+        logger.info("signal: reaction %s%s from %s on msg %d%s",
+                     emoji, " (remove)" if is_remove else "",
+                     source or source_uuid[:12], target_ts,
+                     f" (group)" if group_id else "")
+
+        # Ack reaction with same emoji (mirror) if reaction_level >= ack
+        # For now just log it — extend later if needed
+
+    # ── Access control helpers ────────────────────────────────────────
+
+    def _is_bot_mentioned(self, data_message: Dict, body: str) -> bool:
+        mentions = data_message.get("mentions") or []
+        for m in mentions:
+            if m.get("uuid") == self._account_uuid:
+                return True
+            if m.get("number") == self._account:
+                return True
+        # Quote-reply to bot counts as mention
+        quote = data_message.get("quote")
+        if quote:
+            qa = quote.get("author") or quote.get("authorUuid") or ""
+            if qa == self._account or qa == self._account_uuid:
+                return True
+        # Fallback: bot number in text
+        if self._account and self._account in body:
+            return True
+        return False
+
+    def _is_source_allowed(self, source: str, source_uuid: str) -> bool:
+        for entry in self.allow_from:
+            if entry.startswith("uuid:"):
+                if source_uuid == entry[5:]:
+                    return True
+            elif entry.startswith("+"):
+                if source == entry:
+                    return True
+            elif source == entry or source_uuid == entry:
+                return True
+        return False
+
+    # ── Outbound send ─────────────────────────────────────────────────
+
+    async def send(
+        self,
+        to_handle: str,
+        text: str,
+        meta: Optional[dict] = None,
+    ) -> None:
+        if not self.enabled or not self.daemon.connected:
+            return
+        if not text:
+            return
+
+        meta = meta or {}
+        group_id = meta.get("group_id") or ""
+        is_group = bool(group_id) or (to_handle.endswith("=") and not to_handle.startswith("+"))
+        if is_group and group_id:
+            to_handle = group_id
+
+        # Convert markdown to Signal text styles
+        plain_text, style_ranges = _markdown_to_signal(text)
+        text_style_params = [
+            f"{s['start']}:{s['length']}:{s['style']}" for s in style_ranges
+        ] if style_ranges else None
+        
+        # Parse mentions (@+number or @uuid)
+        plain_text, mention_list = _parse_mentions(plain_text)
+        mention_params = [
+            f"{m['start']}:{m['length']}:{m.get('uuid', m.get('number', ''))}" 
+            for m in mention_list
+        ] if mention_list else None
+        
+        text = plain_text
+
+        # Extract [Image: file:///...] or [Image: /path] and send as attachments
+        img_re = __import__("re").compile(r'\[Image: (file:///[^\]]+|/[^\]]+)\]')
+        img_matches = img_re.findall(text)
+        att_paths = []
+        for m in img_matches:
+            p = m.replace("file://", "") if m.startswith("file://") else m
+            if os.path.isfile(p):
+                att_paths.append(p)
+                text = text.replace(f"[Image: {m}]", "").strip()
+                logger.info("signal: extracted image attachment: %s", p)
+
+        chunks = self._chunk_text(text) if text.strip() else [""]
+        for i, chunk in enumerate(chunks):
+            atts = att_paths if i == 0 and att_paths else None
+            if chunk.strip() or atts:
+                await self.daemon.send_message(
+                    to_handle, chunk, is_group=is_group, attachments=atts,
+                    text_style=text_style_params if i == 0 else None,
+                    mentions=mention_params if i == 0 else None,
+                )
+
+    async def send_media(
+        self,
+        to_handle: str,
+        part: OutgoingContentPart,
+        meta: Optional[dict] = None,
+    ) -> None:
+        """Send media attachment (image/file/audio)."""
+        logger.info("signal: send_media called, type=%s to=%s", getattr(part, "type", "?"), to_handle)
+        if not self.enabled or not self.daemon.connected:
+            return
+        meta = meta or {}
+        group_id = meta.get("group_id") or ""
+        is_group = bool(group_id) or (to_handle.endswith("=") and not to_handle.startswith("+"))
+        if is_group and group_id:
+            to_handle = group_id
+
+        file_path = None
+        t = getattr(part, "type", None)
+        if t == ContentType.IMAGE:
+            file_path = getattr(part, "image_url", None)
+        elif t == ContentType.FILE:
+            file_path = getattr(part, "file_url", None) or getattr(part, "file_id", None)
+        elif t == ContentType.AUDIO:
+            file_path = getattr(part, "data", None)
+
+        logger.info("signal: send_media file_path=%s exists=%s", file_path, os.path.isfile(file_path) if file_path else False)
+        if file_path and os.path.isfile(file_path):
+            await self.daemon.send_message(
+                to_handle, "", is_group=is_group, attachments=[file_path],
+            )
+        elif file_path:
+            logger.warning("signal: media file not found: %s", file_path)
+
+    async def send_reaction_to(
+        self,
+        to_handle: str,
+        emoji: str,
+        target_author: str,
+        target_timestamp: int,
+        is_group: bool = False,
+    ) -> bool:
+        """Send outbound emoji reaction."""
+        return await self.daemon.send_reaction(
+            to_handle, emoji, target_author, target_timestamp, is_group=is_group,
+        )
+
+    # ── Text chunking ─────────────────────────────────────────────────
+
+    def _chunk_text(self, text: str) -> list[str]:
+        if not text or len(text) <= self._text_chunk_limit:
+            return [text] if text else []
+        chunks: list[str] = []
+        rest = text
+        while rest:
+            if len(rest) <= self._text_chunk_limit:
+                chunks.append(rest)
+                break
+            chunk = rest[: self._text_chunk_limit]
+            last_nl = chunk.rfind("\n")
+            if last_nl > self._text_chunk_limit // 2:
+                chunk = rest[:last_nl]
+            chunks.append(chunk)
+            rest = rest[len(chunk):]
+        return chunks
+
+    # ── Process loop override ─────────────────────────────────────────
+
+    async def _stream_with_tracker(self, payload):
+        """Override base to handle CoPaw event format for Signal."""
+        import json as _json
+
+        request = self._payload_to_request(payload)
+        send_meta = getattr(request, "channel_meta", None) or {}
+        to_handle = self.get_to_handle_from_request(request)
+        await self._before_consume_process(request)
+
+        text_parts = []
+        message_completed = False
+        process_iterator = None
+        try:
+            process_iterator = self._process(request)
+            async for event in process_iterator:
+                # Yield SSE data for task tracker
+                if hasattr(event, "model_dump_json"):
+                    data = event.model_dump_json()
+                elif hasattr(event, "json"):
+                    data = event.json()
+                else:
+                    data = _json.dumps({"text": str(event)})
+                yield f"data: {data}\n\n"
+
+                obj = getattr(event, "object", None)
+                status = getattr(event, "status", None)
+
+                if obj == "message" and status == RunStatus.Completed:
+                    logger.info("signal: message_completed, sending to %s", to_handle)
+                    await self.on_event_message_completed(request, to_handle, event, send_meta)
+                    message_completed = True
+
+                # Fallback text collection (skips thinking when filter is on)
+                for part in getattr(event, "content", []) or []:
+                    txt = getattr(part, "text", None)
+                    if not txt or txt in text_parts:
+                        continue
+                    if self._filter_thinking:
+                        from agentscope_runtime.engine.schemas.agent_schemas import MessageType
+                        if getattr(event, "type", None) == MessageType.REASONING:
+                            continue
+                        pt = str(getattr(part, "type", ""))
+                        if "thinking" in pt.lower():
+                            continue
+                    text_parts.append(txt)
+
+            # Fallback: send collected text if on_event_message_completed never fired
+            logger.info("signal: stream done, message_completed=%s text_parts=%d to_handle=%s", message_completed, len(text_parts), to_handle)
+            if text_parts and not message_completed:
+                reply = chr(10).join(text_parts)
+                logger.info("signal: fallback sending reply (%d chars) to %s", len(reply), to_handle)
+                await self.send(to_handle, reply.strip(), send_meta)
+
+            if self._on_reply_sent:
+                args = self.get_on_reply_sent_args(request, to_handle)
+                self._on_reply_sent(self.channel, *args)
+
+        except asyncio.CancelledError:
+            if process_iterator:
+                await process_iterator.aclose()
+            raise
+        except Exception:
+            logger.exception("signal: _stream_with_tracker failed")
+            raise
+
+    # ── Session / routing ─────────────────────────────────────────────
+
+    def resolve_session_id(
+        self, sender_id: str, channel_meta: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        meta = channel_meta or {}
+        group_id = meta.get("group_id")
+        if group_id:
+            return f"signal:group:{group_id}"
+        return f"signal:{sender_id}"
+
+    def get_to_handle_from_request(self, request) -> str:
+        meta = getattr(request, "channel_meta", None) or {}
+        group_id = meta.get("group_id")
+        if group_id:
+            return group_id
+        return meta.get("source") or getattr(request, "user_id", "") or ""
