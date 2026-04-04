@@ -726,10 +726,10 @@ class SignalChannel(BaseChannel):
         elif t == ContentType.AUDIO:
             raw_path = getattr(part, "data", None)
 
-        logger.info("signal: send_media file_path=%s exists=%s", file_path, os.path.isfile(file_path) if file_path else False)
         if not raw_path:
             return
         file_path = raw_path.replace("file://", "") if isinstance(raw_path, str) and raw_path.startswith("file://") else raw_path
+        logger.info("signal: send_media file_path=%s exists=%s", file_path, os.path.isfile(file_path) if file_path else False)
         if file_path and os.path.isfile(file_path):
             await self.daemon.send_message(
                 to_handle, "", is_group=is_group, attachments=[file_path],
