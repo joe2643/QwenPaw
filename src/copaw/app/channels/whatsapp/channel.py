@@ -437,17 +437,21 @@ class WhatsAppChannel(BaseChannel):
             resolved_name = resolved.get("name", "")
             friendly_sender = f"+{resolved_phone}" if resolved_phone else sender_str
 
-            # For group messages, prepend sender identity to help agent know who said what
+            # For group messages, prepend sender identity to the actual message
+            # (skip history context blocks that start with "---")
             if is_group and content_parts:
                 sender_label = friendly_sender
                 if resolved_name:
                     sender_label = f"{resolved_name} ({friendly_sender})"
-                # Prepend sender info to first text content
                 for i, part in enumerate(content_parts):
                     if hasattr(part, "type") and part.type == ContentType.TEXT:
+                        txt = part.text or ""
+                        # Don't prepend [From] to history context blocks
+                        if txt.startswith("---"):
+                            continue
                         content_parts[i] = TextContent(
                             type=ContentType.TEXT,
-                            text=f"[From {sender_label}]: {part.text}"
+                            text=f"[From {sender_label}]: {txt}"
                         )
                         break
 
