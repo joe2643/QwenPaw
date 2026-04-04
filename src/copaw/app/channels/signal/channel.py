@@ -475,14 +475,15 @@ class SignalChannel(BaseChannel):
                 if self.require_mention:
                     if not self._is_bot_mentioned(data_message, body):
                         # Record in group history buffer
-                        if body or content_parts:
+                        if body or attachments_raw:
                             media_paths = []
-                            for p in content_parts:
-                                for attr in ("image_url", "video_url", "data", "file_url"):
-                                    v = getattr(p, attr, None)
-                                    if v:
-                                        media_paths.append(v)
-                                        break
+                            # Note: content_parts not built yet at this point,
+                            # so collect attachment IDs for reference only
+                            for att in (attachments_raw or []):
+                                att_id = att.get("id", "")
+                                if att_id:
+                                    media_paths.append(f"signal-att:{att_id}")
+                            logger.warning("signal: RECORDING history for group %s (body=%s)", group_id[:20] if group_id else "?", (body or "[media]")[:30])
                             history = self._group_history.setdefault(group_id, [])
                             history.append({"sender": source or source_uuid[:12], "body": body or "[media]", "ts": timestamp, "media": media_paths})
                             if len(history) > self._group_history_limit:
@@ -538,7 +539,11 @@ class SignalChannel(BaseChannel):
 
             # ── Build request and enqueue ─────────────────────────────
             # Inject group history context when mentioned
+            logger.warning("signal: HISTORY CHECK group_id=%s keys=%s", 
+                          group_id[:20] if group_id else "None",
+                          list(self._group_history.keys())[:3])
             if group_id and group_id in self._group_history:
+                logger.warning("signal: INJECTING %d history entries", len(self._group_history.get(group_id, [])))
                 history = self._group_history.get(group_id, [])
                 if history:
                     ctx_lines = []
