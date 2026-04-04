@@ -374,6 +374,8 @@ class SignalChannel(BaseChannel):
         self._group_allow_from: List[str] = kwargs.get("group_allow_from") or []
         self._account_uuid: str = kwargs.get("account_uuid") or ""
         self._media_dir = _MEDIA_DIR
+        self._group_history: Dict[str, list] = {}  # group_id -> [{sender, body, ts}]
+        self._group_history_limit = 50
 
         daemon_url = http_url or f"http://{http_host}:{http_port}"
         self.daemon = SignalDaemon(account=account, http_url=daemon_url)
@@ -471,6 +473,12 @@ class SignalChannel(BaseChannel):
                         return
                 if self.require_mention:
                     if not self._is_bot_mentioned(data_message, body):
+                        # Record in group history buffer
+                        if body:
+                            history = self._group_history.setdefault(group_id, [])
+                            history.append({"sender": source or source_uuid[:12], "body": body, "ts": timestamp})
+                            if len(history) > self._group_history_limit:
+                                self._group_history[group_id] = history[-self._group_history_limit:]
                         return
             else:
                 if self.dm_policy == "allowlist" and self.allow_from:

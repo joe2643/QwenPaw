@@ -140,6 +140,8 @@ class WhatsAppChannel(BaseChannel):
         self._my_jid = None
         self._bot_phone = ""
         self._bot_lid = ""
+        self._group_history: Dict[str, list] = {}  # group_jid -> [{sender, body, ts}]
+        self._group_history_limit = 50
 
         if self.enabled and not NEONIZE_AVAILABLE:
             logger.error("whatsapp: neonize not installed, channel disabled")
@@ -395,6 +397,19 @@ class WhatsAppChannel(BaseChannel):
 
             # Access control (sync checks: group allowlist, mention)
             if not self._check_access(is_group, chat_str, sender_str, sender_jid, client, msg, body):
+                # For group messages without mention, still record in history buffer
+                if is_group and body:
+                    resolved = self._lid_cache.get(sender_str, {})
+                    sender_label = f"+{resolved.get('phone', '')}" if resolved.get('phone') else sender_str
+                    history = self._group_history.setdefault(chat_str, [])
+                    history.append({
+                        "sender": sender_label,
+                        "body": body,
+                        "ts": timestamp,
+                    })
+                    # Trim to limit
+                    if len(history) > self._group_history_limit:
+                        self._group_history[chat_str] = history[-self._group_history_limit:]
                 return
 
             # Async DM allowlist check (needs LID resolution)
@@ -424,6 +439,19 @@ class WhatsAppChannel(BaseChannel):
                         display_sender[:30],
                         f" (group {chat_str[:20]})" if is_group else "",
                         body[:80] if body else "[media]")
+
+            # For group messages, prepend recent history as context
+            if is_group and chat_str in self._group_history:
+                history = self._group_history.get(chat_str, [])
+                if history:
+                    ctx_lines = []
+                    for h in history[-10:]:  # Last 10 messages for context
+                        ctx_lines.append(f"[{h['sender']}]: {h['body']}")
+                    if ctx_lines:
+                        ctx_text = "[Recent group context (not directed at you)]:\n" + "\n".join(ctx_lines)
+                        content_parts.insert(0, TextContent(type=ContentType.TEXT, text=ctx_text))
+                    # Clear history after providing context
+                    self._group_history[chat_str] = []
 
             # Build request - use resolved phone number for sender identity
             resolved = self._lid_cache.get(sender_str, {})
