@@ -141,6 +141,8 @@ class WhatsAppChannel(BaseChannel):
         self._my_jid = None
         self._bot_phone = ""
         self._bot_lid = ""
+        self._group_history: Dict[str, list] = {}  # chat_jid -> [{sender, body, ts}]
+        self._group_history_limit = 50
 
         if self.enabled and not NEONIZE_AVAILABLE:
             logger.error("whatsapp: neonize not installed, channel disabled")
@@ -354,15 +356,14 @@ class WhatsAppChannel(BaseChannel):
         Returns True if message is allowed, False if blocked.
         Note: DM allowlist checks that need async LID resolution are
         handled separately in _on_message.
+        Note: Mention checks are handled in _on_message (after content
+        extraction) so non-mentioned messages can be recorded in group
+        history for context injection.
         """
         if is_group:
             if self.group_policy == "allowlist" and self._groups:
                 if chat_str not in self._groups:
                     logger.debug("whatsapp: blocked by group allowlist")
-                    return False
-            if self.require_mention:
-                if not self._is_bot_mentioned(msg, body):
-                    logger.warning("whatsapp: BLOCKED - mention required but not mentioned")
                     return False
         return True
 
@@ -399,9 +400,25 @@ class WhatsAppChannel(BaseChannel):
             if not content_parts:
                 return
 
-            # Access control (sync checks: group allowlist, mention)
+            # Access control (sync checks: group allowlist)
             if not self._check_access(is_group, chat_str, sender_str, sender_jid, client, msg, body):
                 return
+
+            # Group mention gate — record non-mentioned messages for context
+            if is_group and self.require_mention:
+                if not self._is_bot_mentioned(msg, body):
+                    # Buffer for later context injection when bot IS mentioned
+                    if body or content_parts:
+                        display = self._format_sender(_jid_to_str(sender_jid))
+                        history = self._group_history.setdefault(chat_str, [])
+                        history.append({
+                            "sender": display,
+                            "body": body or "[media]",
+                            "ts": str(timestamp),
+                        })
+                        if len(history) > self._group_history_limit:
+                            self._group_history[chat_str] = history[-self._group_history_limit:]
+                    return
 
             # Async DM allowlist check (needs LID resolution)
             if not is_group:
@@ -436,6 +453,18 @@ class WhatsAppChannel(BaseChannel):
             resolved_phone = resolved.get("phone", "")
             resolved_name = resolved.get("name", "")
             friendly_sender = f"+{resolved_phone}" if resolved_phone else sender_str
+
+            # Inject group history context when bot is mentioned
+            if is_group and chat_str in self._group_history:
+                history = self._group_history.get(chat_str, [])
+                if history:
+                    ctx_lines = []
+                    for h in history[-10:]:
+                        ctx_lines.append(f"  {h['sender']}: {h['body']}")
+                    if ctx_lines:
+                        ctx_text = "--- Recent group messages (context only, not directed at you) ---\n" + "\n".join(ctx_lines)
+                        content_parts.insert(0, TextContent(type=ContentType.TEXT, text=ctx_text))
+                    self._group_history[chat_str] = []
 
             # For group messages, prepend sender identity to the actual message
             # (skip history context blocks that start with "---")
