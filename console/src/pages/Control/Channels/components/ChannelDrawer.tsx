@@ -13,9 +13,9 @@ import { LinkOutlined } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
 import type { FormInstance } from "antd";
 import { useCallback, useEffect, useRef, useState } from "react";
-// useEffect already imported
 import { getChannelLabel, type ChannelKey } from "./constants";
 import { useChannelQrcode } from "./useChannelQrcode";
+import { api } from "../../../../api";
 import styles from "../index.module.less";
 import { useTheme } from "../../../../contexts/ThemeContext";
 
@@ -136,7 +136,31 @@ export function ChannelDrawer({
     ),
   });
 
-  
+  // WeCom QR code hook
+  const wecomQrcode = useChannelQrcode({
+    channel: "wecom",
+    successStatus: "confirmed",
+    successCredentialKey: "bot_id",
+    pollInterval: 2000,
+    onSuccess: useCallback(
+      (credentials: Record<string, string>) => {
+        form.setFieldsValue({ bot_id: credentials.bot_id, secret: credentials.secret });
+        message.success(t("channels.wecomAuthSuccess"));
+      },
+      [form, message, t],
+    ),
+    onError: useCallback(
+      (type: "fetch" | "expired") => {
+        if (type === "expired") {
+          message.warning(t("channels.weixinQrcodeExpired"));
+        } else {
+          message.error(t("channels.wecomAuthFailed"));
+        }
+      },
+      [message, t],
+    ),
+  });
+
   // WhatsApp pair code state
   const [waPairCode, setWaPairCode] = useState<string>("");
   const [waQrImage, setWaQrImage] = useState<string>("");
@@ -207,110 +231,6 @@ export function ChannelDrawer({
     }
   }, [message]);
 
-  const stopWeixinPoll = useCallback(() => {
-    if (weixinPollRef.current) {
-      clearInterval(weixinPollRef.current);
-      weixinPollRef.current = null;
-    }
-  }, []);
-
-  const handleFetchWeixinQrcode = useCallback(async () => {
-    stopWeixinPoll();
-    setWeixinQrcodeLoading(true);
-    setWeixinQrcodeImg("");
-    weixinConfirmedRef.current = false;
-    try {
-      const data = await api.getWeixinQrcode();
-      if (data.qrcode_img) {
-        setWeixinQrcodeImg(data.qrcode_img);
-        // Start polling for scan confirmation
-        weixinPollRef.current = setInterval(async () => {
-          try {
-            const s = await api.getWeixinQrcodeStatus(data.qrcode);
-            if (s.status === "confirmed" && s.bot_token) {
-              if (weixinConfirmedRef.current) return;
-              weixinConfirmedRef.current = true;
-              stopWeixinPoll();
-              form.setFieldsValue({ bot_token: s.bot_token });
-              setWeixinQrcodeImg("");
-              message.success(t("channels.weixinLoginSuccess"));
-            } else if (s.status === "expired") {
-              stopWeixinPoll();
-              setWeixinQrcodeImg("");
-              message.warning(t("channels.weixinQrcodeExpired"));
-            }
-          } catch {
-            // ignore poll errors
-          }
-        }, 2000);
-      } else {
-        message.error(t("channels.weixinQrcodeFailed"));
-      }
-    } catch {
-      message.error(t("channels.weixinQrcodeFailed"));
-    } finally {
-      setWeixinQrcodeLoading(false);
-    }
-  }, [t, form, stopWeixinPoll]);
-
-  // Dynamically load the WeCom SDK script
-  const loadWecomSDK = useCallback((): Promise<void> => {
-    return new Promise((resolve, reject) => {
-      if (window.WecomAIBotSDK || sdkLoadedRef.current) {
-        resolve();
-        return;
-      }
-      const script = document.createElement("script");
-      script.src = WECOM_SDK_URL;
-      script.async = true;
-      script.onload = () => {
-        sdkLoadedRef.current = true;
-        resolve();
-      };
-      script.onerror = () => reject(new Error("Failed to load WeCom SDK"));
-      document.body.appendChild(script);
-    });
-  }, []);
-
-  // Handle WeCom scan-to-authorize button click; source is fixed to WECOM_SOURCE
-  const handleWecomAuth = useCallback(async () => {
-    try {
-      await loadWecomSDK();
-    } catch {
-      message.error(t("channels.wecomSdkLoadFailed"));
-      return;
-    }
-    if (!window.WecomAIBotSDK) {
-      message.error(t("channels.wecomSdkLoadFailed"));
-      return;
-    }
-    const result = window.WecomAIBotSDK.openBotInfoAuthWindow({
-      source: WECOM_SOURCE,
-    });
-    if (result && typeof result.then === "function") {
-      result.then(
-        (bot) => {
-          if (bot?.botid) {
-            form.setFieldsValue({ bot_id: bot.botid, secret: bot.secret });
-            message.success(t("channels.wecomAuthSuccess"));
-          }
-        },
-        (error: WecomAuthError) => {
-          if (error?.code === "WINDOW_BLOCKED") {
-            message.error(t("channels.wecomWindowBlocked"));
-          } else if (error?.code === "CANCELLED") {
-            message.info(t("channels.wecomCancelled"));
-          } else {
-            message.error(
-              t("channels.wecomAuthFailed", {
-                msg: error?.message || error?.code || "Unknown error",
-              }),
-            );
-          }
-        },
-      );
-    }
-  }, [loadWecomSDK, form, t]);
 
   // ── Access control fields (shared across multiple channels) ──────────────
 

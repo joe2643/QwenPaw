@@ -30,7 +30,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
     RunStatus,
 )
 
-from ....config.config import BaseChannelConfig as WhatsAppConfig
+from ....config.config import WhatsAppConfig
 from ..base import (
     BaseChannel,
     OnReplySent,
@@ -342,7 +342,7 @@ class WhatsAppChannel(BaseChannel):
                 fname = msg.documentMessage.fileName or f"wa_doc_{msg_id}"
                 path = self._media_dir / fname
                 await client.download_media_with_path(msg, str(path))
-                content_parts.append(VideoContent(type=ContentType.VIDEO, video_url=str(path)))
+                content_parts.append(FileContent(type=ContentType.FILE, file_url=str(path)))
             except Exception as e:
                 logger.warning("whatsapp: document download failed: %s", e)
 

@@ -34,6 +34,10 @@ from ...config.config import (
     TelegramConfig,
     VoiceChannelConfig,
     WecomConfig,
+    WhatsAppConfig,
+    SignalConfig,
+    WeixinConfig,
+    XiaoYiConfig,
 )
 
 from .schemas_config import HeartbeatBody
@@ -58,6 +62,10 @@ _CHANNEL_CONFIG_CLASS_MAP = {
     "mqtt": MQTTConfig,
     "matrix": MatrixConfig,
     "wecom": WecomConfig,
+    "whatsapp": WhatsAppConfig,
+    "signal": SignalConfig,
+    "weixin": WeixinConfig,
+    "xiaoyi": XiaoYiConfig,
 }
 
 
@@ -659,10 +667,10 @@ async def start_whatsapp_pair(request: Request, phone: str = "+85251159218") -> 
     except ImportError:
         raise HTTPException(status_code=500, detail="neonize not installed")
 
-    # Get auth dir from config
-    from ...config.utils import load_config as _lc
-    _cfg = _lc()
-    wa_cfg = getattr(_cfg.channels, "whatsapp", None)
+    # Get auth dir from agent-specific config
+    from ..agent_context import get_agent_for_request
+    agent = await get_agent_for_request(request)
+    wa_cfg = getattr(agent.config.channels, "whatsapp", None)
     auth_dir = "~/.copaw/credentials/whatsapp/default"
     if wa_cfg:
         auth_dir = getattr(wa_cfg, "auth_dir", auth_dir) or auth_dir
@@ -760,9 +768,10 @@ async def get_whatsapp_qrcode(request: Request) -> dict:
     except ImportError:
         raise HTTPException(status_code=500, detail="neonize or segno not installed")
 
-    from ...config.utils import load_config as _lc
-    _cfg = _lc()
-    wa_cfg = getattr(_cfg.channels, "whatsapp", None)
+    # Get auth dir from agent-specific config
+    from ..agent_context import get_agent_for_request
+    agent = await get_agent_for_request(request)
+    wa_cfg = getattr(agent.config.channels, "whatsapp", None)
     auth_dir = "~/.copaw/credentials/whatsapp/default"
     if wa_cfg:
         auth_dir = getattr(wa_cfg, "auth_dir", auth_dir) or auth_dir
@@ -836,12 +845,18 @@ async def unbind_whatsapp() -> dict:
     "/channels/whatsapp/status",
     summary="Get WhatsApp connection status",
 )
-async def get_whatsapp_status() -> dict:
+async def get_whatsapp_status(request: Request) -> dict:
     """Check if WhatsApp is linked."""
     try:
         from neonize.aioze.client import NewAClient
         from pathlib import Path
-        db_path = Path("~/.copaw/credentials/whatsapp/default/neonize.db").expanduser()
+        from ..agent_context import get_agent_for_request
+        agent = await get_agent_for_request(request)
+        wa_cfg = getattr(agent.config.channels, "whatsapp", None)
+        auth_dir = "~/.copaw/credentials/whatsapp/default"
+        if wa_cfg:
+            auth_dir = getattr(wa_cfg, "auth_dir", auth_dir) or auth_dir
+        db_path = Path(auth_dir).expanduser() / "neonize.db"
         if not db_path.exists():
             return {"linked": False, "phone": None}
         # Check if database has a session

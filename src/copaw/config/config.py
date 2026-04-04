@@ -202,6 +202,38 @@ class WeixinConfig(BaseChannelConfig):
     media_dir: Optional[str] = None
 
 
+class WhatsAppConfig(BaseChannelConfig):
+    """WhatsApp channel config (neonize backend).
+
+    auth_dir:           Directory for neonize session database.
+    send_read_receipts: Send read receipts to senders.
+    self_chat_mode:     Treat messages from own number as commands.
+    """
+
+    auth_dir: str = ""
+    send_read_receipts: bool = True
+    self_chat_mode: bool = False
+
+
+class SignalConfig(BaseChannelConfig):
+    """Signal channel config (signal-cli REST daemon).
+
+    account:    Phone number registered with signal-cli.
+    http_url:   Full URL of signal-cli REST API (overrides host/port).
+    http_host:  Host of signal-cli REST API.
+    http_port:  Port of signal-cli REST API.
+    auto_start: Automatically start signal-cli daemon.
+    send_read_receipts: Send read receipts.
+    """
+
+    account: str = ""
+    http_url: str = ""
+    http_host: str = "127.0.0.1"
+    http_port: int = 8080
+    auto_start: bool = False
+    send_read_receipts: bool = True
+
+
 class ChannelConfig(BaseModel):
     """Built-in channel configs; extra keys allowed for plugin channels."""
 
@@ -221,6 +253,8 @@ class ChannelConfig(BaseModel):
     wecom: WecomConfig = WecomConfig()
     xiaoyi: XiaoYiConfig = XiaoYiConfig()
     weixin: WeixinConfig = WeixinConfig()
+    whatsapp: WhatsAppConfig = WhatsAppConfig()
+    signal: SignalConfig = SignalConfig()
     onebot: OneBotConfig = OneBotConfig()
 
 
@@ -1114,6 +1148,8 @@ ChannelConfigUnion = Union[
     WecomConfig,
     XiaoYiConfig,
     WeixinConfig,
+    WhatsAppConfig,
+    SignalConfig,
 ]
 
 
