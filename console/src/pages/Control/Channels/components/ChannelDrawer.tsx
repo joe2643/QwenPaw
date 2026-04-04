@@ -12,7 +12,8 @@ import { Alert, ConfigProvider, Spin } from "antd";
 import { LinkOutlined } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
 import type { FormInstance } from "antd";
-import { useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+// useEffect already imported
 import { getChannelLabel, type ChannelKey } from "./constants";
 import { useChannelQrcode } from "./useChannelQrcode";
 import styles from "../index.module.less";
@@ -27,6 +28,8 @@ const CHANNELS_WITH_ACCESS_CONTROL: ChannelKey[] = [
   "mattermost",
   "matrix",
   "weixin",
+  "whatsapp",
+  "signal",
 ];
 
 // Doc EN URLs per channel (anchors on https://copaw.agentscope.io/docs/channels)
@@ -45,6 +48,8 @@ const CHANNEL_DOC_EN_URLS: Partial<Record<ChannelKey, string>> = {
   wecom: "https://copaw.agentscope.io/docs/channels/?lang=en#WeCom-WeChat-Work",
   weixin:
     "https://copaw.agentscope.io/docs/channels/?lang=en#WeChat-Personal-iLink",
+  whatsapp:
+    "https://copaw.agentscope.io/docs/channels/?lang=en#WhatsApp",
   xiaoyi:
     "https://developer.huawei.com/consumer/cn/doc/service/openclaw-0000002518410344",
 };
@@ -131,29 +136,181 @@ export function ChannelDrawer({
     ),
   });
 
-  // WeCom QR code hook
-  const wecomQrcode = useChannelQrcode({
-    channel: "wecom",
-    successStatus: "success",
-    successCredentialKey: "bot_id",
-    pollInterval: 3000,
-    onSuccess: useCallback(
-      (credentials: Record<string, string>) => {
-        form.setFieldsValue({
-          bot_id: credentials.bot_id,
-          secret: credentials.secret,
-        });
-        message.success(t("channels.wecomAuthSuccess"));
-      },
-      [form, message, t],
-    ),
-    onError: useCallback(
-      (_type: "fetch" | "expired") => {
-        message.error(t("channels.wecomQrcodeFailed"));
-      },
-      [message, t],
-    ),
-  });
+  
+  // WhatsApp pair code state
+  const [waPairCode, setWaPairCode] = useState<string>("");
+  const [waQrImage, setWaQrImage] = useState<string>("");
+  const [waPairLoading, setWaPairLoading] = useState(false);
+  const [waPairStatus, setWaPairStatus] = useState<string>("idle");
+  const waPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // WhatsApp linked state
+  const [waLinked, setWaLinked] = useState(false);
+  useEffect(() => {
+    api.getWhatsappStatus().then((s) => setWaLinked(s.linked)).catch(() => {});
+  }, []);
+
+
+  const stopWaPoll = useCallback(() => {
+    if (waPollRef.current) {
+      clearInterval(waPollRef.current);
+      waPollRef.current = null;
+    }
+  }, []);
+
+  const handleWhatsappPair = useCallback(async () => {
+    stopWaPoll();
+    setWaPairLoading(true);
+    setWaPairCode("");
+    setWaQrImage("");
+    setWaPairStatus("pairing");
+    try {
+      const data = await api.startWhatsappPair();
+      if (data.pair_code) {
+        setWaPairCode(data.pair_code);
+        setWaPairStatus("waiting_pair");
+      }
+      if (data.qr_image) {
+        setWaQrImage(data.qr_image);
+        setWaPairStatus("waiting_qr");
+      }
+      // Poll for connection
+      waPollRef.current = setInterval(async () => {
+        try {
+          const s = await api.checkWhatsappPairStatus();
+          if (s.status === "connected") {
+            stopWaPoll();
+            setWaPairCode("");
+            setWaQrImage("");
+            setWaPairStatus("connected");
+            setWaPairLoading(false);
+            message.success("WhatsApp linked successfully!");
+          }
+        } catch { /* ignore */ }
+      }, 3000);
+    } catch (err) {
+      message.error("Failed to start WhatsApp pairing");
+      setWaPairStatus("idle");
+    } finally {
+      setWaPairLoading(false);
+    }
+  }, [stopWaPoll, message]);
+
+  const handleWhatsappUnbind = useCallback(async () => {
+    try {
+      await api.unbindWhatsapp();
+      setWaPairCode("");
+      setWaQrImage("");
+      setWaPairStatus("idle");
+      message.success("WhatsApp unlinked");
+    } catch (err) {
+      message.error("Failed to unbind WhatsApp");
+    }
+  }, [message]);
+
+  const stopWeixinPoll = useCallback(() => {
+    if (weixinPollRef.current) {
+      clearInterval(weixinPollRef.current);
+      weixinPollRef.current = null;
+    }
+  }, []);
+
+  const handleFetchWeixinQrcode = useCallback(async () => {
+    stopWeixinPoll();
+    setWeixinQrcodeLoading(true);
+    setWeixinQrcodeImg("");
+    weixinConfirmedRef.current = false;
+    try {
+      const data = await api.getWeixinQrcode();
+      if (data.qrcode_img) {
+        setWeixinQrcodeImg(data.qrcode_img);
+        // Start polling for scan confirmation
+        weixinPollRef.current = setInterval(async () => {
+          try {
+            const s = await api.getWeixinQrcodeStatus(data.qrcode);
+            if (s.status === "confirmed" && s.bot_token) {
+              if (weixinConfirmedRef.current) return;
+              weixinConfirmedRef.current = true;
+              stopWeixinPoll();
+              form.setFieldsValue({ bot_token: s.bot_token });
+              setWeixinQrcodeImg("");
+              message.success(t("channels.weixinLoginSuccess"));
+            } else if (s.status === "expired") {
+              stopWeixinPoll();
+              setWeixinQrcodeImg("");
+              message.warning(t("channels.weixinQrcodeExpired"));
+            }
+          } catch {
+            // ignore poll errors
+          }
+        }, 2000);
+      } else {
+        message.error(t("channels.weixinQrcodeFailed"));
+      }
+    } catch {
+      message.error(t("channels.weixinQrcodeFailed"));
+    } finally {
+      setWeixinQrcodeLoading(false);
+    }
+  }, [t, form, stopWeixinPoll]);
+
+  // Dynamically load the WeCom SDK script
+  const loadWecomSDK = useCallback((): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      if (window.WecomAIBotSDK || sdkLoadedRef.current) {
+        resolve();
+        return;
+      }
+      const script = document.createElement("script");
+      script.src = WECOM_SDK_URL;
+      script.async = true;
+      script.onload = () => {
+        sdkLoadedRef.current = true;
+        resolve();
+      };
+      script.onerror = () => reject(new Error("Failed to load WeCom SDK"));
+      document.body.appendChild(script);
+    });
+  }, []);
+
+  // Handle WeCom scan-to-authorize button click; source is fixed to WECOM_SOURCE
+  const handleWecomAuth = useCallback(async () => {
+    try {
+      await loadWecomSDK();
+    } catch {
+      message.error(t("channels.wecomSdkLoadFailed"));
+      return;
+    }
+    if (!window.WecomAIBotSDK) {
+      message.error(t("channels.wecomSdkLoadFailed"));
+      return;
+    }
+    const result = window.WecomAIBotSDK.openBotInfoAuthWindow({
+      source: WECOM_SOURCE,
+    });
+    if (result && typeof result.then === "function") {
+      result.then(
+        (bot) => {
+          if (bot?.botid) {
+            form.setFieldsValue({ bot_id: bot.botid, secret: bot.secret });
+            message.success(t("channels.wecomAuthSuccess"));
+          }
+        },
+        (error: WecomAuthError) => {
+          if (error?.code === "WINDOW_BLOCKED") {
+            message.error(t("channels.wecomWindowBlocked"));
+          } else if (error?.code === "CANCELLED") {
+            message.info(t("channels.wecomCancelled"));
+          } else {
+            message.error(
+              t("channels.wecomAuthFailed", {
+                msg: error?.message || error?.code || "Unknown error",
+              }),
+            );
+          }
+        },
+      );
+    }
+  }, [loadWecomSDK, form, t]);
 
   // ── Access control fields (shared across multiple channels) ──────────────
 
@@ -820,6 +977,188 @@ export function ChannelDrawer({
             </Form.Item>
             <Form.Item name="media_dir" label={t("channels.weixinMediaDir")}>
               <Input placeholder="~/.copaw/media" />
+            </Form.Item>
+          </>
+        );
+
+      case "whatsapp":
+        return (
+          <>
+            <Form.Item label="WhatsApp Connection">
+              {waPairStatus === "connected" ? (
+                <>
+                  <Alert
+                    type="success"
+                    showIcon
+                    message="WhatsApp Connected"
+                    description="Session is active. Messages are being received."
+                    style={{ marginBottom: 12 }}
+                  />
+                  <Button
+                    danger
+                    block
+                    loading={waPairLoading}
+                    onClick={handleWhatsappUnbind}
+                  >
+                    Unbind WhatsApp
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Button
+                    type="primary"
+                    block
+                    loading={waPairLoading}
+                    onClick={handleWhatsappPair}
+                  >
+                    Get Pair Code
+                  </Button>
+                  <Button
+                    style={{ marginTop: 8 }}
+                    block
+                    onClick={async () => {
+                      setWaPairLoading(true);
+                      setWaQrImage("");
+                      try {
+                        const data = await api.getWhatsappQrcode();
+                        if (data.qr_image) {
+                          setWaQrImage(data.qr_image);
+                          setWaPairStatus("waiting_qr");
+                        }
+                      } catch { /* ignore */ }
+                      setWaPairLoading(false);
+                    }}
+                  >
+                    Show QR Code
+                  </Button>
+                  {waPairCode && (
+                    <div style={{ textAlign: "center", marginTop: 12, padding: "16px", background: "rgba(0,0,0,0.05)", borderRadius: 8 }}>
+                      <div style={{ fontSize: 24, fontWeight: "bold", letterSpacing: 4 }}>{waPairCode}</div>
+                      <div style={{ marginTop: 8, fontSize: 12, opacity: 0.6 }}>
+                        WhatsApp &rarr; Settings &rarr; Linked Devices &rarr; Link with phone number
+                      </div>
+                    </div>
+                  )}
+                  {waQrImage && (
+                    <div style={{ textAlign: "center", marginTop: 12 }}>
+                      <img
+                        src={`data:image/png;base64,${waQrImage}`}
+                        alt="WhatsApp QR Code"
+                        style={{ width: 200, height: 200 }}
+                      />
+                      <div style={{ marginTop: 8, fontSize: 12, opacity: 0.6 }}>
+                        Scan with WhatsApp camera
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+              {waLinked && (
+                <Button
+                  danger
+                  block
+                  style={{ marginTop: 8 }}
+                  onClick={async () => {
+                    await api.unbindWhatsapp();
+                    setWaLinked(false);
+                    setWaPairCode("");
+                    setWaQrImage("");
+                    setWaPairStatus("idle");
+                    message.success("WhatsApp unlinked");
+                  }}
+                >
+                  Unlink Device
+                </Button>
+              )}
+            </Form.Item>
+            <ConfigProvider prefixCls="ant">
+              <Alert
+                type="info"
+                showIcon
+                message="WhatsApp Channel uses QR code login. Session will be saved in auth_dir."
+                style={{ marginBottom: 16 }}
+              />
+            </ConfigProvider>
+            <Form.Item
+              name="auth_dir"
+              label="Auth Directory"
+              tooltip="Directory to store WhatsApp session credentials"
+              initialValue="~/.copaw/credentials/whatsapp/default"
+            >
+              <Input placeholder="~/.copaw/credentials/whatsapp/default" />
+            </Form.Item>
+            <Form.Item
+              name="send_read_receipts"
+              label="Send Read Receipts"
+              valuePropName="checked"
+              initialValue={true}
+            >
+              <Switch defaultChecked />
+            </Form.Item>
+            <Form.Item
+              name="text_chunk_limit"
+              label="Text Chunk Limit"
+              tooltip="Maximum characters per message chunk"
+              initialValue={4096}
+            >
+              <InputNumber min={256} max={8192} step={256} style={{ width: "100%" }} />
+            </Form.Item>
+            <Form.Item
+              name="media_max_mb"
+              label="Media Max Size (MB)"
+              tooltip="Maximum media file size in MB"
+              initialValue={50}
+            >
+              <InputNumber min={1} max={100} step={1} style={{ width: "100%" }} />
+            </Form.Item>
+            <Form.Item name="self_chat_mode" label="Self Chat Mode" valuePropName="checked" tooltip="Process own messages">
+              <Switch />
+            </Form.Item>
+            <Form.Item name="groups" label="Group Allowlist" tooltip="WhatsApp group JIDs" initialValue={[]}>
+              <Select mode="tags" placeholder="120363421135228220@g.us" tokenSeparators={[","," ","\n"]} />
+            </Form.Item>
+            <Form.Item name="group_allow_from" label="Group Allow From" tooltip='Who can trigger bot in groups. ["*"] = everyone.' initialValue={[]}>
+              <Select mode="tags" placeholder="* (everyone)" tokenSeparators={[","," "]} />
+            </Form.Item>
+            <Form.Item name="filter_thinking" label="Filter Thinking" valuePropName="checked" tooltip="Hide reasoning/thinking blocks from replies">
+              <Switch />
+            </Form.Item>
+          </>
+        );
+
+
+      case "signal":
+        return (
+          <>
+            <Form.Item name="account" label="Account" tooltip="Bot phone number (E.164)" rules={[{ required: true }]}>
+              <Input placeholder="+85298349370" />
+            </Form.Item>
+            <Form.Item name="http_url" label="Bridge URL" tooltip="signal-cli bridge URL">
+              <Input placeholder="http://127.0.0.1:8082" />
+            </Form.Item>
+            <Form.Item name="http_port" label="Bridge Port" initialValue={8082}>
+              <InputNumber min={1} max={65535} style={{ width: "100%" }} />
+            </Form.Item>
+            <Form.Item name="auto_start" label="Auto Start Daemon" valuePropName="checked">
+              <Switch />
+            </Form.Item>
+            <Form.Item name="send_read_receipts" label="Read Receipts" valuePropName="checked" initialValue={true}>
+              <Switch defaultChecked />
+            </Form.Item>
+            <Form.Item name="text_chunk_limit" label="Chunk Limit" initialValue={4000}>
+              <InputNumber min={256} max={8192} step={256} style={{ width: "100%" }} />
+            </Form.Item>
+            <Form.Item name="media_max_mb" label="Media Max (MB)" initialValue={8}>
+              <InputNumber min={1} max={100} style={{ width: "100%" }} />
+            </Form.Item>
+            <Form.Item name="groups" label="Group Allowlist" tooltip="Signal group IDs (base64)" initialValue={[]}>
+              <Select mode="tags" placeholder="sBlO8LhzR42X...=" tokenSeparators={[","," ","\n"]} />
+            </Form.Item>
+            <Form.Item name="group_allow_from" label="Group Allow From" tooltip='Who can trigger bot in groups. ["*"] = everyone.' initialValue={[]}>
+              <Select mode="tags" placeholder="* (everyone)" tokenSeparators={[","," "]} />
+            </Form.Item>
+            <Form.Item name="filter_thinking" label="Filter Thinking" valuePropName="checked" tooltip="Hide reasoning/thinking blocks from replies">
+              <Switch />
             </Form.Item>
           </>
         );
