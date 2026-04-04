@@ -395,7 +395,7 @@ class SignalChannel(BaseChannel):
         workspace_dir: Path | None = None,
         **kwargs,
     ) -> "SignalChannel":
-        c = config if isinstance(config, dict) else config.model_dump()
+        c = config if isinstance(config, dict) else (config.model_dump() if hasattr(config, "model_dump") else vars(config))
         return cls(
             process=process,
             enabled=bool(c.get("enabled", False)),
