@@ -398,14 +398,25 @@ class WhatsAppChannel(BaseChannel):
             # Access control (sync checks: group allowlist, mention)
             if not self._check_access(is_group, chat_str, sender_str, sender_jid, client, msg, body):
                 # For group messages without mention, still record in history buffer
-                if is_group and body:
+                # Including media (download if present)
+                if is_group and (body or content_parts):
                     resolved = self._lid_cache.get(sender_str, {})
                     sender_label = f"+{resolved.get('phone', '')}" if resolved.get('phone') else sender_str
+                    # Collect media paths from content_parts
+                    media_paths = []
+                    for part in content_parts:
+                        if hasattr(part, "image_url") and part.image_url:
+                            media_paths.append(part.image_url)
+                        elif hasattr(part, "data") and part.data:
+                            media_paths.append(part.data)
+                        elif hasattr(part, "file_url") and part.file_url:
+                            media_paths.append(part.file_url)
                     history = self._group_history.setdefault(chat_str, [])
                     history.append({
                         "sender": sender_label,
-                        "body": body,
+                        "body": body or "[media]",
                         "ts": timestamp,
+                        "media": media_paths,
                     })
                     # Trim to limit
                     if len(history) > self._group_history_limit:
@@ -445,12 +456,19 @@ class WhatsAppChannel(BaseChannel):
                 history = self._group_history.get(chat_str, [])
                 if history:
                     ctx_lines = []
-                    for h in history[-10:]:  # Last 10 messages for context
+                    media_to_add = []
+                    for h in history[-10:]:
                         ctx_lines.append(f"[{h['sender']}]: {h['body']}")
+                        # Collect media from history entries
+                        for mp in h.get("media", []):
+                            if os.path.isfile(mp):
+                                media_to_add.append(mp)
                     if ctx_lines:
                         ctx_text = "[Recent group context (not directed at you)]:\n" + "\n".join(ctx_lines)
                         content_parts.insert(0, TextContent(type=ContentType.TEXT, text=ctx_text))
-                    # Clear history after providing context
+                    # Add media from history as ImageContent
+                    for mp in media_to_add[-3:]:  # Max 3 recent images
+                        content_parts.append(ImageContent(type=ContentType.IMAGE, image_url=mp))
                     self._group_history[chat_str] = []
 
             # Build request - use resolved phone number for sender identity
