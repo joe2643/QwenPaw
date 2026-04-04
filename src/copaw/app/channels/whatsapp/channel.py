@@ -712,32 +712,65 @@ class WhatsAppChannel(BaseChannel):
         part: OutgoingContentPart,
         meta: Optional[dict] = None,
     ) -> None:
+        """Send media (image/video/audio/file) to WhatsApp."""
         if not self.enabled or not self._client or not self._connected:
             return
         meta = meta or {}
         chat_jid_str = meta.get("chat_jid") or to_handle
         jid = _str_to_jid(chat_jid_str)
 
-        t = getattr(part, "type", None)
-        file_path = None
-        if t == ContentType.IMAGE:
-            file_path = getattr(part, "image_url", None)
-        elif t == ContentType.FILE:
-            file_path = getattr(part, "file_url", None)
-        elif t == ContentType.AUDIO:
-            file_path = getattr(part, "data", None)
+        part_type = getattr(part, "type", None)
+        
+        # Resolve file path from content part
+        raw_path = None
+        if part_type == ContentType.IMAGE:
+            raw_path = getattr(part, "image_url", None)
+        elif part_type == ContentType.VIDEO:
+            raw_path = getattr(part, "video_url", None)
+        elif part_type == ContentType.FILE:
+            raw_path = getattr(part, "file_url", None) or getattr(part, "file_id", None)
+        elif part_type == ContentType.AUDIO:
+            raw_path = getattr(part, "data", None)
 
-        if file_path and os.path.isfile(file_path):
-            try:
-                if t == ContentType.IMAGE:
-                    await self._client.send_image(jid, file_path)
-                elif t == ContentType.AUDIO:
-                    await self._client.send_audio(jid, file_path, ptt=True)
-                else:
-                    await self._client.send_document(jid, file_path)
-                logger.info("whatsapp: sent media %s", file_path)
-            except Exception as e:
-                logger.warning("whatsapp: media send failed: %s", e)
+        if not raw_path:
+            return
+
+        # Handle file:// URLs
+        if isinstance(raw_path, str) and raw_path.startswith("file://"):
+            raw_path = raw_path.replace("file://", "")
+
+        # Resolve and validate path
+        file_path = Path(raw_path).expanduser().resolve() if isinstance(raw_path, str) else None
+        if not file_path or not file_path.exists():
+            logger.warning("whatsapp: media file not found: %s", raw_path)
+            await self.send(to_handle, f"[Media file not found: {Path(raw_path).name if raw_path else 'unknown'}]", meta)
+            return
+
+        # Check file size (WhatsApp limit ~64MB for most media, 16MB for images)
+        file_size = file_path.stat().st_size
+        max_size = 16 * 1024 * 1024 if part_type == ContentType.IMAGE else 64 * 1024 * 1024
+        if file_size > max_size:
+            size_mb = file_size / (1024 * 1024)
+            limit_mb = max_size / (1024 * 1024)
+            logger.warning("whatsapp: file too large: %s (%.1fMB > %dMB)", file_path.name, size_mb, limit_mb)
+            await self.send(to_handle, f"[File too large: {file_path.name} ({size_mb:.1f}MB, limit {limit_mb:.0f}MB)]", meta)
+            return
+
+        try:
+            str_path = str(file_path)
+            if part_type == ContentType.IMAGE:
+                await self._client.send_image(jid, str_path)
+            elif part_type == ContentType.VIDEO:
+                await self._client.send_video(jid, str_path)
+            elif part_type == ContentType.AUDIO:
+                ptt = str_path.endswith(".ogg") or str_path.endswith(".opus")
+                await self._client.send_audio(jid, str_path, ptt=ptt)
+            else:
+                await self._client.send_document(jid, str_path)
+            logger.info("whatsapp: sent %s (%s)", part_type, file_path.name)
+        except Exception as e:
+            logger.warning("whatsapp: media send failed (%s): %s", file_path.name, e)
+            await self.send(to_handle, f"[Failed to send {file_path.name}: {e}]", meta)
 
     # ── Text chunking ─────────────────────────────────────────────────
 
