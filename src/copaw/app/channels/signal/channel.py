@@ -26,6 +26,7 @@ from typing import Any, Optional, Dict, List, Union
 from agentscope_runtime.engine.schemas.agent_schemas import (
     TextContent,
     ImageContent,
+    VideoContent,
     AudioContent,
     FileContent,
     ContentType,
@@ -474,9 +475,16 @@ class SignalChannel(BaseChannel):
                 if self.require_mention:
                     if not self._is_bot_mentioned(data_message, body):
                         # Record in group history buffer
-                        if body:
+                        if body or content_parts:
+                            media_paths = []
+                            for p in content_parts:
+                                for attr in ("image_url", "video_url", "data", "file_url"):
+                                    v = getattr(p, attr, None)
+                                    if v:
+                                        media_paths.append(v)
+                                        break
                             history = self._group_history.setdefault(group_id, [])
-                            history.append({"sender": source or source_uuid[:12], "body": body, "ts": timestamp})
+                            history.append({"sender": source or source_uuid[:12], "body": body or "[media]", "ts": timestamp, "media": media_paths})
                             if len(history) > self._group_history_limit:
                                 self._group_history[group_id] = history[-self._group_history_limit:]
                         return
@@ -511,25 +519,42 @@ class SignalChannel(BaseChannel):
             for att in attachments_raw:
                 att_id = att.get("id") or ""
                 content_type = att.get("contentType") or ""
-                if att_id and content_type.startswith("image/"):
-                    local = await self.daemon.download_attachment(att_id, self._media_dir)
-                    if local:
-                        content_parts.append(ImageContent(
-                            type=ContentType.IMAGE,
-                            image_url=str(local),
-                        ))
-                elif att_id:
-                    local = await self.daemon.download_attachment(att_id, self._media_dir)
-                    if local:
-                        content_parts.append(FileContent(
-                            type=ContentType.FILE,
-                            file_url=str(local),
-                        ))
+                if not att_id:
+                    continue
+                local = await self.daemon.download_attachment(att_id, self._media_dir)
+                if not local:
+                    continue
+                if content_type.startswith("image/"):
+                    content_parts.append(ImageContent(type=ContentType.IMAGE, image_url=str(local)))
+                elif content_type.startswith("video/"):
+                    content_parts.append(VideoContent(type=ContentType.VIDEO, video_url=str(local)))
+                elif content_type.startswith("audio/"):
+                    content_parts.append(AudioContent(type=ContentType.AUDIO, data=str(local)))
+                else:
+                    content_parts.append(FileContent(type=ContentType.FILE, file_url=str(local)))
 
             if not content_parts:
                 return
 
             # ── Build request and enqueue ─────────────────────────────
+            # Inject group history context when mentioned
+            if group_id and group_id in self._group_history:
+                history = self._group_history.get(group_id, [])
+                if history:
+                    ctx_lines = []
+                    media_to_add = []
+                    for h in history[-10:]:
+                        ctx_lines.append(f"  {h['sender']}: {h['body']}")
+                        for mp in h.get("media", []):
+                            if os.path.isfile(mp):
+                                media_to_add.append(mp)
+                    if ctx_lines:
+                        ctx_text = "--- Recent group messages (context only, not directed at you) ---\n" + "\n".join(ctx_lines)
+                        content_parts.insert(0, TextContent(type=ContentType.TEXT, text=ctx_text))
+                    for mp in media_to_add[-3:]:
+                        content_parts.append(ImageContent(type=ContentType.IMAGE, image_url=mp))
+                    self._group_history[group_id] = []
+
             channel_meta = {
                 "platform": "signal",
                 "account": self._account,
@@ -685,16 +710,21 @@ class SignalChannel(BaseChannel):
         if is_group and group_id:
             to_handle = group_id
 
-        file_path = None
         t = getattr(part, "type", None)
+        raw_path = None
         if t == ContentType.IMAGE:
-            file_path = getattr(part, "image_url", None)
+            raw_path = getattr(part, "image_url", None)
+        elif t == ContentType.VIDEO:
+            raw_path = getattr(part, "video_url", None)
         elif t == ContentType.FILE:
-            file_path = getattr(part, "file_url", None) or getattr(part, "file_id", None)
+            raw_path = getattr(part, "file_url", None) or getattr(part, "file_id", None)
         elif t == ContentType.AUDIO:
-            file_path = getattr(part, "data", None)
+            raw_path = getattr(part, "data", None)
 
         logger.info("signal: send_media file_path=%s exists=%s", file_path, os.path.isfile(file_path) if file_path else False)
+        if not raw_path:
+            return
+        file_path = raw_path.replace("file://", "") if isinstance(raw_path, str) and raw_path.startswith("file://") else raw_path
         if file_path and os.path.isfile(file_path):
             await self.daemon.send_message(
                 to_handle, "", is_group=is_group, attachments=[file_path],
