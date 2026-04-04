@@ -140,6 +140,8 @@ class WhatsAppChannel(BaseChannel):
         self._connect_task = None
         self._my_jid = None
         self._bot_phone = ""
+        self._group_history: Dict[str, list] = {}
+        self._group_history_limit = 50
         self._bot_lid = ""
 
         if self.enabled and not NEONIZE_AVAILABLE:
@@ -419,7 +421,22 @@ class WhatsAppChannel(BaseChannel):
                     if not allowed:
                         logger.warning("whatsapp: blocked - sender=%s phone=%s allow_from=%s",
                                       sender_str, resolved_phone or sender_phone, self.allow_from)
-                        return
+                        # Record in group history even when blocked
+                    if is_group and (body or content_parts):
+                        resolved = self._lid_cache.get(sender_str, {})
+                        sender_label = f"+{resolved.get('phone', '')}" if resolved.get('phone') else sender_str
+                        media_paths = []
+                        for p in content_parts:
+                            for attr in ("image_url", "video_url", "data", "file_url"):
+                                v = getattr(p, attr, None)
+                                if v:
+                                    media_paths.append(v)
+                                    break
+                        history = self._group_history.setdefault(chat_str, [])
+                        history.append({"sender": sender_label, "body": body or "[media]", "ts": timestamp, "media": media_paths})
+                        if len(history) > self._group_history_limit:
+                            self._group_history[chat_str] = history[-self._group_history_limit:]
+                    return
 
             # Resolve sender for display
             if sender_str.endswith("@lid"):
@@ -430,6 +447,24 @@ class WhatsAppChannel(BaseChannel):
                         display_sender[:30],
                         f" (group {chat_str[:20]})" if is_group else "",
                         body[:80] if body else "[media]")
+
+            # Inject group history context
+            if is_group and chat_str in self._group_history:
+                history = self._group_history.get(chat_str, [])
+                if history:
+                    ctx_lines = []
+                    media_to_add = []
+                    for i, h in enumerate(history[-10:]):
+                        ctx_lines.append(f"[{i+1}] {h['sender']}: {h['body']}")
+                        for mp in h.get("media", []):
+                            if os.path.isfile(mp):
+                                media_to_add.append(mp)
+                    if ctx_lines:
+                        ctx_text = "=== Recent group chat history (for context only \u2014 you were not mentioned in these) ===\n" + "\n".join(ctx_lines)
+                        content_parts.insert(0, TextContent(type=ContentType.TEXT, text=ctx_text))
+                    for mp in media_to_add[-3:]:
+                        content_parts.append(ImageContent(type=ContentType.IMAGE, image_url=mp))
+                    self._group_history[chat_str] = []
 
             # Build request - use resolved phone number for sender identity
             resolved = self._lid_cache.get(sender_str, {})
@@ -447,7 +482,7 @@ class WhatsAppChannel(BaseChannel):
                     if hasattr(part, "type") and part.type == ContentType.TEXT:
                         txt = part.text or ""
                         # Don't prepend [From] to history context blocks
-                        if txt.startswith("---"):
+                        if txt.startswith("==="):
                             continue
                         content_parts[i] = TextContent(
                             type=ContentType.TEXT,

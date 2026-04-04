@@ -445,6 +445,7 @@ class SignalChannel(BaseChannel):
             envelope = event.get("envelope", event)
             source = envelope.get("sourceNumber") or envelope.get("source") or ""
             source_uuid = envelope.get("sourceUuid") or ""
+            source_name = envelope.get("sourceName") or envelope.get("profileName") or ""
             timestamp = envelope.get("timestamp", 0)
 
             # Handle reactions
@@ -485,7 +486,10 @@ class SignalChannel(BaseChannel):
                                     media_paths.append(f"signal-att:{att_id}")
                             logger.warning("signal: RECORDING history for group %s (body=%s)", group_id[:20] if group_id else "?", (body or "[media]")[:30])
                             history = self._group_history.setdefault(group_id, [])
-                            history.append({"sender": source or source_uuid[:12], "body": body or "[media]", "ts": timestamp, "media": media_paths})
+                            sender_label = source_name or source or source_uuid[:12]
+                            if source and source_name:
+                                sender_label = f"{source_name} ({source})"
+                            history.append({"sender": sender_label, "body": body or "[media]", "ts": timestamp, "media": media_paths})
                             if len(history) > self._group_history_limit:
                                 self._group_history[group_id] = history[-self._group_history_limit:]
                         return
@@ -548,13 +552,13 @@ class SignalChannel(BaseChannel):
                 if history:
                     ctx_lines = []
                     media_to_add = []
-                    for h in history[-10:]:
-                        ctx_lines.append(f"  {h['sender']}: {h['body']}")
+                    for i, h in enumerate(history[-10:]):
+                        ctx_lines.append(f"[{i+1}] {h['sender']}: {h['body']}")
                         for mp in h.get("media", []):
                             if os.path.isfile(mp):
                                 media_to_add.append(mp)
                     if ctx_lines:
-                        ctx_text = "--- Recent group messages (context only, not directed at you) ---\n" + "\n".join(ctx_lines)
+                        ctx_text = "=== Recent group chat history (for context only — you were not mentioned in these) ===\n" + "\n".join(ctx_lines)
                         content_parts.insert(0, TextContent(type=ContentType.TEXT, text=ctx_text))
                     for mp in media_to_add[-3:]:
                         content_parts.append(ImageContent(type=ContentType.IMAGE, image_url=mp))
