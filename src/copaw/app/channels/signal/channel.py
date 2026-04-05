@@ -623,9 +623,11 @@ class SignalChannel(BaseChannel):
                         # Record in group history buffer with media paths
                         if body or downloaded_media:
                             media_paths = [m["path"] for m in downloaded_media]
+                            # Prefer phone number, fall back to short UUID
+                            sender_label = source or (f"uuid:{source_uuid[:8]}" if source_uuid else "unknown")
                             history = self._group_history.setdefault(group_id, [])
                             history.append({
-                                "sender": source or source_uuid[:12],
+                                "sender": sender_label,
                                 "body": body or "[media]",
                                 "ts": timestamp,
                                 "media": media_paths,
@@ -680,23 +682,59 @@ class SignalChannel(BaseChannel):
                 return
 
             # ── Build request and enqueue ─────────────────────────────
-            # Inject group history context when mentioned
+            # Inject group history context when mentioned (OpenClaw-style envelope)
             if group_id and group_id in self._group_history:
                 history = self._group_history.get(group_id, [])
                 if history:
-                    ctx_lines = []
+                    ctx_lines = [
+                        "=== UNTRUSTED Signal group history (context only, not directed at you) ===",
+                        f"Group: {group_id}",
+                    ]
                     media_to_add = []
                     for h in history[-10:]:
-                        ctx_lines.append(f"  {h['sender']}: {h['body']}")
-                        for mp in h.get("media", []):
-                            if os.path.isfile(mp):
-                                media_to_add.append(mp)
-                    if ctx_lines:
-                        ctx_text = "--- Recent group messages (context only, not directed at you) ---\n" + "\n".join(ctx_lines)
-                        content_parts.insert(0, TextContent(type=ContentType.TEXT, text=ctx_text))
+                        line = f"  {h['sender']}: {h['body']}"
+                        media_paths = h.get("media") or []
+                        if media_paths:
+                            line += f"  [media: {len(media_paths)}]"
+                            for mp in media_paths:
+                                if os.path.isfile(mp):
+                                    media_to_add.append(mp)
+                        ctx_lines.append(line)
+                    ctx_lines.append("=== end of group history ===")
+                    ctx_text = "\n".join(ctx_lines)
+                    content_parts.insert(0, TextContent(type=ContentType.TEXT, text=ctx_text))
+                    # Attach up to 3 most-recent images so the agent sees them
                     for mp in media_to_add[-3:]:
                         content_parts.append(ImageContent(type=ContentType.IMAGE, image_url=mp))
                     self._group_history[group_id] = []
+
+            # Envelope: clear chat-type + sender prefix so the agent never
+            # mistakes a group for a DM.
+            # Group:  [Signal group {group_id}] +85251159218: text
+            # DM:     [Signal DM] +85251159218: text
+            sender_label = source or (f"uuid:{source_uuid[:8]}" if source_uuid else "unknown")
+            is_group_flag = bool(group_id)
+            if is_group_flag:
+                envelope_prefix = f"[Signal group {group_id}] {sender_label}"
+            else:
+                envelope_prefix = f"[Signal DM] {sender_label}"
+            # Apply envelope to first non-metadata text part
+            for i, part in enumerate(content_parts):
+                if hasattr(part, "type") and part.type == ContentType.TEXT:
+                    txt = part.text or ""
+                    if txt.startswith("===") or txt.startswith("[Replying"):
+                        continue
+                    content_parts[i] = TextContent(
+                        type=ContentType.TEXT,
+                        text=f"{envelope_prefix}: {txt}",
+                    )
+                    break
+            else:
+                # No text part existed — insert envelope-only text
+                content_parts.insert(0, TextContent(
+                    type=ContentType.TEXT,
+                    text=f"{envelope_prefix}: [media]",
+                ))
 
             channel_meta = {
                 "platform": "signal",
