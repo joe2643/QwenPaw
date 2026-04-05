@@ -203,28 +203,18 @@ class WeixinConfig(BaseChannelConfig):
 
 
 class WhatsAppConfig(BaseChannelConfig):
-    """WhatsApp channel config (neonize backend).
-
-    auth_dir:           Directory for neonize session database.
-    send_read_receipts: Send read receipts to senders.
-    self_chat_mode:     Treat messages from own number as commands.
-    """
+    """WhatsApp channel config (neonize backend)."""
 
     auth_dir: str = ""
     send_read_receipts: bool = True
     self_chat_mode: bool = False
+    text_chunk_limit: int = 4096
+    groups: List[str] = Field(default_factory=list)
+    group_allow_from: List[str] = Field(default_factory=list)
 
 
 class SignalConfig(BaseChannelConfig):
-    """Signal channel config (signal-cli REST daemon).
-
-    account:    Phone number registered with signal-cli.
-    http_url:   Full URL of signal-cli REST API (overrides host/port).
-    http_host:  Host of signal-cli REST API.
-    http_port:  Port of signal-cli REST API.
-    auto_start: Automatically start signal-cli daemon.
-    send_read_receipts: Send read receipts.
-    """
+    """Signal channel config (signal-cli REST daemon)."""
 
     account: str = ""
     http_url: str = ""
@@ -232,6 +222,9 @@ class SignalConfig(BaseChannelConfig):
     http_port: int = 8080
     auto_start: bool = False
     send_read_receipts: bool = True
+    text_chunk_limit: int = 4000
+    groups: List[str] = Field(default_factory=list)
+    group_allow_from: List[str] = Field(default_factory=list)
 
 
 class ChannelConfig(BaseModel):
