@@ -719,9 +719,15 @@ class SignalChannel(BaseChannel):
             if not content_parts:
                 return
 
+            # Strip bot self-mention from body so slash commands are
+            # recognised even when prefixed with "@+bot_phone /stop".
+            body = self._strip_bot_self_mention(body)
+            has_bot_command = bool(body and body.lstrip().startswith("/"))
+
             # ── Build request and enqueue ─────────────────────────────
             # Inject group history context when mentioned (OpenClaw-style envelope)
-            if group_id and group_id in self._group_history:
+            # Skip for slash commands — they bypass the agent.
+            if not has_bot_command and group_id and group_id in self._group_history:
                 history = self._group_history.get(group_id, [])
                 if history:
                     ctx_lines = [
@@ -756,16 +762,30 @@ class SignalChannel(BaseChannel):
                 envelope_prefix = f"[Signal group {group_id}] {sender_label}"
             else:
                 envelope_prefix = f"[Signal DM] {sender_label}"
-            # Apply envelope to first non-metadata text part
+            # Apply envelope to first non-metadata text part.
+            # For slash commands, strip bot mention from the text so the
+            # command registry sees "/stop" etc. at the front of the query.
             for i, part in enumerate(content_parts):
                 if hasattr(part, "type") and part.type == ContentType.TEXT:
                     txt = part.text or ""
                     if txt.startswith("===") or txt.startswith("[Replying"):
                         continue
-                    content_parts[i] = TextContent(
-                        type=ContentType.TEXT,
-                        text=f"{envelope_prefix}: {txt}",
-                    )
+                    # Strip bot self-mention from the visible text too
+                    txt = self._strip_bot_self_mention(txt)
+                    if has_bot_command:
+                        # Leave the command text raw so base's
+                        # _extract_query_from_payload picks up "/stop"
+                        # as the query. Envelope info is lost for the
+                        # command turn — that's fine; commands bypass
+                        # the agent anyway.
+                        content_parts[i] = TextContent(
+                            type=ContentType.TEXT, text=txt,
+                        )
+                    else:
+                        content_parts[i] = TextContent(
+                            type=ContentType.TEXT,
+                            text=f"{envelope_prefix}: {txt}",
+                        )
                     break
             else:
                 # No text part existed — insert envelope-only text
@@ -778,7 +798,8 @@ class SignalChannel(BaseChannel):
             # number and the mention syntax to tag other users in replies).
             # Only emit in groups — in DMs the user already knows they're
             # talking to the bot and mentions serve no purpose.
-            if is_group_flag:
+            # Skip for slash commands (they bypass the agent entirely).
+            if is_group_flag and not has_bot_command:
                 bot_id = self._account or (f"uuid:{self._account_uuid[:8]}" if self._account_uuid else "")
                 hint_line = (
                     f"[Signal bot {bot_id}. "
@@ -799,6 +820,8 @@ class SignalChannel(BaseChannel):
                 # For outbound quote-reply
                 "quote_timestamp": timestamp,
                 "quote_author": source or source_uuid,
+                "has_bot_command": has_bot_command,
+                "bot_mentioned": True,  # we only reach here past mention gate
             }
             session_id = self.resolve_session_id(source or source_uuid, channel_meta)
             # For groups: use group_id as sender_id so all members share one session
@@ -901,6 +924,40 @@ class SignalChannel(BaseChannel):
             self._sender_names[source] = name
         if source_uuid:
             self._sender_names[source_uuid] = name
+
+    def _strip_bot_self_mention(self, text: str) -> str:
+        """Remove this bot's own @mention from outbound-addressed text.
+
+        Users writing '@+85298349370 /stop' or '@uuid:447e962a /stop' should
+        get '/stop' so the command registry picks it up. Handles:
+          - @+85298349370 / @85298349370
+          - @uuid:447e962a / @447e962a-1f09-...
+          - @Name (+85298349370) / @Name (uuid:447e962a)   (round-trip form)
+        """
+        if not text:
+            return text
+        ids = []
+        if self._account:
+            ids.append(_re.escape(self._account.lstrip("+")))
+        if self._account_uuid:
+            ids.append(_re.escape(self._account_uuid))
+            ids.append(_re.escape(self._account_uuid[:8]))
+        if not ids:
+            return text
+        id_alt = "|".join(ids)
+        id_core = rf"(?:\+?(?:{id_alt})|uuid:(?:{id_alt}))"
+        # Try each form in sequence; stop at first match at head of string.
+        patterns = [
+            # @Name (+phone) / @Name (uuid:xxxxxxxx)
+            _re.compile(rf"^\s*@[^\s()]+\s*\({id_core}\)\s*"),
+            # @+phone / @uuid:xxx
+            _re.compile(rf"^\s*@{id_core}\s*"),
+        ]
+        for pat in patterns:
+            m = pat.match(text)
+            if m:
+                return text[m.end():].lstrip()
+        return text
 
     def _format_sender_display(self, source: str, source_uuid: str) -> str:
         """Build a human-friendly sender label: 'Name (+phone)' / 'Name (uuid:xxx)' / fallback."""

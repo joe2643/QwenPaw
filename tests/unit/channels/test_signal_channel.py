@@ -1679,6 +1679,64 @@ class TestSignalDaemonSendMediaPayload:
         assert ch._ack_reaction_thinking == ""
         assert ch._ack_reaction_done == "✅"
 
+    def test_strip_bot_self_mention_phone_with_plus(self):
+        ch = _make_channel(account="+85298349370")
+        assert ch._strip_bot_self_mention("@+85298349370 /stop") == "/stop"
+
+    def test_strip_bot_self_mention_phone_no_plus(self):
+        ch = _make_channel(account="+85298349370")
+        assert ch._strip_bot_self_mention("@85298349370 /stop") == "/stop"
+
+    def test_strip_bot_self_mention_uuid_short(self):
+        ch = _make_channel(
+            account="+85298349370",
+            account_uuid="447e962a-1f09-4a21-aef6-79617d8e8ad0",
+        )
+        assert ch._strip_bot_self_mention("@uuid:447e962a /stop") == "/stop"
+
+    def test_strip_bot_self_mention_uuid_full(self):
+        ch = _make_channel(
+            account="+85298349370",
+            account_uuid="447e962a-1f09-4a21-aef6-79617d8e8ad0",
+        )
+        assert (
+            ch._strip_bot_self_mention("@447e962a-1f09-4a21-aef6-79617d8e8ad0 /stop")
+            == "/stop"
+        )
+
+    def test_strip_bot_self_mention_name_plus_phone(self):
+        ch = _make_channel(account="+85298349370")
+        assert ch._strip_bot_self_mention("@Yukei (+85298349370) /stop") == "/stop"
+
+    def test_strip_bot_self_mention_name_plus_uuid(self):
+        ch = _make_channel(
+            account="+85298349370",
+            account_uuid="447e962a-1f09-4a21-aef6-79617d8e8ad0",
+        )
+        assert ch._strip_bot_self_mention("@Yukei (uuid:447e962a) /stop") == "/stop"
+
+    def test_strip_bot_self_mention_different_number_not_stripped(self):
+        ch = _make_channel(account="+85298349370")
+        text = "@+85211111111 /stop"
+        assert ch._strip_bot_self_mention(text) == text
+
+    def test_strip_bot_self_mention_no_mention_unchanged(self):
+        ch = _make_channel(account="+85298349370")
+        assert ch._strip_bot_self_mention("/stop") == "/stop"
+        assert ch._strip_bot_self_mention("no @ at all") == "no @ at all"
+
+    def test_strip_bot_self_mention_empty(self):
+        ch = _make_channel(account="+85298349370")
+        assert ch._strip_bot_self_mention("") == ""
+        assert ch._strip_bot_self_mention(None) is None
+
+    def test_strip_bot_self_mention_preserves_trailing_args(self):
+        ch = _make_channel(account="+85298349370")
+        assert (
+            ch._strip_bot_self_mention("@+85298349370 /new some arg here")
+            == "/new some arg here"
+        )
+
     async def test_missing_file_skipped(self, tmp_path):
         """Non-existent attachment logged + dropped, message still sent."""
         d = SignalDaemon(account="+85200000000", http_url="http://localhost:8080")
