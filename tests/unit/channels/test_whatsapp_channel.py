@@ -1083,3 +1083,15 @@ class TestAckReactions:
         ch = _make_channel(ack_reaction_thinking="", ack_reaction_done="")
         assert ch._ack_reaction_thinking == ""
         assert ch._ack_reaction_done == ""
+
+    def test_error_reaction_configurable(self):
+        ch = _make_channel(ack_reaction_error="💥")
+        assert ch._ack_reaction_error == "💥"
+
+    def test_error_reaction_default(self):
+        ch = _make_channel()
+        assert ch._ack_reaction_error == "⚠️"
+
+    def test_error_reaction_can_be_disabled(self):
+        ch = _make_channel(ack_reaction_error="")
+        assert ch._ack_reaction_error == ""

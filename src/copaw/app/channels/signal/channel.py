@@ -502,6 +502,7 @@ class SignalChannel(BaseChannel):
         text_chunk_limit: int = SIGNAL_MAX_TEXT_LENGTH,
         ack_reaction_thinking: str = "🤔",
         ack_reaction_done: str = "👀",
+        ack_reaction_error: str = "⚠️",
         **kwargs,
     ):
         super().__init__(
@@ -522,6 +523,7 @@ class SignalChannel(BaseChannel):
         self._text_chunk_limit = text_chunk_limit
         self._ack_reaction_thinking = ack_reaction_thinking or ""
         self._ack_reaction_done = ack_reaction_done or ""
+        self._ack_reaction_error = ack_reaction_error or ""
         self._groups: List[str] = kwargs.get("groups") or []
         self._group_allow_from: List[str] = kwargs.get("group_allow_from") or []
         self._account_uuid: str = kwargs.get("account_uuid") or ""
@@ -571,6 +573,7 @@ class SignalChannel(BaseChannel):
             text_chunk_limit=c.get("text_chunk_limit", SIGNAL_MAX_TEXT_LENGTH),
             ack_reaction_thinking=c.get("ack_reaction_thinking", "🤔"),
             ack_reaction_done=c.get("ack_reaction_done", "👀"),
+            ack_reaction_error=c.get("ack_reaction_error", "⚠️"),
             groups=c.get("groups") or [],
             group_allow_from=c.get("group_allow_from") or [],
             account_uuid=c.get("account_uuid") or c.get("accountUuid") or "",
@@ -1435,8 +1438,16 @@ class SignalChannel(BaseChannel):
                 args = self.get_on_reply_sent_args(request, to_handle)
                 self._on_reply_sent(self.channel, *args)
 
-            # Replace "thinking" with "done" reaction on the original message
-            if self._ack_reaction_done:
+            # Pick closing reaction:
+            # - done  when agent produced a reply
+            # - error when nothing was sent (silent crash / empty
+            #   response) — otherwise the 🤔 would hang forever.
+            produced_reply = message_completed or bool(text_parts)
+            ack_emoji = (
+                self._ack_reaction_done if produced_reply
+                else self._ack_reaction_error
+            )
+            if ack_emoji:
                 ack_target = send_meta.get("_ack_target")
                 ack_author = send_meta.get("_ack_author")
                 ack_ts = send_meta.get("_ack_timestamp")
@@ -1444,13 +1455,13 @@ class SignalChannel(BaseChannel):
                     try:
                         await self.daemon.send_reaction(
                             ack_target,
-                            self._ack_reaction_done,
+                            ack_emoji,
                             target_author=ack_author,
                             target_timestamp=int(ack_ts),
                             is_group=bool(send_meta.get("_typing_is_group")),
                         )
                     except Exception as e:
-                        logger.debug("signal: done reaction failed: %s", e)
+                        logger.debug("signal: close reaction failed: %s", e)
 
         except asyncio.CancelledError:
             if process_iterator:
@@ -1458,6 +1469,22 @@ class SignalChannel(BaseChannel):
             raise
         except Exception:
             logger.exception("signal: _stream_with_tracker failed")
+            # Flip thinking → error so user sees the request died
+            if self._ack_reaction_error:
+                ack_target = send_meta.get("_ack_target")
+                ack_author = send_meta.get("_ack_author")
+                ack_ts = send_meta.get("_ack_timestamp")
+                if ack_target and ack_author and ack_ts:
+                    try:
+                        await self.daemon.send_reaction(
+                            ack_target,
+                            self._ack_reaction_error,
+                            target_author=ack_author,
+                            target_timestamp=int(ack_ts),
+                            is_group=bool(send_meta.get("_typing_is_group")),
+                        )
+                    except Exception:
+                        pass
             raise
         finally:
             if typing_task and not typing_task.done():

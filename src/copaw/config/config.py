@@ -211,6 +211,9 @@ class WhatsAppConfig(BaseChannelConfig):
     text_chunk_limit: int = 4096
     groups: List[str] = Field(default_factory=list)
     group_allow_from: List[str] = Field(default_factory=list)
+    ack_reaction_thinking: str = "🤔"
+    ack_reaction_done: str = "👀"
+    ack_reaction_error: str = "⚠️"
 
 
 class SignalConfig(BaseChannelConfig):
@@ -227,6 +230,7 @@ class SignalConfig(BaseChannelConfig):
     group_allow_from: List[str] = Field(default_factory=list)
     ack_reaction_thinking: str = "🤔"
     ack_reaction_done: str = "👀"
+    ack_reaction_error: str = "⚠️"
 
 
 class ChannelConfig(BaseModel):

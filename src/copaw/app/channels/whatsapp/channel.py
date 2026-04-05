@@ -114,6 +114,7 @@ class WhatsAppChannel(BaseChannel):
         self_chat_mode: bool = False,
         ack_reaction_thinking: str = "🤔",
         ack_reaction_done: str = "👀",
+        ack_reaction_error: str = "⚠️",
         **kwargs,
     ):
         super().__init__(
@@ -135,6 +136,7 @@ class WhatsAppChannel(BaseChannel):
         self._self_chat_mode = self_chat_mode
         self._ack_reaction_thinking = ack_reaction_thinking or ""
         self._ack_reaction_done = ack_reaction_done or ""
+        self._ack_reaction_error = ack_reaction_error or ""
         self._groups: List[str] = kwargs.get("groups") or []
         self._group_allow_from: List[str] = kwargs.get("group_allow_from") or []
         self._media_dir = _MEDIA_DIR
@@ -191,6 +193,7 @@ class WhatsAppChannel(BaseChannel):
             self_chat_mode=c.get("self_chat_mode", False),
             ack_reaction_thinking=c.get("ack_reaction_thinking", "🤔"),
             ack_reaction_done=c.get("ack_reaction_done", "👀"),
+            ack_reaction_error=c.get("ack_reaction_error", "⚠️"),
             groups=c.get("groups") or [],
             group_allow_from=c.get("group_allow_from") or [],
         )
@@ -1184,8 +1187,17 @@ class WhatsAppChannel(BaseChannel):
                 args = self.get_on_reply_sent_args(request, to_handle)
                 self._on_reply_sent(self.channel, *args)
 
-            # Replace "thinking" with "done" reaction on the original message
-            if self._ack_reaction_done:
+            # Pick the right closing reaction:
+            # - done  when the agent actually produced some reply
+            # - error when nothing was sent (agent crashed silently or
+            #   produced no content) — user would otherwise see the
+            #   thinking emoji stuck forever.
+            produced_reply = message_completed or bool(text_parts)
+            ack_emoji = (
+                self._ack_reaction_done if produced_reply
+                else self._ack_reaction_error
+            )
+            if ack_emoji:
                 ack_chat = getattr(request, "_wa_ack_chat_jid", None)
                 ack_sender = getattr(request, "_wa_ack_sender_jid", None)
                 ack_msg_id = getattr(request, "_wa_ack_msg_id", None)
@@ -1193,7 +1205,7 @@ class WhatsAppChannel(BaseChannel):
                 if ack_chat and ack_sender and ack_msg_id and ack_client:
                     await self._send_reaction(
                         ack_client, ack_chat, ack_sender, ack_msg_id,
-                        self._ack_reaction_done,
+                        ack_emoji,
                     )
 
         except asyncio.CancelledError:
@@ -1202,6 +1214,20 @@ class WhatsAppChannel(BaseChannel):
             raise
         except Exception:
             logger.exception("whatsapp: _stream_with_tracker failed")
+            # Flip thinking → error so user knows the request died
+            if self._ack_reaction_error:
+                ack_chat = getattr(request, "_wa_ack_chat_jid", None)
+                ack_sender = getattr(request, "_wa_ack_sender_jid", None)
+                ack_msg_id = getattr(request, "_wa_ack_msg_id", None)
+                ack_client = getattr(request, "_wa_typing_client", None)
+                if ack_chat and ack_sender and ack_msg_id and ack_client:
+                    try:
+                        await self._send_reaction(
+                            ack_client, ack_chat, ack_sender, ack_msg_id,
+                            self._ack_reaction_error,
+                        )
+                    except Exception:
+                        pass
         finally:
             if typing_task and not typing_task.done():
                 typing_task.cancel()

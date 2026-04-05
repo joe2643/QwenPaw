@@ -1689,10 +1689,19 @@ class TestSignalDaemonSendMediaPayload:
         assert kwargs["is_group"] is False
 
     async def test_thinking_reaction_config_default(self):
-        """Defaults are 🤔 / 👀 unless overridden."""
+        """Defaults are 🤔 / 👀 / ⚠️ unless overridden."""
         ch = _make_channel()
         assert ch._ack_reaction_thinking == "🤔"
         assert ch._ack_reaction_done == "👀"
+        assert ch._ack_reaction_error == "⚠️"
+
+    async def test_error_reaction_configurable(self):
+        ch = _make_channel(ack_reaction_error="💥")
+        assert ch._ack_reaction_error == "💥"
+
+    async def test_error_reaction_can_be_disabled(self):
+        ch = _make_channel(ack_reaction_error="")
+        assert ch._ack_reaction_error == ""
 
     async def test_thinking_reaction_config_override(self):
         """Agent can disable or customize reactions via config."""
