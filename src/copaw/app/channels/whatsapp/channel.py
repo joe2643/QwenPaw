@@ -745,7 +745,22 @@ class WhatsAppChannel(BaseChannel):
                 request._wa_typing_jid = typing_jid
                 request._wa_typing_client = client
 
-            await self.consume_one(request)
+            # Route through UnifiedQueueManager (via self._enqueue) so
+            # each (whatsapp, session_id, priority) gets its own queue
+            # and worker task. Messages from different chats process
+            # in parallel; same-chat messages still serialize
+            # (prevents races inside one conversation).
+            #
+            # NOTE: direct `await self.consume_one(request)` would
+            # block neonize's message callback until the agent's full
+            # response finishes, which serializes ALL inbound traffic
+            # (DM + group messages stack up). Fall back to direct call
+            # if no enqueue callback is attached (unit tests set up
+            # channels without the manager).
+            if self._enqueue is not None:
+                self._enqueue(request)
+            else:
+                await self.consume_one(request)
 
         except Exception:
             logger.exception("whatsapp: error processing message")
