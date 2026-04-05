@@ -261,6 +261,131 @@ class TestExtractQuoteContent:
         assert "UNTRUSTED reply-to" in combined
         assert "image" in combined.lower()
 
+    async def test_quote_with_video_described(self):
+        """Quoted video produces 'Media: video' in reply-to block."""
+        ch = _make_channel()
+        ctx = MagicMock()
+        ctx.HasField = lambda name: name == "quotedMessage"
+        ctx.participant = "video_sender@s.whatsapp.net"
+        ctx.stanzaId = "stanza_video"
+
+        quoted = MagicMock()
+        quoted.conversation = ""
+        quoted.HasField = lambda name: name == "videoMessage"
+        ctx.quotedMessage = quoted
+
+        etm = MagicMock()
+        etm.text = "nice clip"
+        etm.contextInfo = ctx
+        msg = _make_proto_message(extendedTextMessage=etm)
+
+        parts = await ch._extract_quote_content(MagicMock(), msg)
+        text_parts = [p for p in parts if hasattr(p, "text")]
+        assert len(text_parts) == 1
+        assert "UNTRUSTED reply-to" in text_parts[0].text
+        assert "Media: video" in text_parts[0].text
+
+    async def test_quote_with_voice_note_described(self):
+        """Quoted audio with ptt=True is described as 'voice note'."""
+        ch = _make_channel()
+        ctx = MagicMock()
+        ctx.HasField = lambda name: name == "quotedMessage"
+        ctx.participant = "audio_sender@s.whatsapp.net"
+        ctx.stanzaId = "stanza_audio"
+
+        audio_msg = MagicMock()
+        audio_msg.ptt = True
+
+        quoted = MagicMock()
+        quoted.conversation = ""
+        quoted.HasField = lambda name: name == "audioMessage"
+        quoted.audioMessage = audio_msg
+        ctx.quotedMessage = quoted
+
+        etm = MagicMock()
+        etm.text = "hear this"
+        etm.contextInfo = ctx
+        msg = _make_proto_message(extendedTextMessage=etm)
+
+        parts = await ch._extract_quote_content(MagicMock(), msg)
+        text = parts[0].text
+        assert "Media: voice note" in text
+
+    async def test_quote_with_audio_non_ptt_described(self):
+        """Quoted audio with ptt=False is described as 'audio'."""
+        ch = _make_channel()
+        ctx = MagicMock()
+        ctx.HasField = lambda name: name == "quotedMessage"
+        ctx.participant = "audio_sender@s.whatsapp.net"
+        ctx.stanzaId = "stanza_audio2"
+
+        audio_msg = MagicMock()
+        audio_msg.ptt = False
+
+        quoted = MagicMock()
+        quoted.conversation = ""
+        quoted.HasField = lambda name: name == "audioMessage"
+        quoted.audioMessage = audio_msg
+        ctx.quotedMessage = quoted
+
+        etm = MagicMock()
+        etm.text = ""
+        etm.contextInfo = ctx
+        msg = _make_proto_message(extendedTextMessage=etm)
+
+        parts = await ch._extract_quote_content(MagicMock(), msg)
+        text = parts[0].text
+        assert "Media: audio" in text
+        assert "voice note" not in text
+
+    async def test_quote_with_document_described(self):
+        """Quoted document is described with its filename."""
+        ch = _make_channel()
+        ctx = MagicMock()
+        ctx.HasField = lambda name: name == "quotedMessage"
+        ctx.participant = "doc_sender@s.whatsapp.net"
+        ctx.stanzaId = "stanza_doc"
+
+        doc_msg = MagicMock()
+        doc_msg.fileName = "report.pdf"
+
+        quoted = MagicMock()
+        quoted.conversation = ""
+        quoted.HasField = lambda name: name == "documentMessage"
+        quoted.documentMessage = doc_msg
+        ctx.quotedMessage = quoted
+
+        etm = MagicMock()
+        etm.text = "read this"
+        etm.contextInfo = ctx
+        msg = _make_proto_message(extendedTextMessage=etm)
+
+        parts = await ch._extract_quote_content(MagicMock(), msg)
+        text = parts[0].text
+        assert "file: report.pdf" in text
+
+    async def test_quote_with_sticker_described(self):
+        """Quoted sticker is described as 'sticker'."""
+        ch = _make_channel()
+        ctx = MagicMock()
+        ctx.HasField = lambda name: name == "quotedMessage"
+        ctx.participant = "s@s.whatsapp.net"
+        ctx.stanzaId = "stanza_sticker"
+
+        quoted = MagicMock()
+        quoted.conversation = ""
+        quoted.HasField = lambda name: name == "stickerMessage"
+        ctx.quotedMessage = quoted
+
+        etm = MagicMock()
+        etm.text = "lol"
+        etm.contextInfo = ctx
+        msg = _make_proto_message(extendedTextMessage=etm)
+
+        parts = await ch._extract_quote_content(MagicMock(), msg)
+        text = parts[0].text
+        assert "Media: sticker" in text
+
     async def test_no_quoted_message_returns_empty(self):
         ch = _make_channel()
         # Message with no contextInfo

@@ -420,6 +420,70 @@ class TestExtractQuoteContent:
         assert len(file_parts) == 1
         assert "file: doc.pdf" in text_parts[0].text
 
+    async def test_quote_audio_attachment(self):
+        """Audio attachment in quote produces AudioContent + 'Media: audio' label."""
+        ch = _make_channel()
+        tmp = Path(tempfile.mkdtemp())
+        fake_audio = tmp / "signal_att_voice.ogg"
+        fake_audio.write_bytes(b"OggS" + b"\x00" * 50)
+        ch.daemon.download_attachment = AsyncMock(return_value=fake_audio)
+        data_message = {
+            "quote": {
+                "text": "",
+                "author": "+85211111111",
+                "attachments": [{"id": "a1", "contentType": "audio/ogg"}],
+            }
+        }
+        parts = await ch._extract_quote_content(data_message)
+        text_parts = [p for p in parts if hasattr(p, "text")]
+        audio_parts = [p for p in parts if p.type == ContentType.AUDIO]
+        assert len(audio_parts) == 1
+        assert "Media: audio" in text_parts[0].text
+
+    async def test_quote_video_attachment(self):
+        """Video attachment in quote produces VideoContent + 'Media: video' label."""
+        ch = _make_channel()
+        tmp = Path(tempfile.mkdtemp())
+        fake_video = tmp / "signal_att_clip.mp4"
+        # MP4 ftyp box
+        fake_video.write_bytes(b"\x00\x00\x00\x20" + b"ftypmp42" + b"\x00" * 50)
+        ch.daemon.download_attachment = AsyncMock(return_value=fake_video)
+        data_message = {
+            "quote": {
+                "text": "look at this clip",
+                "author": "+85211111111",
+                "attachments": [{"id": "v1", "contentType": "video/mp4"}],
+            }
+        }
+        parts = await ch._extract_quote_content(data_message)
+        text_parts = [p for p in parts if hasattr(p, "text")]
+        video_parts = [p for p in parts if p.type == ContentType.VIDEO]
+        assert len(video_parts) == 1
+        assert "Media: video" in text_parts[0].text
+        assert "look at this clip" in text_parts[0].text
+
+    async def test_quote_audio_octet_stream_detected_as_audio(self):
+        """If contentType is application/octet-stream, magic bytes should
+        detect audio/ogg and route to AudioContent, not FileContent."""
+        ch = _make_channel()
+        tmp = Path(tempfile.mkdtemp())
+        fake_audio = tmp / "signal_att_voice.bin"
+        fake_audio.write_bytes(b"OggS" + b"\x00" * 50)
+        ch.daemon.download_attachment = AsyncMock(return_value=fake_audio)
+        data_message = {
+            "quote": {
+                "text": "",
+                "author": "+85211111111",
+                "attachments": [{"id": "a1", "contentType": "application/octet-stream"}],
+            }
+        }
+        parts = await ch._extract_quote_content(data_message)
+        # OggS magic detected → audio route
+        audio_parts = [p for p in parts if p.type == ContentType.AUDIO]
+        file_parts = [p for p in parts if p.type == ContentType.FILE]
+        assert len(audio_parts) == 1
+        assert len(file_parts) == 0
+
     async def test_no_quote_returns_empty(self):
         ch = _make_channel()
         data_message = {"message": "hello"}
