@@ -622,6 +622,8 @@ class WhatsAppChannel(BaseChannel):
                 "timestamp": timestamp,
                 "bot_phone": f"+{self._bot_phone}" if self._bot_phone else "",
                 "bot_lid": self._bot_lid,
+                "_typing_jid": request_extra.get("typing_jid"),
+                "_typing_client": request_extra.get("client"),
             }
             session_id = self.resolve_session_id(effective_sender, channel_meta)
             request = self.build_agent_request_from_user_content(
@@ -644,25 +646,15 @@ class WhatsAppChannel(BaseChannel):
                 except Exception:
                     pass
 
-            # Send typing indicator
-            try:
-                typing_jid = chat_jid
-                if chat_str.endswith("@lid"):
-                    c_info = self._lid_cache.get(chat_str, {})
-                    c_phone = c_info.get("phone", "")
-                    if c_phone:
-                        typing_jid = _str_to_jid(c_phone)
-                _jb = typing_jid.SerializeToString()
-                # WORKAROUND: access private __client to call SendChatPresence directly.
-                # neonize wraps this method but its Go binding has an off-by-one enum
-                # index bug for the presence type, so we bypass the wrapper.
-                # TODO: Remove once neonize exposes a public API for chat presence.
-                await client._NewAClient__client.SendChatPresence(
-                    client.uuid, _jb, len(_jb), 0, 0
-                )
-                logger.info("whatsapp: typing sent to %s", _jid_to_str(typing_jid))
-            except Exception as e:
-                logger.warning("whatsapp: typing FAILED: %s", e)
+            # Resolve typing JID and store for typing loop
+            typing_jid = chat_jid
+            if chat_str.endswith("@lid"):
+                c_info = self._lid_cache.get(chat_str, {})
+                c_phone = c_info.get("phone", "")
+                if c_phone:
+                    typing_jid = _str_to_jid(c_phone)
+            # Store for typing loop during response generation
+            request_extra = {"typing_jid": typing_jid, "client": client}
 
             # For commands like /stop, pass raw body for detection
             if body and body.strip().startswith("/"):
@@ -898,6 +890,34 @@ class WhatsAppChannel(BaseChannel):
             rest = rest[len(chunk):]
         return chunks
 
+    # ── Typing indicator loop ──────────────────────────────────────────
+
+    async def _typing_loop(self, client, typing_jid, interval: float = 4.0):
+        """Re-send typing indicator every `interval` seconds until cancelled.
+
+        WhatsApp typing indicators expire after ~5s, so we need to keep
+        re-sending during the entire response generation.
+        """
+        try:
+            while True:
+                try:
+                    _jb = typing_jid.SerializeToString()
+                    await client._NewAClient__client.SendChatPresence(
+                        client.uuid, _jb, len(_jb), 0, 0
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            # Send "stopped typing" (presence type 2 = paused)
+            try:
+                _jb = typing_jid.SerializeToString()
+                await client._NewAClient__client.SendChatPresence(
+                    client.uuid, _jb, len(_jb), 2, 0
+                )
+            except Exception:
+                pass
+
     # ── Process loop override ─────────────────────────────────────────
 
     async def _stream_with_tracker(self, payload):
@@ -912,7 +932,16 @@ class WhatsAppChannel(BaseChannel):
         text_parts = []
         message_completed = False
         process_iterator = None
+        typing_task = None
         try:
+            # Start persistent typing loop (re-sends every 4s until cancelled)
+            typing_jid = send_meta.get("_typing_jid")
+            typing_client = send_meta.get("_typing_client")
+            if typing_jid and typing_client:
+                typing_task = asyncio.create_task(
+                    self._typing_loop(typing_client, typing_jid)
+                )
+
             process_iterator = self._process(request)
             async for event in process_iterator:
                 if hasattr(event, "model_dump_json"):
@@ -956,6 +985,9 @@ class WhatsAppChannel(BaseChannel):
             raise
         except Exception:
             logger.exception("whatsapp: _stream_with_tracker failed")
+        finally:
+            if typing_task and not typing_task.done():
+                typing_task.cancel()
             raise
 
     # ── Session / routing ─────────────────────────────────────────────

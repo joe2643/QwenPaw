@@ -645,10 +645,11 @@ class SignalChannel(BaseChannel):
                 channel_meta=channel_meta,
             )
             request.channel_meta = channel_meta
-            # Send typing indicator while processing
+            # Store typing info in channel_meta for typing loop during response
             is_group = bool(group_id)
             typing_target = group_id if is_group else (source or source_uuid)
-            asyncio.create_task(self.daemon.send_typing(typing_target, start=True, is_group=is_group))
+            channel_meta["_typing_target"] = typing_target
+            channel_meta["_typing_is_group"] = is_group
 
             await self.consume_one(request)
 
@@ -921,6 +922,20 @@ class SignalChannel(BaseChannel):
             rest = rest[len(chunk):]
         return chunks
 
+    # ── Typing indicator loop ──────────────────────────────────────────
+
+    async def _typing_loop(self, target: str, is_group: bool, interval: float = 4.0):
+        """Re-send typing indicator every `interval` seconds until cancelled.
+
+        Signal typing indicators expire after ~5s.
+        """
+        try:
+            while True:
+                await self.daemon.send_typing(target, start=True, is_group=is_group)
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            await self.daemon.send_typing(target, start=False, is_group=is_group)
+
     # ── Process loop override ─────────────────────────────────────────
 
     async def _stream_with_tracker(self, payload):
@@ -935,7 +950,16 @@ class SignalChannel(BaseChannel):
         text_parts = []
         message_completed = False
         process_iterator = None
+        typing_task = None
         try:
+            # Start persistent typing loop (re-sends every 4s until cancelled)
+            typing_target = send_meta.get("_typing_target")
+            typing_is_group = send_meta.get("_typing_is_group", False)
+            if typing_target:
+                typing_task = asyncio.create_task(
+                    self._typing_loop(typing_target, typing_is_group)
+                )
+
             process_iterator = self._process(request)
             async for event in process_iterator:
                 # Yield SSE data for task tracker
@@ -987,6 +1011,9 @@ class SignalChannel(BaseChannel):
         except Exception:
             logger.exception("signal: _stream_with_tracker failed")
             raise
+        finally:
+            if typing_task and not typing_task.done():
+                typing_task.cancel()
 
     # ── Session / routing ─────────────────────────────────────────────
 
