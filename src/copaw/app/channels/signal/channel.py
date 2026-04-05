@@ -499,6 +499,8 @@ class SignalChannel(BaseChannel):
         self._media_dir = _MEDIA_DIR
         self._group_history: Dict[str, list] = {}  # group_id -> [{sender, body, ts}]
         self._group_history_limit = 50
+        # Cache: sourceUuid/number → display name (learnt from envelope.sourceName)
+        self._sender_names: Dict[str, str] = {}
 
         daemon_url = http_url or f"http://{http_host}:{http_port}"
         self.daemon = SignalDaemon(account=account, http_url=daemon_url)
@@ -567,7 +569,12 @@ class SignalChannel(BaseChannel):
             envelope = event.get("envelope", event)
             source = envelope.get("sourceNumber") or envelope.get("source") or ""
             source_uuid = envelope.get("sourceUuid") or ""
+            source_name = envelope.get("sourceName") or ""
             timestamp = envelope.get("timestamp", 0)
+
+            # Cache sender name for display + mention expansion
+            if source_name:
+                self._remember_sender(source, source_uuid, source_name)
 
             # Handle reactions
             reaction_msg = envelope.get("reactionMessage")
@@ -577,6 +584,15 @@ class SignalChannel(BaseChannel):
 
             data_message = envelope.get("dataMessage") or {}
             body = data_message.get("message") or ""
+
+            # Cache any additional sender names referenced in mentions and
+            # replace \ufffc placeholders with readable tokens.
+            msg_mentions = data_message.get("mentions") or []
+            for m in msg_mentions:
+                self._remember_sender(
+                    m.get("number") or "", m.get("uuid") or "", m.get("name") or "",
+                )
+            body = self._expand_mentions(body, msg_mentions)
 
             # Detect group
             group_info = data_message.get("groupInfo") or {}
@@ -623,8 +639,7 @@ class SignalChannel(BaseChannel):
                         # Record in group history buffer with media paths
                         if body or downloaded_media:
                             media_paths = [m["path"] for m in downloaded_media]
-                            # Prefer phone number, fall back to short UUID
-                            sender_label = source or (f"uuid:{source_uuid[:8]}" if source_uuid else "unknown")
+                            sender_label = self._format_sender_display(source, source_uuid)
                             history = self._group_history.setdefault(group_id, [])
                             history.append({
                                 "sender": sender_label,
@@ -710,9 +725,9 @@ class SignalChannel(BaseChannel):
 
             # Envelope: clear chat-type + sender prefix so the agent never
             # mistakes a group for a DM.
-            # Group:  [Signal group {group_id}] +85251159218: text
-            # DM:     [Signal DM] +85251159218: text
-            sender_label = source or (f"uuid:{source_uuid[:8]}" if source_uuid else "unknown")
+            # Group:  [Signal group {group_id}] Joe HO (+85251159218): text
+            # DM:     [Signal DM] Joe HO (+85251159218): text
+            sender_label = self._format_sender_display(source, source_uuid)
             is_group_flag = bool(group_id)
             if is_group_flag:
                 envelope_prefix = f"[Signal group {group_id}] {sender_label}"
@@ -821,6 +836,70 @@ class SignalChannel(BaseChannel):
                 return True
         return False
 
+    def _remember_sender(self, source: str, source_uuid: str, name: str) -> None:
+        """Cache sourceName keyed by both phone and uuid."""
+        if not name:
+            return
+        if source:
+            self._sender_names[source] = name
+        if source_uuid:
+            self._sender_names[source_uuid] = name
+
+    def _format_sender_display(self, source: str, source_uuid: str) -> str:
+        """Build a human-friendly sender label: 'Name (+phone)' / 'Name (uuid:xxx)' / fallback."""
+        name = self._sender_names.get(source) or self._sender_names.get(source_uuid) or ""
+        phone = source or ""
+        if name and phone:
+            return f"{name} ({phone})"
+        if name and source_uuid:
+            return f"{name} (uuid:{source_uuid[:8]})"
+        if name:
+            return name
+        if phone:
+            return phone
+        if source_uuid:
+            return f"uuid:{source_uuid[:8]}"
+        return "unknown"
+
+    def _expand_mentions(self, body: str, mentions: List[Dict[str, Any]]) -> str:
+        """Replace Signal's U+FFFC mention placeholders with readable references.
+
+        Signal's bbernhard API sends the body with one U+FFFC codepoint per
+        mention, plus a parallel list [{start, length, uuid, number, name}].
+        We walk the sorted list and substitute each placeholder so the
+        agent sees '@Joe' instead of '￼'.
+        """
+        if not body or not mentions:
+            return body
+        # Sort by start descending so replacement offsets stay valid
+        sorted_mentions = sorted(mentions, key=lambda m: m.get("start", 0), reverse=True)
+        result = body
+        for m in sorted_mentions:
+            start = m.get("start")
+            length = m.get("length") or 1
+            if start is None or start < 0 or start + length > len(result):
+                continue
+            name = m.get("name") or ""
+            number = m.get("number") or ""
+            uuid_v = m.get("uuid") or ""
+            # Prefer "@Name" if name known (self or cached), else "@+phone", else "@uuid:xxx"
+            if not name and number:
+                name = self._sender_names.get(number, "")
+            if not name and uuid_v:
+                name = self._sender_names.get(uuid_v, "")
+            if name and number:
+                token = f"@{name} ({number})"
+            elif number:
+                token = f"@{number}"
+            elif name:
+                token = f"@{name}"
+            elif uuid_v:
+                token = f"@uuid:{uuid_v[:8]}"
+            else:
+                token = "@someone"
+            result = result[:start] + token + result[start + length:]
+        return result
+
     # ── Quote/reply-to extraction ──────────────────────────────────────
 
     async def _extract_quote_content(self, data_message: Dict) -> List[Any]:
@@ -836,7 +915,16 @@ class SignalChannel(BaseChannel):
 
         parts: List[Any] = []
         quote_text = quote.get("text") or ""
-        quote_author = quote.get("author") or quote.get("authorUuid") or ""
+        quote_author_number = quote.get("author") or ""
+        quote_author_uuid = quote.get("authorUuid") or ""
+        # If quote has its own mentions list, expand U+FFFC placeholders
+        quote_mentions = quote.get("mentions") or []
+        if quote_mentions:
+            for m in quote_mentions:
+                self._remember_sender(
+                    m.get("number") or "", m.get("uuid") or "", m.get("name") or "",
+                )
+            quote_text = self._expand_mentions(quote_text, quote_mentions)
         quote_id = quote.get("id") or ""
 
         # Download quoted attachments (images, files, etc.)
@@ -878,7 +966,7 @@ class SignalChannel(BaseChannel):
         # when we have text OR attachments, so media ContentParts have context)
         if quote_text or media_labels:
             lines = ["=== UNTRUSTED reply-to (this message quotes an earlier one) ==="]
-            author_str = quote_author[:36] if quote_author else "unknown"
+            author_str = self._format_sender_display(quote_author_number, quote_author_uuid)
             lines.append(f"From: {author_str}")
             if quote_id:
                 lines.append(f"Quoted message id: {quote_id}")

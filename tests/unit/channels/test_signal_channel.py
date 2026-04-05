@@ -1205,3 +1205,105 @@ class TestSignalEnvelopeFormat:
         assert result[0].startswith("===")
         assert result[1].startswith("[Replying")
         assert result[2].startswith("[Signal group xxx]")
+
+
+# ===================================================================
+# TestSenderDisplayAndMentions
+# ===================================================================
+
+class TestSenderDisplayAndMentions:
+    """Tests for sender name caching, display formatting, and mention expansion."""
+
+    def test_remember_sender_caches_by_both_keys(self):
+        ch = _make_channel()
+        ch._remember_sender("+85211111", "uuid-111", "Joe HO")
+        assert ch._sender_names["+85211111"] == "Joe HO"
+        assert ch._sender_names["uuid-111"] == "Joe HO"
+
+    def test_remember_sender_empty_name_noop(self):
+        ch = _make_channel()
+        ch._remember_sender("+85211111", "uuid-111", "")
+        assert "+85211111" not in ch._sender_names
+
+    def test_format_display_name_and_phone(self):
+        ch = _make_channel()
+        ch._remember_sender("+85211111", "uuid-111", "Joe HO")
+        label = ch._format_sender_display("+85211111", "uuid-111")
+        assert label == "Joe HO (+85211111)"
+
+    def test_format_display_uuid_only_with_name(self):
+        ch = _make_channel()
+        ch._remember_sender("", "82e0393a-4c79-4905-b84d-986298f4f8c5", "Alice")
+        label = ch._format_sender_display("", "82e0393a-4c79-4905-b84d-986298f4f8c5")
+        assert label == "Alice (uuid:82e0393a)"
+
+    def test_format_display_uuid_only_no_name(self):
+        ch = _make_channel()
+        label = ch._format_sender_display("", "82e0393a-4c79-4905-b84d-986298f4f8c5")
+        assert label == "uuid:82e0393a"
+
+    def test_format_display_phone_only_no_name(self):
+        ch = _make_channel()
+        label = ch._format_sender_display("+85298765432", "")
+        assert label == "+85298765432"
+
+    def test_format_display_empty_returns_unknown(self):
+        ch = _make_channel()
+        assert ch._format_sender_display("", "") == "unknown"
+
+    def test_expand_mentions_single(self):
+        ch = _make_channel()
+        # body: "Hi ￼ how are you" with mention at position 3, length 1
+        body = "Hi \ufffc how are you"
+        mentions = [{"start": 3, "length": 1, "number": "+85298765432", "name": "Alice"}]
+        result = ch._expand_mentions(body, mentions)
+        assert "\ufffc" not in result
+        assert "@Alice (+85298765432)" in result
+        assert result == "Hi @Alice (+85298765432) how are you"
+
+    def test_expand_mentions_multiple(self):
+        ch = _make_channel()
+        body = "\ufffc hi \ufffc !"
+        mentions = [
+            {"start": 0, "length": 1, "number": "+852111"},
+            {"start": 5, "length": 1, "number": "+852222", "name": "Bob"},
+        ]
+        result = ch._expand_mentions(body, mentions)
+        assert "\ufffc" not in result
+        assert "@+852111" in result
+        assert "@Bob (+852222)" in result
+
+    def test_expand_mentions_uses_cached_name(self):
+        ch = _make_channel()
+        ch._remember_sender("", "uuid-abc123", "Charlie")
+        body = "\ufffc hello"
+        mentions = [{"start": 0, "length": 1, "uuid": "uuid-abc123"}]
+        result = ch._expand_mentions(body, mentions)
+        assert "@Charlie" in result
+        assert "\ufffc" not in result
+
+    def test_expand_mentions_uuid_only_fallback(self):
+        ch = _make_channel()
+        body = "\ufffc here"
+        mentions = [{"start": 0, "length": 1, "uuid": "a1b2c3d4-xxxx"}]
+        result = ch._expand_mentions(body, mentions)
+        assert "@uuid:a1b2c3d4" in result
+
+    def test_expand_mentions_no_mentions_unchanged(self):
+        ch = _make_channel()
+        body = "no mentions here"
+        assert ch._expand_mentions(body, []) == body
+
+    def test_expand_mentions_out_of_bounds_skipped(self):
+        ch = _make_channel()
+        body = "short"
+        mentions = [{"start": 100, "length": 1, "number": "+852111"}]
+        # Should skip silently and return original body
+        assert ch._expand_mentions(body, mentions) == body
+
+    def test_expand_mentions_anonymous_fallback(self):
+        ch = _make_channel()
+        body = "\ufffc hey"
+        mentions = [{"start": 0, "length": 1}]  # no uuid/number/name
+        result = ch._expand_mentions(body, mentions)
+        assert "@someone" in result
