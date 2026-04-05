@@ -611,6 +611,14 @@ class WhatsAppChannel(BaseChannel):
                 if chat_phone:
                     send_chat_jid = f"{chat_phone}@s.whatsapp.net"
 
+            # Resolve typing JID for typing loop during response
+            typing_jid = chat_jid
+            if chat_str.endswith("@lid"):
+                c_info = self._lid_cache.get(chat_str, {})
+                c_phone = c_info.get("phone", "")
+                if c_phone:
+                    typing_jid = _str_to_jid(c_phone)
+
             channel_meta = {
                 "platform": "whatsapp",
                 "chat_jid": send_chat_jid,
@@ -622,8 +630,8 @@ class WhatsAppChannel(BaseChannel):
                 "timestamp": timestamp,
                 "bot_phone": f"+{self._bot_phone}" if self._bot_phone else "",
                 "bot_lid": self._bot_lid,
-                "_typing_jid": request_extra.get("typing_jid"),
-                "_typing_client": request_extra.get("client"),
+                "_typing_jid": typing_jid,
+                "_typing_client": client,
             }
             session_id = self.resolve_session_id(effective_sender, channel_meta)
             request = self.build_agent_request_from_user_content(
@@ -645,16 +653,6 @@ class WhatsAppChannel(BaseChannel):
                     )
                 except Exception:
                     pass
-
-            # Resolve typing JID and store for typing loop
-            typing_jid = chat_jid
-            if chat_str.endswith("@lid"):
-                c_info = self._lid_cache.get(chat_str, {})
-                c_phone = c_info.get("phone", "")
-                if c_phone:
-                    typing_jid = _str_to_jid(c_phone)
-            # Store for typing loop during response generation
-            request_extra = {"typing_jid": typing_jid, "client": client}
 
             # For commands like /stop, pass raw body for detection
             if body and body.strip().startswith("/"):
