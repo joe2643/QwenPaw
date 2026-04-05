@@ -1250,9 +1250,31 @@ class SignalChannel(BaseChannel):
         part: OutgoingContentPart,
         meta: Optional[dict] = None,
     ) -> None:
-        """Send media attachment (image/file/audio)."""
-        logger.info("signal: send_media called, type=%s to=%s", getattr(part, "type", "?"), to_handle)
+        """Send a single outbound media attachment (image / video / audio / file).
+
+        This is the primary outbound media path for Signal. It is invoked
+        by the base channel's ``send_content_parts`` for every non-text
+        content block in the agent's reply — so when the agent returns
+        an ``ImageBlock`` / ``AudioBlock`` / etc. (including via the
+        ``send_file_to_user`` tool), the file ends up here.
+
+        Extracts the local path from the content part (``image_url``,
+        ``video_url``, ``file_url``/``file_id`` or ``data``), strips the
+        ``file://`` scheme if present, and dispatches through
+        ``SignalDaemon.send_message`` which base64-encodes the file
+        inline for bbernhard's ``/v2/send`` endpoint.
+
+        ✅ Images, audio, video AND documents all flow through here.
+        """
+        t = getattr(part, "type", None)
+        logger.info(
+            "signal: send_media called, type=%s to=%s", t, to_handle,
+        )
         if not self.enabled or not self.daemon.connected:
+            logger.warning(
+                "signal: send_media skipped — channel=%s daemon=%s",
+                self.enabled, self.daemon.connected,
+            )
             return
         meta = meta or {}
         group_id = meta.get("group_id") or ""
@@ -1260,7 +1282,7 @@ class SignalChannel(BaseChannel):
         if is_group and group_id:
             to_handle = group_id
 
-        t = getattr(part, "type", None)
+        # Extract the local file path from the content part
         raw_path = None
         if t == ContentType.IMAGE:
             raw_path = getattr(part, "image_url", None)
@@ -1272,15 +1294,32 @@ class SignalChannel(BaseChannel):
             raw_path = getattr(part, "data", None)
 
         if not raw_path:
+            logger.warning("signal: send_media missing path for type=%s", t)
             return
-        file_path = raw_path.replace("file://", "") if isinstance(raw_path, str) and raw_path.startswith("file://") else raw_path
-        logger.info("signal: send_media file_path=%s exists=%s", file_path, os.path.isfile(file_path) if file_path else False)
-        if file_path and os.path.isfile(file_path):
-            await self.daemon.send_message(
-                to_handle, "", is_group=is_group, attachments=[file_path],
-            )
-        elif file_path:
+        file_path = (
+            raw_path.replace("file://", "")
+            if isinstance(raw_path, str) and raw_path.startswith("file://")
+            else raw_path
+        )
+        exists = os.path.isfile(file_path) if file_path else False
+        logger.info(
+            "signal: send_media file_path=%s exists=%s", file_path, exists,
+        )
+        if not file_path or not exists:
             logger.warning("signal: media file not found: %s", file_path)
+            return
+        ts = await self.daemon.send_message(
+            to_handle, "", is_group=is_group, attachments=[file_path],
+        )
+        if ts:
+            logger.info(
+                "signal: sent media to %s (timestamp=%s, size=%d bytes)",
+                to_handle, ts, os.path.getsize(file_path),
+            )
+        else:
+            logger.error(
+                "signal: send_media FAILED to=%s path=%s", to_handle, file_path,
+            )
 
     async def send_reaction_to(
         self,
