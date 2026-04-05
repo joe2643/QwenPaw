@@ -45,12 +45,26 @@ from ..base import (
 import re as _re
 
 def _markdown_to_signal(text):
-    """Convert markdown to plain text + Signal text-style ranges."""
+    """Convert markdown to plain text + Signal text-style ranges.
+
+    Signal supports: BOLD, ITALIC, MONOSPACE, STRIKETHROUGH, SPOILER.
+    Markdown headers (# / ## / ###) are converted to BOLD lines since
+    Signal has no native header support.
+    """
+    # ── Phase 1: Convert headers to bold markers ──────────────────
+    # "## Heading" → "**Heading**"  (then handled by inline patterns)
+    text = _re.sub(r"^#{1,6}\s+(.+)$", r"**\1**", text, flags=_re.MULTILINE)
+
+    # ── Phase 2: Collect inline style matches ─────────────────────
+    # Order matters: code blocks first (protect contents), then longer
+    # markers before shorter to avoid **bold** eating *italic*.
     patterns = [
         (_re.compile(r"```(?:\w*\n)?(.*?)```", _re.DOTALL), "MONOSPACE"),
         (_re.compile(r"`([^`]+)`"), "MONOSPACE"),
         (_re.compile(r"\*\*(.+?)\*\*"), "BOLD"),
         (_re.compile(r"__(.+?)__"), "BOLD"),
+        (_re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)"), "ITALIC"),
+        (_re.compile(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)"), "ITALIC"),
         (_re.compile(r"~~(.+?)~~"), "STRIKETHROUGH"),
     ]
     all_matches = []
@@ -58,13 +72,15 @@ def _markdown_to_signal(text):
         for m in pat.finditer(text):
             all_matches.append((m.start(), m.end(), m.group(1), style))
     all_matches.sort(key=lambda x: x[0])
-    # Remove overlaps
+
+    # Remove overlaps (keep earlier / longer match)
     filtered = []
     for s, e, inner, style in all_matches:
         if filtered and s < filtered[-1][1]:
             continue
         filtered.append((s, e, inner, style))
-    # Build result
+
+    # ── Phase 3: Build plain text + style ranges ──────────────────
     parts = []
     styles = []
     cursor = 0
