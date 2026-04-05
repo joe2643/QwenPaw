@@ -112,6 +112,8 @@ class WhatsAppChannel(BaseChannel):
         send_read_receipts: bool = True,
         text_chunk_limit: int = WHATSAPP_MAX_TEXT_LENGTH,
         self_chat_mode: bool = False,
+        ack_reaction_thinking: str = "🤔",
+        ack_reaction_done: str = "👀",
         **kwargs,
     ):
         super().__init__(
@@ -131,6 +133,8 @@ class WhatsAppChannel(BaseChannel):
         self._send_read_receipts = send_read_receipts
         self._text_chunk_limit = text_chunk_limit
         self._self_chat_mode = self_chat_mode
+        self._ack_reaction_thinking = ack_reaction_thinking or ""
+        self._ack_reaction_done = ack_reaction_done or ""
         self._groups: List[str] = kwargs.get("groups") or []
         self._group_allow_from: List[str] = kwargs.get("group_allow_from") or []
         self._media_dir = _MEDIA_DIR
@@ -185,6 +189,8 @@ class WhatsAppChannel(BaseChannel):
             send_read_receipts=c.get("send_read_receipts", True),
             text_chunk_limit=c.get("text_chunk_limit", WHATSAPP_MAX_TEXT_LENGTH),
             self_chat_mode=c.get("self_chat_mode", False),
+            ack_reaction_thinking=c.get("ack_reaction_thinking", "🤔"),
+            ack_reaction_done=c.get("ack_reaction_done", "👀"),
             groups=c.get("groups") or [],
             group_allow_from=c.get("group_allow_from") or [],
         )
@@ -706,6 +712,10 @@ class WhatsAppChannel(BaseChannel):
             # Store typing info on request (NOT in channel_meta — JID/client are not JSON-serializable)
             request._wa_typing_jid = typing_jid
             request._wa_typing_client = client
+            # Store ack-reaction target so _stream_with_tracker can clear it
+            request._wa_ack_chat_jid = chat_jid
+            request._wa_ack_sender_jid = sender_jid
+            request._wa_ack_msg_id = msg_id
 
             # Mark as read
             if self._send_read_receipts:
@@ -744,6 +754,18 @@ class WhatsAppChannel(BaseChannel):
                 request.channel_meta = channel_meta
                 request._wa_typing_jid = typing_jid
                 request._wa_typing_client = client
+                request._wa_ack_chat_jid = chat_jid
+                request._wa_ack_sender_jid = sender_jid
+                request._wa_ack_msg_id = msg_id
+
+            # Fire "thinking" reaction (fire-and-forget) so the user
+            # knows the bot has picked up their message before the
+            # agent's reply lands.
+            if self._ack_reaction_thinking:
+                asyncio.create_task(self._send_reaction(
+                    client, chat_jid, sender_jid, msg_id,
+                    self._ack_reaction_thinking,
+                ))
 
             # Route through UnifiedQueueManager (via self._enqueue) so
             # each (whatsapp, session_id, priority) gets its own queue
@@ -1074,6 +1096,31 @@ class WhatsAppChannel(BaseChannel):
             except Exception:
                 pass
 
+    # ── Reactions ─────────────────────────────────────────────────────
+
+    async def _send_reaction(
+        self,
+        client,
+        chat_jid,
+        sender_jid,
+        msg_id: str,
+        emoji: str,
+    ) -> None:
+        """Build + send a reaction to a specific message.
+
+        neonize exposes ``build_reaction(chat, sender, message_id, emoji)``
+        which returns a Message protobuf; we then push it through
+        ``send_message(to=chat_jid, message=...)``. Pass emoji="" to
+        remove an existing reaction.
+        """
+        try:
+            reaction_msg = client.build_reaction(
+                chat_jid, sender_jid, msg_id, emoji or "",
+            )
+            await client.send_message(chat_jid, reaction_msg)
+        except Exception as e:
+            logger.debug("whatsapp: reaction %r failed: %s", emoji, e)
+
     # ── Process loop override ─────────────────────────────────────────
 
     async def _stream_with_tracker(self, payload):
@@ -1136,6 +1183,18 @@ class WhatsAppChannel(BaseChannel):
             if self._on_reply_sent:
                 args = self.get_on_reply_sent_args(request, to_handle)
                 self._on_reply_sent(self.channel, *args)
+
+            # Replace "thinking" with "done" reaction on the original message
+            if self._ack_reaction_done:
+                ack_chat = getattr(request, "_wa_ack_chat_jid", None)
+                ack_sender = getattr(request, "_wa_ack_sender_jid", None)
+                ack_msg_id = getattr(request, "_wa_ack_msg_id", None)
+                ack_client = getattr(request, "_wa_typing_client", None)
+                if ack_chat and ack_sender and ack_msg_id and ack_client:
+                    await self._send_reaction(
+                        ack_client, ack_chat, ack_sender, ack_msg_id,
+                        self._ack_reaction_done,
+                    )
 
         except asyncio.CancelledError:
             if process_iterator:

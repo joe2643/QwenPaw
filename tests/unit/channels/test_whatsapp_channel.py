@@ -1027,3 +1027,59 @@ class TestSlashCommandDetection:
         ch = _make_channel()
         body = "do /not detect this"
         assert not body.lstrip().startswith("/")
+
+
+# ===================================================================
+# TestAckReactions
+# ===================================================================
+
+class TestAckReactions:
+    """Tests for the thinking/done reaction acknowledgement flow."""
+
+    async def test_send_reaction_calls_build_and_send(self):
+        ch = _make_channel()
+        client = MagicMock()
+        client.build_reaction = MagicMock(return_value="REACTION_MSG")
+        client.send_message = AsyncMock()
+        chat_jid = MagicMock()
+        sender_jid = MagicMock()
+        await ch._send_reaction(client, chat_jid, sender_jid, "MSGID", "🤔")
+        client.build_reaction.assert_called_once_with(
+            chat_jid, sender_jid, "MSGID", "🤔",
+        )
+        client.send_message.assert_awaited_once_with(chat_jid, "REACTION_MSG")
+
+    async def test_send_reaction_swallows_errors(self):
+        ch = _make_channel()
+        client = MagicMock()
+        client.build_reaction = MagicMock(side_effect=RuntimeError("boom"))
+        # Should not raise
+        await ch._send_reaction(
+            client, MagicMock(), MagicMock(), "MSGID", "🤔",
+        )
+
+    async def test_empty_emoji_clears_reaction(self):
+        """Passing emoji='' removes any existing reaction — WhatsApp
+        convention."""
+        ch = _make_channel()
+        client = MagicMock()
+        client.build_reaction = MagicMock(return_value="EMPTY")
+        client.send_message = AsyncMock()
+        await ch._send_reaction(
+            client, MagicMock(), MagicMock(), "MSGID", "",
+        )
+        client.build_reaction.assert_called_once()
+        assert client.build_reaction.call_args[0][3] == ""
+
+    def test_ack_reactions_configurable(self):
+        ch = _make_channel(
+            ack_reaction_thinking="⏳",
+            ack_reaction_done="✅",
+        )
+        assert ch._ack_reaction_thinking == "⏳"
+        assert ch._ack_reaction_done == "✅"
+
+    def test_ack_reactions_can_be_disabled(self):
+        ch = _make_channel(ack_reaction_thinking="", ack_reaction_done="")
+        assert ch._ack_reaction_thinking == ""
+        assert ch._ack_reaction_done == ""
