@@ -950,32 +950,82 @@ class WhatsAppChannel(BaseChannel):
         part: OutgoingContentPart,
         meta: Optional[dict] = None,
     ) -> None:
+        """Send a single outbound media attachment (image / video / audio / file).
+
+        This is the primary outbound media path for WhatsApp. It is
+        invoked by the base channel's ``send_content_parts`` for every
+        non-text content block in the agent's reply — so when the
+        agent returns an ``ImageBlock`` / ``AudioBlock`` / etc.
+        (including via the ``send_file_to_user`` tool), the file
+        ends up here.
+
+        Extracts the local path from the content part (``image_url``,
+        ``video_url``, ``file_url``/``file_id`` or ``data``), strips the
+        ``file://`` scheme if present, then dispatches through neonize
+        (``send_image`` / ``send_video`` / ``send_audio`` /
+        ``send_document``).
+
+        ✅ Images, video, audio AND documents all flow through here.
+        """
+        t = getattr(part, "type", None)
+        logger.info(
+            "whatsapp: send_media called, type=%s to=%s", t, to_handle,
+        )
         if not self.enabled or not self._client or not self._connected:
+            logger.warning(
+                "whatsapp: send_media skipped — enabled=%s client=%s connected=%s",
+                self.enabled, bool(self._client), self._connected,
+            )
             return
         meta = meta or {}
         chat_jid_str = meta.get("chat_jid") or to_handle
         jid = _str_to_jid(chat_jid_str)
 
-        t = getattr(part, "type", None)
-        file_path = None
+        # Extract the local file path from the content part
+        raw_path = None
         if t == ContentType.IMAGE:
-            file_path = getattr(part, "image_url", None)
+            raw_path = getattr(part, "image_url", None)
+        elif t == ContentType.VIDEO:
+            raw_path = getattr(part, "video_url", None)
         elif t == ContentType.FILE:
-            file_path = getattr(part, "file_url", None)
+            raw_path = getattr(part, "file_url", None) or getattr(part, "file_id", None)
         elif t == ContentType.AUDIO:
-            file_path = getattr(part, "data", None)
+            raw_path = getattr(part, "data", None)
 
-        if file_path and os.path.isfile(file_path):
-            try:
-                if t == ContentType.IMAGE:
-                    await self._client.send_image(jid, file_path)
-                elif t == ContentType.AUDIO:
-                    await self._client.send_audio(jid, file_path, ptt=True)
-                else:
-                    await self._client.send_document(jid, file_path)
-                logger.info("whatsapp: sent media %s", file_path)
-            except Exception as e:
-                logger.warning("whatsapp: media send failed: %s", e)
+        if not raw_path:
+            logger.warning("whatsapp: send_media missing path for type=%s", t)
+            return
+        # Strip file:// scheme (LLM tools often emit file:///path form)
+        file_path = (
+            raw_path.replace("file://", "")
+            if isinstance(raw_path, str) and raw_path.startswith("file://")
+            else raw_path
+        )
+        exists = os.path.isfile(file_path) if file_path else False
+        logger.info(
+            "whatsapp: send_media file_path=%s exists=%s", file_path, exists,
+        )
+        if not exists:
+            logger.warning("whatsapp: media file not found: %s", file_path)
+            return
+        try:
+            if t == ContentType.IMAGE:
+                await self._client.send_image(jid, file_path)
+            elif t == ContentType.VIDEO:
+                await self._client.send_video(jid, file_path)
+            elif t == ContentType.AUDIO:
+                await self._client.send_audio(jid, file_path, ptt=True)
+            else:  # FILE
+                await self._client.send_document(jid, file_path)
+            logger.info(
+                "whatsapp: sent media to %s (type=%s, size=%d bytes)",
+                to_handle, t, os.path.getsize(file_path),
+            )
+        except Exception as e:
+            logger.error(
+                "whatsapp: send_media FAILED to=%s type=%s path=%s: %s",
+                to_handle, t, file_path, e,
+            )
 
     # ── Text chunking ─────────────────────────────────────────────────
 

@@ -46,6 +46,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
     TextContent,
     ImageContent,
     AudioContent,
+    VideoContent,
     FileContent,
     ContentType,
 )
@@ -729,6 +730,117 @@ class TestSend:
         text = "AAAAAAAAAA" + "BBBBBBBBBB"  # 20 chars, limit 10
         await ch.send("+85200000000", text, {})
         assert ch._client.send_message.call_count == 2
+
+
+# ===================================================================
+# TestSendMedia — outbound attachments via WhatsAppChannel.send_media
+# ===================================================================
+
+class TestSendMedia:
+    """Primary outbound media path. Called by base.send_content_parts
+    for every non-text block the agent emits (via send_file_to_user
+    or directly returning ImageBlock/AudioBlock/VideoBlock/FileBlock)."""
+
+    def _ready_channel(self, tmp_path):
+        ch = _make_channel()
+        ch._connected = True
+        ch._client = MagicMock()
+        ch._client.send_image = AsyncMock()
+        ch._client.send_video = AsyncMock()
+        ch._client.send_audio = AsyncMock()
+        ch._client.send_document = AsyncMock()
+        f = tmp_path / "a.jpg"
+        f.write_bytes(b"\xff\xd8\xff\xe0fake jpeg")
+        return ch, f
+
+    async def test_send_image(self, tmp_path):
+        ch, f = self._ready_channel(tmp_path)
+        part = ImageContent(type=ContentType.IMAGE, image_url=str(f))
+        await ch.send_media("12345@s.whatsapp.net", part, {"chat_jid": "12345@s.whatsapp.net"})
+        ch._client.send_image.assert_called_once()
+        args = ch._client.send_image.call_args.args
+        assert args[1] == str(f)
+
+    async def test_send_video(self, tmp_path):
+        ch, _ = self._ready_channel(tmp_path)
+        vid = tmp_path / "clip.mp4"
+        vid.write_bytes(b"\x00\x00\x00\x20ftypmp42" + b"\x00" * 10)
+        part = VideoContent(type=ContentType.VIDEO, video_url=str(vid))
+        await ch.send_media("12345@s.whatsapp.net", part, {"chat_jid": "12345@s.whatsapp.net"})
+        ch._client.send_video.assert_called_once()
+        assert ch._client.send_document.call_count == 0
+
+    async def test_send_audio(self, tmp_path):
+        ch, _ = self._ready_channel(tmp_path)
+        aud = tmp_path / "voice.ogg"
+        aud.write_bytes(b"OggS" + b"\x00" * 10)
+        part = AudioContent(type=ContentType.AUDIO, data=str(aud))
+        await ch.send_media("12345@s.whatsapp.net", part, {"chat_jid": "12345@s.whatsapp.net"})
+        ch._client.send_audio.assert_called_once()
+        # ptt=True for voice notes
+        assert ch._client.send_audio.call_args.kwargs.get("ptt") is True
+
+    async def test_send_file(self, tmp_path):
+        ch, _ = self._ready_channel(tmp_path)
+        doc = tmp_path / "doc.pdf"
+        doc.write_bytes(b"%PDF-1.5")
+        part = FileContent(type=ContentType.FILE, file_url=str(doc))
+        await ch.send_media("12345@s.whatsapp.net", part, {"chat_jid": "12345@s.whatsapp.net"})
+        ch._client.send_document.assert_called_once()
+        assert ch._client.send_image.call_count == 0
+
+    async def test_send_strips_file_scheme(self, tmp_path):
+        ch, f = self._ready_channel(tmp_path)
+        part = ImageContent(type=ContentType.IMAGE, image_url=f"file://{f}")
+        await ch.send_media("12345@s.whatsapp.net", part, {"chat_jid": "12345@s.whatsapp.net"})
+        args = ch._client.send_image.call_args.args
+        assert args[1] == str(f)
+
+    async def test_missing_file_noop(self, tmp_path):
+        ch, _ = self._ready_channel(tmp_path)
+        missing = tmp_path / "gone.jpg"
+        part = ImageContent(type=ContentType.IMAGE, image_url=str(missing))
+        await ch.send_media("12345@s.whatsapp.net", part, {"chat_jid": "12345@s.whatsapp.net"})
+        ch._client.send_image.assert_not_called()
+
+    async def test_no_path_noop(self, tmp_path):
+        ch, _ = self._ready_channel(tmp_path)
+        part = ImageContent(type=ContentType.IMAGE, image_url="")
+        await ch.send_media("12345@s.whatsapp.net", part, {"chat_jid": "12345@s.whatsapp.net"})
+        ch._client.send_image.assert_not_called()
+
+    async def test_disconnected_noop(self, tmp_path):
+        ch, f = self._ready_channel(tmp_path)
+        ch._connected = False
+        part = ImageContent(type=ContentType.IMAGE, image_url=str(f))
+        await ch.send_media("12345@s.whatsapp.net", part, {"chat_jid": "12345@s.whatsapp.net"})
+        ch._client.send_image.assert_not_called()
+
+    async def test_disabled_noop(self, tmp_path):
+        ch, f = self._ready_channel(tmp_path)
+        ch.enabled = False
+        part = ImageContent(type=ContentType.IMAGE, image_url=str(f))
+        await ch.send_media("12345@s.whatsapp.net", part, {"chat_jid": "12345@s.whatsapp.net"})
+        ch._client.send_image.assert_not_called()
+
+    async def test_file_fallback_to_file_id(self, tmp_path):
+        """FileContent uses file_id when file_url is absent."""
+        ch, _ = self._ready_channel(tmp_path)
+        doc = tmp_path / "doc.pdf"
+        doc.write_bytes(b"%PDF-1.5")
+        part = MagicMock()
+        part.type = ContentType.FILE
+        part.file_url = None
+        part.file_id = str(doc)
+        await ch.send_media("12345@s.whatsapp.net", part, {"chat_jid": "12345@s.whatsapp.net"})
+        ch._client.send_document.assert_called_once()
+
+    async def test_send_fails_logs_error(self, tmp_path):
+        ch, f = self._ready_channel(tmp_path)
+        ch._client.send_image = AsyncMock(side_effect=RuntimeError("boom"))
+        part = ImageContent(type=ContentType.IMAGE, image_url=str(f))
+        # Should not raise — error is caught + logged
+        await ch.send_media("12345@s.whatsapp.net", part, {"chat_jid": "12345@s.whatsapp.net"})
 
 
 # ===================================================================
