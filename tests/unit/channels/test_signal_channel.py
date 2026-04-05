@@ -377,6 +377,49 @@ class TestExtractQuoteContent:
         text_parts = [p for p in parts if hasattr(p, "text")]
         assert any("UNTRUSTED reply-to" in p.text for p in text_parts)
 
+    async def test_quote_image_only_still_has_reply_header(self):
+        """When quote is image-only (no text) and download succeeds, the
+        reply-to text block should still be emitted with 'Media: image'."""
+        ch = _make_channel()
+        tmp = Path(tempfile.mkdtemp())
+        fake_img = tmp / "signal_att_photo.jpg"
+        fake_img.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 50)
+        ch.daemon.download_attachment = AsyncMock(return_value=fake_img)
+        data_message = {
+            "quote": {
+                "text": "",  # image-only quote
+                "author": "+85211111111",
+                "attachments": [{"id": "att-xyz", "contentType": "image/jpeg"}],
+            }
+        }
+        parts = await ch._extract_quote_content(data_message)
+        # Must have BOTH text header AND image content
+        text_parts = [p for p in parts if hasattr(p, "text")]
+        img_parts = [p for p in parts if p.type == ContentType.IMAGE]
+        assert len(text_parts) == 1
+        assert len(img_parts) == 1
+        assert "UNTRUSTED reply-to" in text_parts[0].text
+        assert "Media: image" in text_parts[0].text
+
+    async def test_quote_file_attachment_labelled(self):
+        ch = _make_channel()
+        tmp = Path(tempfile.mkdtemp())
+        fake_doc = tmp / "signal_att_doc.pdf"
+        fake_doc.write_bytes(b"%PDF-1.5")
+        ch.daemon.download_attachment = AsyncMock(return_value=fake_doc)
+        data_message = {
+            "quote": {
+                "text": "see this",
+                "author": "+85211111111",
+                "attachments": [{"id": "a1", "contentType": "application/pdf", "fileName": "doc.pdf"}],
+            }
+        }
+        parts = await ch._extract_quote_content(data_message)
+        text_parts = [p for p in parts if hasattr(p, "text")]
+        file_parts = [p for p in parts if p.type == ContentType.FILE]
+        assert len(file_parts) == 1
+        assert "file: doc.pdf" in text_parts[0].text
+
     async def test_no_quote_returns_empty(self):
         ch = _make_channel()
         data_message = {"message": "hello"}

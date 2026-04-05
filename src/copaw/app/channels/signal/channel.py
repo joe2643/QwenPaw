@@ -841,11 +841,10 @@ class SignalChannel(BaseChannel):
 
         # Download quoted attachments (images, files, etc.)
         quote_attachments = quote.get("attachments") or []
-        media_labels = []
+        media_labels = []  # short type labels for the text block
         for att in quote_attachments:
             att_ct = att.get("contentType") or ""
             att_fname = att.get("fileName") or ""
-            # signal-cli quote attachments may have a thumbnail or id
             att_id = att.get("id") or ""
             if att_id:
                 local = await self.daemon.download_attachment(att_id, self._media_dir)
@@ -861,18 +860,22 @@ class SignalChannel(BaseChannel):
                             pass
                     if att_ct.startswith("image/"):
                         parts.append(ImageContent(type=ContentType.IMAGE, image_url=str(local)))
+                        media_labels.append("image")
                     elif att_ct.startswith("video/"):
                         parts.append(VideoContent(type=ContentType.VIDEO, video_url=str(local)))
+                        media_labels.append("video")
                     elif att_ct.startswith("audio/"):
                         parts.append(AudioContent(type=ContentType.AUDIO, data=str(local)))
+                        media_labels.append("audio")
                     else:
                         parts.append(FileContent(type=ContentType.FILE, file_url=str(local)))
+                        media_labels.append(f"file: {att_fname}" if att_fname else "file")
                     continue
             # No downloadable attachment — describe it as text
-            label = att_fname or att_ct or "attachment"
-            media_labels.append(label)
+            media_labels.append(att_fname or att_ct or "attachment")
 
-        # Build OpenClaw-style bounded reply-to block
+        # Build OpenClaw-style bounded reply-to block (always emit header
+        # when we have text OR attachments, so media ContentParts have context)
         if quote_text or media_labels:
             lines = ["=== UNTRUSTED reply-to (this message quotes an earlier one) ==="]
             author_str = quote_author[:36] if quote_author else "unknown"
