@@ -697,30 +697,43 @@ class BaseChannel(ABC):
     def _extract_query_from_payload(self, payload: Any) -> str:
         """Extract query text from payload for command detection.
 
+        Channels may prepend context parts (group history, reply-to
+        blocks) to content_parts before the user's actual message. We
+        skip those so that slash commands like ``/new`` are detected
+        even when history context sits at index 0.
+
         Args:
             payload: Native dict or AgentRequest
 
         Returns:
             Query text string (empty if not found)
         """
-        if isinstance(payload, dict):
-            parts = payload.get("content_parts") or []
+        # Context-marker prefixes that channels use to inject bounded
+        # untrusted metadata (group history, reply-to, etc.). These are
+        # never the user's actual message.
+        SKIP_PREFIXES = ("=== ", "[Replying")
+
+        def _pick(parts) -> str:
+            first_text = ""
             for part in parts:
                 if isinstance(part, dict) and part.get("type") == "text":
-                    return part.get("text") or ""
-                if hasattr(part, "type") and part.type == "text":
-                    return getattr(part, "text", "") or ""
-            return ""
+                    text = part.get("text") or ""
+                elif hasattr(part, "type") and part.type == "text":
+                    text = getattr(part, "text", "") or ""
+                else:
+                    continue
+                if not first_text:
+                    first_text = text
+                if not any(text.startswith(p) for p in SKIP_PREFIXES):
+                    return text
+            return first_text
+
+        if isinstance(payload, dict):
+            return _pick(payload.get("content_parts") or [])
         if hasattr(payload, "input"):
             inp = payload.input or []
             if inp and hasattr(inp[0], "content"):
-                content = inp[0].content or []
-                for part in content:
-                    if isinstance(part, dict):
-                        if part.get("type") == "text":
-                            return part.get("text") or ""
-                    elif hasattr(part, "type") and part.type == "text":
-                        return getattr(part, "text", "") or ""
+                return _pick(inp[0].content or [])
         return ""
 
     def _debounce_payload(self, payload: Any) -> bool:
