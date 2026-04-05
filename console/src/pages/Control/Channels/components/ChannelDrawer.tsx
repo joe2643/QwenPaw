@@ -274,7 +274,6 @@ export function ChannelDrawer({
         name="allow_from"
         label={t("channels.allowFrom")}
         tooltip={t("channels.allowFromTooltip")}
-        initialValue={[]}
       >
         <Select
           mode="tags"
@@ -1034,10 +1033,10 @@ export function ChannelDrawer({
             <Form.Item name="self_chat_mode" label="Self Chat Mode" valuePropName="checked" tooltip="Process own messages">
               <Switch />
             </Form.Item>
-            <Form.Item name="groups" label="Group Allowlist" tooltip="WhatsApp group JIDs" initialValue={[]}>
+            <Form.Item name="groups" label="Group Allowlist" tooltip="WhatsApp group JIDs">
               <Select mode="tags" placeholder="120363421135228220@g.us" tokenSeparators={[","," ","\n"]} />
             </Form.Item>
-            <Form.Item name="group_allow_from" label="Group Allow From" tooltip='Who can trigger bot in groups. ["*"] = everyone.' initialValue={[]}>
+            <Form.Item name="group_allow_from" label="Group Allow From" tooltip='Who can trigger bot in groups. ["*"] = everyone.'>
               <Select mode="tags" placeholder="* (everyone)" tokenSeparators={[","," "]} />
             </Form.Item>
             <Form.Item name="filter_thinking" label="Filter Thinking" valuePropName="checked" tooltip="Hide reasoning/thinking blocks from replies">
@@ -1071,10 +1070,10 @@ export function ChannelDrawer({
             <Form.Item name="media_max_mb" label="Media Max (MB)" initialValue={8}>
               <InputNumber min={1} max={100} style={{ width: "100%" }} />
             </Form.Item>
-            <Form.Item name="groups" label="Group Allowlist" tooltip="Signal group IDs (base64)" initialValue={[]}>
+            <Form.Item name="groups" label="Group Allowlist" tooltip="Signal group IDs (base64)">
               <Select mode="tags" placeholder="sBlO8LhzR42X...=" tokenSeparators={[","," ","\n"]} />
             </Form.Item>
-            <Form.Item name="group_allow_from" label="Group Allow From" tooltip='Who can trigger bot in groups. ["*"] = everyone.' initialValue={[]}>
+            <Form.Item name="group_allow_from" label="Group Allow From" tooltip='Who can trigger bot in groups. ["*"] = everyone.'>
               <Select mode="tags" placeholder="* (everyone)" tokenSeparators={[","," "]} />
             </Form.Item>
             <Form.Item name="filter_thinking" label="Filter Thinking" valuePropName="checked" tooltip="Hide reasoning/thinking blocks from replies">
