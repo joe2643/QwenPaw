@@ -872,16 +872,19 @@ class SignalChannel(BaseChannel):
             label = att_fname or att_ct or "attachment"
             media_labels.append(label)
 
-        # Build the text description of the quoted message
-        media_desc = ""
-        if media_labels:
-            media_desc = " [" + ", ".join(media_labels) + "]"
-        if quote_text or media_desc:
-            header = f"[Replying to {quote_author[:12]}"
+        # Build OpenClaw-style bounded reply-to block
+        if quote_text or media_labels:
+            lines = ["=== UNTRUSTED reply-to (this message quotes an earlier one) ==="]
+            author_str = quote_author[:36] if quote_author else "unknown"
+            lines.append(f"From: {author_str}")
             if quote_id:
-                header += f" (msg {quote_id})"
-            header += f": {quote_text[:200]}{media_desc}]"
-            parts.insert(0, TextContent(type=ContentType.TEXT, text=header))
+                lines.append(f"Quoted message id: {quote_id}")
+            if quote_text:
+                lines.append(f"Message: {quote_text[:400]}")
+            if media_labels:
+                lines.append(f"Media: {', '.join(media_labels)}")
+            lines.append("=== end of reply-to ===")
+            parts.insert(0, TextContent(type=ContentType.TEXT, text="\n".join(lines)))
 
         return parts
 

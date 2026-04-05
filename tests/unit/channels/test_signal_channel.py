@@ -349,7 +349,7 @@ class TestExtractQuoteContent:
         assert len(parts) >= 1
         text_parts = [p for p in parts if hasattr(p, "text")]
         combined = " ".join(p.text for p in text_parts)
-        assert "Replying to" in combined
+        assert "UNTRUSTED reply-to" in combined
         assert "original message" in combined
 
     async def test_quote_with_attachment_download(self):
@@ -375,7 +375,7 @@ class TestExtractQuoteContent:
         img_parts = [p for p in parts if p.type == ContentType.IMAGE]
         assert len(img_parts) == 1
         text_parts = [p for p in parts if hasattr(p, "text")]
-        assert any("Replying to" in p.text for p in text_parts)
+        assert any("UNTRUSTED reply-to" in p.text for p in text_parts)
 
     async def test_no_quote_returns_empty(self):
         ch = _make_channel()

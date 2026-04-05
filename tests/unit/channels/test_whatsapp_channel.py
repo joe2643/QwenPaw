@@ -225,7 +225,7 @@ class TestExtractQuoteContent:
         parts = await ch._extract_quote_content(MagicMock(), msg)
         assert len(parts) >= 1
         text_parts = [p for p in parts if hasattr(p, "text")]
-        assert any("Replying to" in p.text for p in text_parts)
+        assert any("UNTRUSTED reply-to" in p.text for p in text_parts)
         assert any("original text" in p.text for p in text_parts)
 
     async def test_quote_with_image_download(self):
@@ -258,7 +258,7 @@ class TestExtractQuoteContent:
         # Should have text description mentioning image
         text_parts = [p for p in parts if hasattr(p, "text")]
         combined = " ".join(p.text for p in text_parts)
-        assert "Replying to" in combined
+        assert "UNTRUSTED reply-to" in combined
         assert "image" in combined.lower()
 
     async def test_no_quoted_message_returns_empty(self):

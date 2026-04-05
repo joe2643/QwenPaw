@@ -428,8 +428,13 @@ class WhatsAppChannel(BaseChannel):
                 path = self._media_dir / f"wa_quote_{stanza_id[:12]}.jpg"
                 await client.download_any(quoted_msg, path=str(path))
                 if path.exists() and path.stat().st_size > 0:
+                    block = self._format_reply_context(
+                        sender=sender_label,
+                        body=quote_body,
+                        media_types=["image"],
+                    )
                     return [
-                        TextContent(type=ContentType.TEXT, text=f"[Replying to {sender_label}: {quote_body}]"),
+                        TextContent(type=ContentType.TEXT, text=block),
                         ImageContent(type=ContentType.IMAGE, image_url=str(path)),
                     ]
             except Exception:
@@ -445,15 +450,29 @@ class WhatsAppChannel(BaseChannel):
         if quoted_msg.HasField("stickerMessage"):
             media_types.append("sticker")
 
-        # Build description
-        media_desc = f" [{', '.join(media_types)}]" if media_types else ""
-        body_preview = quote_body[:200] if quote_body else ""
-
-        if not body_preview and not media_desc:
+        if not quote_body and not media_types:
             return []
 
-        header = f"[Replying to {sender_label}: {body_preview}{media_desc}]"
-        return [TextContent(type=ContentType.TEXT, text=header)]
+        return [TextContent(
+            type=ContentType.TEXT,
+            text=self._format_reply_context(
+                sender=sender_label,
+                body=quote_body,
+                media_types=media_types,
+            ),
+        )]
+
+    @staticmethod
+    def _format_reply_context(sender: str, body: str, media_types: List[str]) -> str:
+        """Build the OpenClaw-style bounded reply-to context block."""
+        lines = ["=== UNTRUSTED reply-to (this message quotes an earlier one) ==="]
+        lines.append(f"From: {sender}")
+        if body:
+            lines.append(f"Message: {body[:400]}")
+        if media_types:
+            lines.append(f"Media: {', '.join(media_types)}")
+        lines.append("=== end of reply-to ===")
+        return "\n".join(lines)
 
     def _check_access(self, is_group, chat_str, sender_str, sender_jid, client, msg, body) -> bool:
         """Check access control for incoming message.
