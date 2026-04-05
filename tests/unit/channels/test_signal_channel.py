@@ -1414,6 +1414,66 @@ class TestBotMentionHint:
         bot_id = account or (f"uuid:{account_uuid[:8]}" if account_uuid else "")
         assert bot_id == "uuid:82e0393a"
 
+
+# ===================================================================
+# TestUuidLikeNameFilter — reject bare-UUID "display names"
+# ===================================================================
+
+class TestUuidLikeNameFilter:
+    """Signal sometimes sends the raw UUID as sourceName when the user
+    has no real profile name. These should be treated as missing names."""
+
+    def test_looks_like_uuid_positive(self):
+        from copaw.app.channels.signal.channel import _looks_like_uuid
+        assert _looks_like_uuid("240bcdaf-a379-4691-b90e-186372d909c2") is True
+        # Case-insensitive hex
+        assert _looks_like_uuid("82E0393A-4C79-4905-B84D-986298F4F8C5") is True
+
+    def test_looks_like_uuid_negative(self):
+        from copaw.app.channels.signal.channel import _looks_like_uuid
+        assert _looks_like_uuid("Joe HO") is False
+        assert _looks_like_uuid("") is False
+        assert _looks_like_uuid("uuid:240bcdaf") is False  # our short form
+        assert _looks_like_uuid("+85251159218") is False
+        assert _looks_like_uuid("82e0393a-abc") is False  # partial
+
+    def test_remember_sender_skips_uuid_name(self):
+        ch = _make_channel()
+        ch._remember_sender(
+            "", "240bcdaf-a379-4691-b90e-186372d909c2",
+            "240bcdaf-a379-4691-b90e-186372d909c2",
+        )
+        assert ch._sender_names == {}
+
+    def test_remember_sender_keeps_real_name(self):
+        ch = _make_channel()
+        ch._remember_sender("+852111", "abc-1", "Joe HO")
+        assert ch._sender_names["+852111"] == "Joe HO"
+
+    def test_expand_mentions_drops_uuid_name(self):
+        """bbernhard sending name=full_uuid should NOT produce
+        '@<full-uuid> (uuid:<short>)' tokens."""
+        ch = _make_channel()
+        body = "\ufffc hi"
+        mentions = [{
+            "start": 0, "length": 1,
+            "uuid": "240bcdaf-a379-4691-b90e-186372d909c2",
+            "name": "240bcdaf-a379-4691-b90e-186372d909c2",  # Signal echoes uuid
+        }]
+        result = ch._expand_mentions(body, mentions)
+        # Must produce the clean "@uuid:<short>" form, NOT
+        # "@<full-uuid> (uuid:<short>)"
+        assert result == "@uuid:240bcdaf hi"
+
+    def test_format_sender_display_drops_uuid_name(self):
+        """Defensive: even if cache somehow held a UUID-name, display
+        should fall back to phone/uuid form."""
+        ch = _make_channel()
+        # Manually pollute cache
+        ch._sender_names["+852111"] = "abc12345-abcd-4905-b84d-986298f4f8c5"
+        label = ch._format_sender_display("+852111", "")
+        assert label == "+852111"
+
     def test_expand_mentions_uuid_only_fallback(self):
         ch = _make_channel()
         body = "\ufffc here"

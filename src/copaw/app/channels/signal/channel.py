@@ -44,6 +44,18 @@ from ..base import (
 
 import re as _re
 
+_UUID_LIKE = _re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    _re.IGNORECASE,
+)
+
+
+def _looks_like_uuid(s: str) -> bool:
+    """True if the string is a Signal/UUID identifier (used to ignore
+    'display names' that Signal sends as the raw UUID when the user has
+    no real profile name)."""
+    return bool(s) and bool(_UUID_LIKE.match(s))
+
 # ── File type detection by magic bytes ───────────────────────────
 _MAGIC_MAP = [
     (b"\xff\xd8\xff",             "image/jpeg",  "jpg"),
@@ -857,8 +869,13 @@ class SignalChannel(BaseChannel):
         return False
 
     def _remember_sender(self, source: str, source_uuid: str, name: str) -> None:
-        """Cache sourceName keyed by both phone and uuid."""
-        if not name:
+        """Cache sourceName keyed by both phone and uuid.
+
+        Signal sometimes sends the bare UUID as sourceName when the user
+        hasn't set a profile name — skip those so callers don't end up
+        with '@<full-uuid> (uuid:<short>)' tokens.
+        """
+        if not name or _looks_like_uuid(name):
             return
         if source:
             self._sender_names[source] = name
@@ -868,6 +885,9 @@ class SignalChannel(BaseChannel):
     def _format_sender_display(self, source: str, source_uuid: str) -> str:
         """Build a human-friendly sender label: 'Name (+phone)' / 'Name (uuid:xxx)' / fallback."""
         name = self._sender_names.get(source) or self._sender_names.get(source_uuid) or ""
+        # Defensive: if the cache already holds a UUID-looking "name", drop it.
+        if _looks_like_uuid(name):
+            name = ""
         phone = source or ""
         if name and phone:
             return f"{name} ({phone})"
@@ -949,11 +969,17 @@ class SignalChannel(BaseChannel):
             name = m.get("name") or ""
             number = m.get("number") or ""
             uuid_v = m.get("uuid") or ""
+            # Signal sends the raw UUID as "name" for users with no profile
+            # name — treat that as no name at all.
+            if _looks_like_uuid(name):
+                name = ""
             # Fill name from cache when mention doesn't carry it
             if not name and number:
                 name = self._sender_names.get(number, "")
             if not name and uuid_v:
                 name = self._sender_names.get(uuid_v, "")
+            if _looks_like_uuid(name):
+                name = ""
             # Always show name + id. Prefer phone over uuid for the id.
             id_str = number if number else (f"uuid:{uuid_v[:8]}" if uuid_v else "")
             if name and id_str:
