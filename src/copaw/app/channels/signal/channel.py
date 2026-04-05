@@ -467,6 +467,17 @@ class SignalChannel(BaseChannel):
             if not body and not attachments_raw:
                 return
 
+            # ── Download attachments early (needed for history media paths) ──
+            downloaded_media: List[Dict[str, str]] = []  # [{"path": ..., "type": ...}]
+            for att in attachments_raw:
+                att_id = att.get("id") or ""
+                content_type = att.get("contentType") or ""
+                if not att_id:
+                    continue
+                local = await self.daemon.download_attachment(att_id, self._media_dir)
+                if local:
+                    downloaded_media.append({"path": str(local), "type": content_type})
+
             # ── Access control ────────────────────────────────────────
             if group_id:
                 if self.group_policy == "allowlist" and self._groups:
@@ -474,10 +485,16 @@ class SignalChannel(BaseChannel):
                         return
                 if self.require_mention:
                     if not self._is_bot_mentioned(data_message, body):
-                        # Record in group history buffer
-                        if body or attachments_raw:
+                        # Record in group history buffer with media paths
+                        if body or downloaded_media:
+                            media_paths = [m["path"] for m in downloaded_media]
                             history = self._group_history.setdefault(group_id, [])
-                            history.append({"sender": source or source_uuid[:12], "body": body or "[media]", "ts": timestamp, "media": []})
+                            history.append({
+                                "sender": source or source_uuid[:12],
+                                "body": body or "[media]",
+                                "ts": timestamp,
+                                "media": media_paths,
+                            })
                             if len(history) > self._group_history_limit:
                                 self._group_history[group_id] = history[-self._group_history_limit:]
                         return
@@ -496,35 +513,23 @@ class SignalChannel(BaseChannel):
             if body:
                 content_parts.append(TextContent(type=ContentType.TEXT, text=body))
 
-            # Parse quote/reply-to
-            quote = data_message.get("quote")
-            quote_text = ""
-            if quote:
-                quote_text = quote.get("text") or ""
-                quote_author = quote.get("author") or quote.get("authorUuid") or ""
-                if quote_text:
-                    content_parts.insert(0, TextContent(
-                        type=ContentType.TEXT,
-                        text=f"[Replying to {quote_author[:12]}: {quote_text[:100]}]",
-                    ))
+            # Extract quote/reply-to content (text + media)
+            quote_parts = await self._extract_quote_content(data_message)
+            if quote_parts:
+                content_parts = quote_parts + content_parts
 
-            # Download and attach inbound attachments
-            for att in attachments_raw:
-                att_id = att.get("id") or ""
-                content_type = att.get("contentType") or ""
-                if not att_id:
-                    continue
-                local = await self.daemon.download_attachment(att_id, self._media_dir)
-                if not local:
-                    continue
-                if content_type.startswith("image/"):
-                    content_parts.append(ImageContent(type=ContentType.IMAGE, image_url=str(local)))
-                elif content_type.startswith("video/"):
-                    content_parts.append(VideoContent(type=ContentType.VIDEO, video_url=str(local)))
-                elif content_type.startswith("audio/"):
-                    content_parts.append(AudioContent(type=ContentType.AUDIO, data=str(local)))
+            # Add downloaded attachments as content parts
+            for m in downloaded_media:
+                ct = m["type"]
+                p = m["path"]
+                if ct.startswith("image/"):
+                    content_parts.append(ImageContent(type=ContentType.IMAGE, image_url=p))
+                elif ct.startswith("video/"):
+                    content_parts.append(VideoContent(type=ContentType.VIDEO, video_url=p))
+                elif ct.startswith("audio/"):
+                    content_parts.append(AudioContent(type=ContentType.AUDIO, data=p))
                 else:
-                    content_parts.append(FileContent(type=ContentType.FILE, file_url=str(local)))
+                    content_parts.append(FileContent(type=ContentType.FILE, file_url=p))
 
             if not content_parts:
                 return
@@ -631,6 +636,61 @@ class SignalChannel(BaseChannel):
             elif source == entry or source_uuid == entry:
                 return True
         return False
+
+    # ── Quote/reply-to extraction ──────────────────────────────────────
+
+    async def _extract_quote_content(self, data_message: Dict) -> List[Any]:
+        """Extract the content of a quoted/replied-to message.
+
+        Returns a list of content parts (text + media) representing the
+        original message being replied to, so the agent has full context
+        of what the user is responding to — not just a message ID.
+        """
+        quote = data_message.get("quote")
+        if not quote:
+            return []
+
+        parts: List[Any] = []
+        quote_text = quote.get("text") or ""
+        quote_author = quote.get("author") or quote.get("authorUuid") or ""
+        quote_id = quote.get("id") or ""
+
+        # Download quoted attachments (images, files, etc.)
+        quote_attachments = quote.get("attachments") or []
+        media_labels = []
+        for att in quote_attachments:
+            att_ct = att.get("contentType") or ""
+            att_fname = att.get("fileName") or ""
+            # signal-cli quote attachments may have a thumbnail or id
+            att_id = att.get("id") or ""
+            if att_id:
+                local = await self.daemon.download_attachment(att_id, self._media_dir)
+                if local:
+                    if att_ct.startswith("image/"):
+                        parts.append(ImageContent(type=ContentType.IMAGE, image_url=str(local)))
+                    elif att_ct.startswith("video/"):
+                        parts.append(VideoContent(type=ContentType.VIDEO, video_url=str(local)))
+                    elif att_ct.startswith("audio/"):
+                        parts.append(AudioContent(type=ContentType.AUDIO, data=str(local)))
+                    else:
+                        parts.append(FileContent(type=ContentType.FILE, file_url=str(local)))
+                    continue
+            # No downloadable attachment — describe it as text
+            label = att_fname or att_ct or "attachment"
+            media_labels.append(label)
+
+        # Build the text description of the quoted message
+        media_desc = ""
+        if media_labels:
+            media_desc = " [" + ", ".join(media_labels) + "]"
+        if quote_text or media_desc:
+            header = f"[Replying to {quote_author[:12]}"
+            if quote_id:
+                header += f" (msg {quote_id})"
+            header += f": {quote_text[:200]}{media_desc}]"
+            parts.insert(0, TextContent(type=ContentType.TEXT, text=header))
+
+        return parts
 
     # ── Outbound send ─────────────────────────────────────────────────
 
