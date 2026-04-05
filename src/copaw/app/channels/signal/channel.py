@@ -882,19 +882,19 @@ class SignalChannel(BaseChannel):
             name = m.get("name") or ""
             number = m.get("number") or ""
             uuid_v = m.get("uuid") or ""
-            # Prefer "@Name" if name known (self or cached), else "@+phone", else "@uuid:xxx"
+            # Fill name from cache when mention doesn't carry it
             if not name and number:
                 name = self._sender_names.get(number, "")
             if not name and uuid_v:
                 name = self._sender_names.get(uuid_v, "")
-            if name and number:
-                token = f"@{name} ({number})"
-            elif number:
-                token = f"@{number}"
+            # Always show name + id. Prefer phone over uuid for the id.
+            id_str = number if number else (f"uuid:{uuid_v[:8]}" if uuid_v else "")
+            if name and id_str:
+                token = f"@{name} ({id_str})"
             elif name:
                 token = f"@{name}"
-            elif uuid_v:
-                token = f"@uuid:{uuid_v[:8]}"
+            elif id_str:
+                token = f"@{id_str}"
             else:
                 token = "@someone"
             result = result[:start] + token + result[start + length:]

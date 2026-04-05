@@ -1279,8 +1279,25 @@ class TestSenderDisplayAndMentions:
         body = "\ufffc hello"
         mentions = [{"start": 0, "length": 1, "uuid": "uuid-abc123"}]
         result = ch._expand_mentions(body, mentions)
-        assert "@Charlie" in result
+        # Name + uuid tail together
+        assert "@Charlie (uuid:uuid-abc" in result
         assert "\ufffc" not in result
+
+    def test_expand_mentions_name_with_uuid_tail(self):
+        """Name-only mentions (no phone) should still show the uuid tag."""
+        ch = _make_channel()
+        body = "\ufffc ping"
+        mentions = [{"start": 0, "length": 1, "uuid": "abcdef12-3456", "name": "Dana"}]
+        result = ch._expand_mentions(body, mentions)
+        assert "@Dana (uuid:abcdef12)" in result
+
+    def test_expand_mentions_name_with_number_tail(self):
+        """Name + phone stays as 'name (+phone)'."""
+        ch = _make_channel()
+        body = "\ufffc hi"
+        mentions = [{"start": 0, "length": 1, "number": "+852111", "name": "Eve"}]
+        result = ch._expand_mentions(body, mentions)
+        assert result == "@Eve (+852111) hi"
 
     def test_expand_mentions_uuid_only_fallback(self):
         ch = _make_channel()
