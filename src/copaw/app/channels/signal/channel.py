@@ -243,9 +243,17 @@ class SignalDaemon:
         bbernhard uses `group.{base64(internal_id)}` for groups and the
         raw phone number for direct recipients. Signal-cli's internal
         group ID (what we store in config) is the base64 payload.
+
+        Accepts either the raw internal_id, the bbernhard-formatted
+        `group.xxx` string, or CoPaw's session-prefixed `group:xxx`
+        form (from effective_sender). Returns bbernhard-compatible
+        recipient.
         """
         if not is_group:
             return target
+        # Strip CoPaw session prefix so we don't double-wrap.
+        if target.startswith("group:"):
+            target = target[len("group:"):]
         if target.startswith("group."):
             return target
         return "group." + base64.b64encode(target.encode()).decode().rstrip("=") + "="

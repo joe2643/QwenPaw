@@ -911,6 +911,27 @@ class TestSignalDaemonToRecipient:
         already = "group.c0JsTzhMaHpSNDJYTkJiVXFVck5WTm9reU9lMk5kRFpDVHMwZlN1Wm5KYz0="
         assert SignalDaemon._to_recipient(already, is_group=True) == already
 
+    def test_group_copaw_session_prefix_stripped(self):
+        """CoPaw's effective_sender uses 'group:<internal_id>' form.
+        _to_recipient must strip the prefix before base64-encoding,
+        otherwise bbernhard rejects with 'Invalid identifier'."""
+        copaw_form = "group:/mWgQycGP2MENGpJLXkcIx5tQoSEMTdOC5017dNSDA0="
+        internal = "/mWgQycGP2MENGpJLXkcIx5tQoSEMTdOC5017dNSDA0="
+        # Both forms should produce the SAME bbernhard recipient
+        via_prefix = SignalDaemon._to_recipient(copaw_form, is_group=True)
+        via_raw = SignalDaemon._to_recipient(internal, is_group=True)
+        assert via_prefix == via_raw
+        assert via_prefix.startswith("group.")
+        # And crucially: the inner payload base64-decodes back to the
+        # RAW internal id, NOT the group:-prefixed form.
+        import base64
+        inner_b64 = via_prefix[len("group."):]
+        # Add padding if needed
+        pad = "=" * (-len(inner_b64) % 4)
+        decoded = base64.b64decode(inner_b64 + pad).decode()
+        assert decoded == internal
+        assert "group:" not in decoded
+
 
 class TestSignalDaemonConnect:
     """Tests for SignalDaemon.connect() against bbernhard's /v1/about."""
