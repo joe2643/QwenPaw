@@ -854,7 +854,21 @@ class SignalChannel(BaseChannel):
                     is_group=is_group,
                 ))
 
-            await self.consume_one(request)
+            # Route through UnifiedQueueManager (via self._enqueue) so
+            # each (signal, session_id, priority) gets its own queue
+            # and worker task. Messages from different DMs/groups
+            # process in parallel; same-session messages still
+            # serialize (prevents races inside one conversation).
+            #
+            # NOTE: direct `await self.consume_one(request)` would
+            # block the SSE receive loop until the agent's full
+            # response finishes, which serializes ALL inbound traffic.
+            # Fall back to direct call if no enqueue callback is
+            # attached (unit tests set up channels without the manager).
+            if self._enqueue is not None:
+                self._enqueue(request)
+            else:
+                await self.consume_one(request)
 
         except Exception:
             logger.exception("signal: error processing SSE event")
