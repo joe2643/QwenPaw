@@ -359,11 +359,15 @@ class WhatsAppChannel(BaseChannel):
 
         Returns content parts (text + media) so the agent has full context
         of what the user is responding to — not just a stanza ID.
+
+        Note: quotedMessage is a stripped-down proto — media download keys
+        are usually absent, so we extract text/captions and describe media
+        types rather than attempting (and failing) to download.
         """
         # contextInfo lives on extendedTextMessage, imageMessage, etc.
         ctx = None
         for field in ("extendedTextMessage", "imageMessage", "videoMessage",
-                       "audioMessage", "documentMessage"):
+                       "audioMessage", "documentMessage", "stickerMessage"):
             if msg.HasField(field):
                 sub = getattr(msg, field)
                 if hasattr(sub, "contextInfo"):
@@ -383,34 +387,73 @@ class WhatsAppChannel(BaseChannel):
         else:
             sender_label = "unknown"
 
-        # Resolve LID to phone for display
-        if sender_label and f"{sender_label}@lid" in self._lid_cache:
-            cached = self._lid_cache[f"{sender_label}@lid"]
+        # Resolve LID to phone/name for display
+        lid_key = f"{sender_label}@lid" if sender_label and not sender_label.startswith("+") else ""
+        if lid_key:
+            if lid_key not in self._lid_cache:
+                try:
+                    from neonize.utils import build_jid
+                    lid_jid = build_jid(sender_label, "lid")
+                    await self._resolve_lid(client, lid_key, lid_jid)
+                except Exception:
+                    pass
+            cached = self._lid_cache.get(lid_key, {})
             phone = cached.get("phone", "")
-            if phone:
+            name = cached.get("name", "")
+            if phone and name:
+                sender_label = f"+{phone} ({name})"
+            elif phone:
                 sender_label = f"+{phone}"
 
-        # Extract quoted message content by reusing _extract_message_content
-        # Generate a unique ID for downloaded media
-        stanza_id = getattr(ctx, "stanzaId", "") or "quote"
-        quote_body, quote_parts = await self._extract_message_content(
-            client, quoted_msg, f"reply_{stanza_id[:12]}"
-        )
+        # Extract what we can from the quoted message proto
+        quote_body = ""
+        media_types = []
 
-        parts: List[Any] = []
-        # Build header text
+        # Text
+        if getattr(quoted_msg, "conversation", ""):
+            quote_body = quoted_msg.conversation
+        elif quoted_msg.HasField("extendedTextMessage") and quoted_msg.extendedTextMessage.text:
+            quote_body = quoted_msg.extendedTextMessage.text
+
+        # Detect media types present in quoted message
+        if quoted_msg.HasField("imageMessage"):
+            caption = getattr(quoted_msg.imageMessage, "caption", "") or ""
+            if caption and not quote_body:
+                quote_body = caption
+            media_types.append("image")
+            # Try to download quoted image (may work if media key is present)
+            stanza_id = getattr(ctx, "stanzaId", "") or "quote"
+            try:
+                self._media_dir.mkdir(parents=True, exist_ok=True)
+                path = self._media_dir / f"wa_quote_{stanza_id[:12]}.jpg"
+                await client.download_media_with_path(quoted_msg, str(path))
+                if path.exists() and path.stat().st_size > 0:
+                    return [
+                        TextContent(type=ContentType.TEXT, text=f"[Replying to {sender_label}: {quote_body}]"),
+                        ImageContent(type=ContentType.IMAGE, image_url=str(path)),
+                    ]
+            except Exception:
+                pass  # Download failed — describe instead
+        if quoted_msg.HasField("videoMessage"):
+            media_types.append("video")
+        if quoted_msg.HasField("audioMessage"):
+            ptt = getattr(quoted_msg.audioMessage, "ptt", False)
+            media_types.append("voice note" if ptt else "audio")
+        if quoted_msg.HasField("documentMessage"):
+            fname = getattr(quoted_msg.documentMessage, "fileName", "") or ""
+            media_types.append(f"file: {fname}" if fname else "document")
+        if quoted_msg.HasField("stickerMessage"):
+            media_types.append("sticker")
+
+        # Build description
+        media_desc = f" [{', '.join(media_types)}]" if media_types else ""
         body_preview = quote_body[:200] if quote_body else ""
-        media_count = sum(1 for p in quote_parts if getattr(p, "type", None) != ContentType.TEXT)
-        media_desc = f" [+{media_count} media]" if media_count else ""
+
+        if not body_preview and not media_desc:
+            return []
+
         header = f"[Replying to {sender_label}: {body_preview}{media_desc}]"
-        parts.append(TextContent(type=ContentType.TEXT, text=header))
-
-        # Include quoted media so the agent can see what was replied to
-        for p in quote_parts:
-            if getattr(p, "type", None) != ContentType.TEXT:
-                parts.append(p)
-
-        return parts
+        return [TextContent(type=ContentType.TEXT, text=header)]
 
     def _check_access(self, is_group, chat_str, sender_str, sender_jid, client, msg, body) -> bool:
         """Check access control for incoming message.
@@ -476,7 +519,10 @@ class WhatsAppChannel(BaseChannel):
                 if not self._is_bot_mentioned(msg, body):
                     # Buffer for later context injection when bot IS mentioned
                     if body or content_parts:
-                        display = self._format_sender(_jid_to_str(sender_jid))
+                        # Resolve LID to phone/name for readable history
+                        if sender_str.endswith("@lid"):
+                            await self._resolve_lid(client, sender_str, sender_jid)
+                        display = self._format_sender(sender_str)
                         history = self._group_history.setdefault(chat_str, [])
                         history.append({
                             "sender": display,
@@ -569,6 +615,8 @@ class WhatsAppChannel(BaseChannel):
                 "is_group": is_group,
                 "msg_id": msg_id,
                 "timestamp": timestamp,
+                "bot_phone": f"+{self._bot_phone}" if self._bot_phone else "",
+                "bot_lid": self._bot_lid,
             }
             session_id = self.resolve_session_id(effective_sender, channel_meta)
             request = self.build_agent_request_from_user_content(
@@ -680,10 +728,10 @@ class WhatsAppChannel(BaseChannel):
                 else:
                     qp_user = ""
                 if qp_user and (qp_user == my_lid or qp_user == my_phone):
-                    logger.warning("whatsapp: reply-to-bot DETECTED")
+                    logger.debug("whatsapp: reply-to-bot detected")
                     return True
         
-        logger.warning("whatsapp: mention check FAILED - my_lid=%s my_phone=%s body=%s",
+        logger.debug("whatsapp: mention check failed - my_lid=%s my_phone=%s body=%s",
                      my_lid, my_phone, body[:60])
         return False
 
