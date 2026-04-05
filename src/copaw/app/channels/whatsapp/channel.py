@@ -582,27 +582,16 @@ class WhatsAppChannel(BaseChannel):
             # Strip bot @mention from body text so commands like "/new" work
             # even when prefixed with @+phone. This happens BEFORE the
             # [From ...] prefix wrap so command detection sees clean text.
-            if self._bot_phone or self._bot_lid:
-                import re as _re
-                mention_patterns = []
-                if self._bot_phone:
-                    mention_patterns.append(rf"@\+?{_re.escape(self._bot_phone)}\s*")
-                if self._bot_lid:
-                    mention_patterns.append(rf"@{_re.escape(self._bot_lid)}\s*")
-                for i, part in enumerate(content_parts):
-                    if hasattr(part, "type") and part.type == ContentType.TEXT:
-                        txt = part.text or ""
-                        if txt.startswith("---") or txt.startswith("[Replying"):
-                            continue
-                        for pat in mention_patterns:
-                            txt = _re.sub(pat, "", txt).strip()
-                        if txt != (part.text or ""):
-                            content_parts[i] = TextContent(type=ContentType.TEXT, text=txt)
-                        break
-                # Update body so command detection sees stripped text
-                if body:
-                    for pat in mention_patterns:
-                        body = _re.sub(pat, "", body).strip()
+            body = self._strip_bot_mention(body)
+            for i, part in enumerate(content_parts):
+                if hasattr(part, "type") and part.type == ContentType.TEXT:
+                    txt = part.text or ""
+                    if txt.startswith("---") or txt.startswith("[Replying"):
+                        continue
+                    stripped = self._strip_bot_mention(txt)
+                    if stripped != txt:
+                        content_parts[i] = TextContent(type=ContentType.TEXT, text=stripped)
+                    break
 
             # Detect slash commands (/new, /stop, /clear, etc.)
             has_bot_command = bool(body and body.lstrip().startswith("/"))
@@ -809,6 +798,25 @@ class WhatsAppChannel(BaseChannel):
         if phone:
             return f"+{phone}"
         return lid_str
+
+    def _strip_bot_mention(self, text: str) -> str:
+        """Remove bot @mention (e.g. '@+817089933036') from text.
+
+        Handles both @phone and @LID forms so that slash commands
+        preceded by a mention ("@+817089933036 /new") are recognized.
+        """
+        if not text:
+            return text
+        import re as _re
+        patterns = []
+        if self._bot_phone:
+            patterns.append(rf"@\+?{_re.escape(self._bot_phone)}\s*")
+        if self._bot_lid:
+            patterns.append(rf"@{_re.escape(self._bot_lid)}\s*")
+        out = text
+        for pat in patterns:
+            out = _re.sub(pat, "", out).strip()
+        return out
 
     # ── Outbound send ─────────────────────────────────────────────────
 

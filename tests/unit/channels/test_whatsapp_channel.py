@@ -1,0 +1,709 @@
+# -*- coding: utf-8 -*-
+# pylint: disable=protected-access
+"""Unit tests for WhatsApp channel."""
+from __future__ import annotations
+
+import asyncio
+import os
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+
+import pytest
+
+# ---------------------------------------------------------------------------
+# Mock neonize before importing the channel module so the import does not fail
+# in environments where neonize is not installed.
+# ---------------------------------------------------------------------------
+
+_neonize_mods = [
+    "neonize",
+    "neonize.aioze",
+    "neonize.aioze.client",
+    "neonize.events",
+    "neonize.utils",
+    "neonize.proto",
+    "neonize.proto.waE2E",
+    "neonize.proto.waE2E.WAWebProtobufsE2E_pb2",
+]
+for mod in _neonize_mods:
+    if mod not in sys.modules:
+        sys.modules[mod] = MagicMock()
+
+# Provide lightweight stubs that the channel code actually touches
+_utils_mod = sys.modules["neonize.utils"]
+_utils_mod.build_jid = lambda user, server: MagicMock(User=user, Server=server)
+
+# Ensure NEONIZE_AVAILABLE is True so WhatsAppChannel can be instantiated
+import importlib
+from copaw.app.channels.whatsapp import channel as _wa_mod
+_wa_mod.NEONIZE_AVAILABLE = True
+_wa_mod.NewAClient = MagicMock
+
+from agentscope_runtime.engine.schemas.agent_schemas import (
+    TextContent,
+    ImageContent,
+    AudioContent,
+    FileContent,
+    ContentType,
+)
+
+from copaw.app.channels.whatsapp.channel import (
+    WhatsAppChannel,
+    _jid_to_str,
+    _str_to_jid,
+    _is_group_jid,
+    _MEDIA_DIR,
+    WHATSAPP_MAX_TEXT_LENGTH,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_channel(**overrides: Any) -> WhatsAppChannel:
+    """Create a WhatsAppChannel with dummy process handler."""
+
+    async def _noop_process(_request):
+        yield  # pragma: no cover
+
+    defaults = {
+        "process": _noop_process,
+        "enabled": True,
+        "auth_dir": tempfile.mkdtemp(),
+    }
+    defaults.update(overrides)
+    ch = WhatsAppChannel(**defaults)
+    ch._client = MagicMock()
+    ch._connected = True
+    return ch
+
+
+def _make_proto_message(**fields):
+    """Build a lightweight mock that behaves like a protobuf WAMessage.
+
+    Usage::
+
+        msg = _make_proto_message(conversation="hello")
+        msg = _make_proto_message(
+            extendedTextMessage=MagicMock(text="hi", contextInfo=MagicMock(...)),
+        )
+    """
+    msg = MagicMock()
+    # HasField returns True only for keys explicitly supplied
+    _present = set(fields.keys())
+    msg.HasField = lambda name: name in _present
+    for k, v in fields.items():
+        setattr(msg, k, v)
+    # Provide defaults for commonly accessed scalar fields
+    if "conversation" not in fields:
+        msg.conversation = ""
+    return msg
+
+
+# ===================================================================
+# TestExtractMessageContent
+# ===================================================================
+
+class TestExtractMessageContent:
+    async def test_text_conversation(self):
+        ch = _make_channel()
+        msg = _make_proto_message(conversation="hello world")
+        body, parts = await ch._extract_message_content(MagicMock(), msg, "id1")
+        assert body == "hello world"
+        assert len(parts) == 1
+        assert parts[0].type == ContentType.TEXT
+        assert parts[0].text == "hello world"
+
+    async def test_extended_text_message(self):
+        ch = _make_channel()
+        etm = MagicMock()
+        etm.text = "extended hello"
+        msg = _make_proto_message(extendedTextMessage=etm)
+        msg.conversation = ""
+        body, parts = await ch._extract_message_content(MagicMock(), msg, "id2")
+        assert body == "extended hello"
+        assert any(p.text == "extended hello" for p in parts if hasattr(p, "text"))
+
+    async def test_image_with_caption(self):
+        ch = _make_channel()
+        img_msg = MagicMock()
+        img_msg.caption = "nice photo"
+        client = MagicMock()
+        client.download_any = AsyncMock()
+        msg = _make_proto_message(imageMessage=img_msg)
+        msg.conversation = ""
+
+        body, parts = await ch._extract_message_content(client, msg, "id3")
+        # Caption should appear as text
+        text_parts = [p for p in parts if hasattr(p, "text")]
+        assert any("nice photo" in p.text for p in text_parts)
+        # Image content part should be present
+        img_parts = [p for p in parts if p.type == ContentType.IMAGE]
+        assert len(img_parts) == 1
+        client.download_any.assert_called_once()
+
+    async def test_audio_ptt(self):
+        ch = _make_channel()
+        audio = MagicMock()
+        audio.ptt = True
+        client = MagicMock()
+        client.download_any = AsyncMock()
+        msg = _make_proto_message(audioMessage=audio)
+        msg.conversation = ""
+
+        body, parts = await ch._extract_message_content(client, msg, "id4")
+        audio_parts = [p for p in parts if p.type == ContentType.AUDIO]
+        assert len(audio_parts) == 1
+        # PTT uses .ogg extension
+        assert audio_parts[0].data.endswith(".ogg")
+
+    async def test_audio_non_ptt(self):
+        ch = _make_channel()
+        audio = MagicMock()
+        audio.ptt = False
+        client = MagicMock()
+        client.download_any = AsyncMock()
+        msg = _make_proto_message(audioMessage=audio)
+        msg.conversation = ""
+
+        body, parts = await ch._extract_message_content(client, msg, "id5")
+        audio_parts = [p for p in parts if p.type == ContentType.AUDIO]
+        assert len(audio_parts) == 1
+        # Non-PTT uses .m4a extension
+        assert audio_parts[0].data.endswith(".m4a")
+
+    async def test_document_path_traversal_sanitized(self):
+        ch = _make_channel()
+        doc = MagicMock()
+        doc.fileName = "../../../etc/passwd"
+        client = MagicMock()
+        client.download_any = AsyncMock()
+        msg = _make_proto_message(documentMessage=doc)
+        msg.conversation = ""
+
+        body, parts = await ch._extract_message_content(client, msg, "id6")
+        file_parts = [p for p in parts if p.type == ContentType.FILE]
+        assert len(file_parts) == 1
+        # Path should be sanitized — only the final component "passwd"
+        saved_path = Path(file_parts[0].file_url)
+        assert saved_path.name == "passwd"
+        assert ".." not in str(saved_path)
+        # Should be within media dir
+        assert str(ch._media_dir) in str(saved_path.parent)
+
+
+# ===================================================================
+# TestExtractQuoteContent
+# ===================================================================
+
+class TestExtractQuoteContent:
+    async def test_quote_with_text_only(self):
+        ch = _make_channel()
+        ctx = MagicMock()
+        ctx.HasField = lambda name: name == "quotedMessage"
+        ctx.participant = "123456@s.whatsapp.net"
+        quoted = _make_proto_message(conversation="original text")
+        # Ensure text extraction works
+        quoted.extendedTextMessage = MagicMock()
+        quoted.HasField = lambda name: name == "extendedTextMessage" if name == "extendedTextMessage" else False
+        quoted.extendedTextMessage.text = ""
+        # Use conversation path
+        quoted.conversation = "original text"
+        quoted.HasField = lambda name: False  # No media fields
+        ctx.quotedMessage = quoted
+        ctx.stanzaId = "stanza1"
+
+        etm = MagicMock()
+        etm.text = "reply text"
+        etm.contextInfo = ctx
+        msg = _make_proto_message(extendedTextMessage=etm)
+
+        parts = await ch._extract_quote_content(MagicMock(), msg)
+        assert len(parts) >= 1
+        text_parts = [p for p in parts if hasattr(p, "text")]
+        assert any("Replying to" in p.text for p in text_parts)
+        assert any("original text" in p.text for p in text_parts)
+
+    async def test_quote_with_image_download(self):
+        ch = _make_channel()
+        ctx = MagicMock()
+        ctx.HasField = lambda name: name == "quotedMessage"
+        ctx.participant = "sender@s.whatsapp.net"
+        ctx.stanzaId = "stanza2"
+
+        img = MagicMock()
+        img.caption = "photo caption"
+
+        quoted = MagicMock()
+        quoted.conversation = ""
+        quoted.HasField = lambda name: name == "imageMessage"
+        quoted.imageMessage = img
+        ctx.quotedMessage = quoted
+
+        etm = MagicMock()
+        etm.text = "responding"
+        etm.contextInfo = ctx
+        msg = _make_proto_message(extendedTextMessage=etm)
+
+        # Simulate download failure (common for quoted messages)
+        client = MagicMock()
+        client.download_any = AsyncMock(side_effect=Exception("no media key"))
+
+        parts = await ch._extract_quote_content(client, msg)
+        assert len(parts) >= 1
+        # Should have text description mentioning image
+        text_parts = [p for p in parts if hasattr(p, "text")]
+        combined = " ".join(p.text for p in text_parts)
+        assert "Replying to" in combined
+        assert "image" in combined.lower()
+
+    async def test_no_quoted_message_returns_empty(self):
+        ch = _make_channel()
+        # Message with no contextInfo
+        msg = _make_proto_message(conversation="plain message")
+        parts = await ch._extract_quote_content(MagicMock(), msg)
+        assert parts == []
+
+    async def test_quote_participant_lid_resolution(self):
+        ch = _make_channel()
+        # Pre-populate LID cache
+        ch._lid_cache["123456@lid"] = {"phone": "85251159218", "name": "Alice"}
+
+        ctx = MagicMock()
+        ctx.HasField = lambda name: name == "quotedMessage"
+        ctx.participant = "123456@lid"
+        ctx.stanzaId = "stanza_lid"
+
+        quoted = MagicMock()
+        quoted.conversation = "lid message"
+        quoted.HasField = lambda name: False
+        ctx.quotedMessage = quoted
+
+        etm = MagicMock()
+        etm.text = "reply"
+        etm.contextInfo = ctx
+        msg = _make_proto_message(extendedTextMessage=etm)
+
+        parts = await ch._extract_quote_content(MagicMock(), msg)
+        assert len(parts) >= 1
+        text_parts = [p for p in parts if hasattr(p, "text")]
+        combined = " ".join(p.text for p in text_parts)
+        # Should show resolved phone number, not raw LID
+        assert "+85251159218" in combined
+
+
+# ===================================================================
+# TestCheckAccess
+# ===================================================================
+
+class TestCheckAccess:
+    def test_group_policy_open_allows(self):
+        ch = _make_channel(group_policy="open")
+        assert ch._check_access(
+            is_group=True, chat_str="groupA@g.us",
+            sender_str="user@s.whatsapp.net",
+            sender_jid=MagicMock(), client=MagicMock(),
+            msg=MagicMock(), body="hi",
+        ) is True
+
+    def test_group_policy_allowlist_group_in_list(self):
+        ch = _make_channel(group_policy="allowlist", groups=["groupA@g.us"])
+        assert ch._check_access(
+            is_group=True, chat_str="groupA@g.us",
+            sender_str="user@s.whatsapp.net",
+            sender_jid=MagicMock(), client=MagicMock(),
+            msg=MagicMock(), body="hi",
+        ) is True
+
+    def test_group_policy_allowlist_group_not_in_list(self):
+        ch = _make_channel(group_policy="allowlist", groups=["groupA@g.us"])
+        assert ch._check_access(
+            is_group=True, chat_str="groupB@g.us",
+            sender_str="user@s.whatsapp.net",
+            sender_jid=MagicMock(), client=MagicMock(),
+            msg=MagicMock(), body="hi",
+        ) is False
+
+    def test_group_policy_allowlist_empty_groups_blocks_all(self):
+        ch = _make_channel(group_policy="allowlist", groups=[])
+        assert ch._check_access(
+            is_group=True, chat_str="anygroup@g.us",
+            sender_str="user@s.whatsapp.net",
+            sender_jid=MagicMock(), client=MagicMock(),
+            msg=MagicMock(), body="hi",
+        ) is False
+
+    def test_dm_policy_open_allows(self):
+        """DM access is not blocked in _check_access (async check in _on_message)."""
+        ch = _make_channel(dm_policy="open")
+        assert ch._check_access(
+            is_group=False, chat_str="user@s.whatsapp.net",
+            sender_str="user@s.whatsapp.net",
+            sender_jid=MagicMock(), client=MagicMock(),
+            msg=MagicMock(), body="hi",
+        ) is True
+
+    def test_group_allow_from_stored(self):
+        """group_allow_from is stored on the channel for use in _on_message."""
+        ch = _make_channel(group_allow_from=["+85251159218"])
+        assert ch._group_allow_from == ["+85251159218"]
+
+
+# ===================================================================
+# TestGroupHistory
+# ===================================================================
+
+class TestGroupHistory:
+    def test_non_mentioned_message_recorded(self):
+        """When bot is NOT mentioned, message should be buffered in history."""
+        ch = _make_channel(require_mention=True)
+        ch._my_jid = MagicMock(User="botlid")
+        ch._bot_lid = "botlid"
+        ch._bot_phone = "85200000000"
+
+        chat_str = "group123@g.us"
+        history = ch._group_history.setdefault(chat_str, [])
+        # Simulate recording (as done in _on_message)
+        history.append({"sender": "+85251159218", "body": "hello", "ts": "12345"})
+        assert len(ch._group_history[chat_str]) == 1
+
+    def test_history_limit_enforced(self):
+        ch = _make_channel()
+        ch._group_history_limit = 5
+        chat_str = "group123@g.us"
+        history = ch._group_history.setdefault(chat_str, [])
+        for i in range(10):
+            history.append({"sender": f"user{i}", "body": f"msg{i}", "ts": str(i)})
+        # Trim like the channel does
+        if len(history) > ch._group_history_limit:
+            ch._group_history[chat_str] = history[-ch._group_history_limit:]
+        assert len(ch._group_history[chat_str]) == 5
+        assert ch._group_history[chat_str][0]["body"] == "msg5"
+
+    def test_history_injected_when_mentioned(self):
+        """When bot IS mentioned, buffered history should be injected."""
+        ch = _make_channel()
+        chat_str = "group123@g.us"
+        ch._group_history[chat_str] = [
+            {"sender": "+852111", "body": "earlier msg 1", "ts": "1"},
+            {"sender": "+852222", "body": "earlier msg 2", "ts": "2"},
+        ]
+        # Simulate the injection logic from _on_message
+        history = ch._group_history.get(chat_str, [])
+        ctx_lines = []
+        for h in history[-10:]:
+            ctx_lines.append(f"  {h['sender']}: {h['body']}")
+        ctx_text = "--- Recent group messages (context only, not directed at you) ---\n" + "\n".join(ctx_lines)
+        content_parts = [TextContent(type=ContentType.TEXT, text=ctx_text)]
+        ch._group_history[chat_str] = []
+
+        assert "earlier msg 1" in content_parts[0].text
+        assert "earlier msg 2" in content_parts[0].text
+
+    def test_history_cleared_after_injection(self):
+        ch = _make_channel()
+        chat_str = "group123@g.us"
+        ch._group_history[chat_str] = [
+            {"sender": "u1", "body": "msg", "ts": "1"},
+        ]
+        # Simulate clearing after injection
+        ch._group_history[chat_str] = []
+        assert ch._group_history[chat_str] == []
+
+
+# ===================================================================
+# TestMentionDetection (_is_bot_mentioned)
+# ===================================================================
+
+class TestMentionDetection:
+    def _setup_channel(self) -> WhatsAppChannel:
+        ch = _make_channel()
+        ch._my_jid = MagicMock(User="botlid123")
+        ch._bot_lid = "botlid123"
+        ch._bot_phone = "85200000000"
+        return ch
+
+    def test_at_lid_in_body(self):
+        ch = self._setup_channel()
+        msg = _make_proto_message(conversation="hello @botlid123 test")
+        assert ch._is_bot_mentioned(msg, "hello @botlid123 test") is True
+
+    def test_at_phone_in_body(self):
+        ch = self._setup_channel()
+        msg = _make_proto_message(conversation="hello @85200000000 test")
+        assert ch._is_bot_mentioned(msg, "hello @85200000000 test") is True
+
+    def test_at_plus_phone_in_body(self):
+        ch = self._setup_channel()
+        msg = _make_proto_message(conversation="hello @+85200000000 test")
+        assert ch._is_bot_mentioned(msg, "hello @+85200000000 test") is True
+
+    def test_native_mentioned_jid_match(self):
+        ch = self._setup_channel()
+        ctx = MagicMock()
+        jid = MagicMock()
+        jid.User = "botlid123"
+        ctx.mentionedJID = [jid]
+        ctx.HasField = lambda name: False
+        ctx.stanzaId = ""
+        ctx.participant = ""
+
+        etm = MagicMock()
+        etm.text = "hey bot"
+        etm.contextInfo = ctx
+        msg = _make_proto_message(extendedTextMessage=etm)
+
+        assert ch._is_bot_mentioned(msg, "hey bot") is True
+
+    def test_reply_to_bot_message(self):
+        ch = self._setup_channel()
+        ctx = MagicMock()
+        ctx.mentionedJID = []
+        ctx.HasField = lambda name: name == "quotedMessage"
+        ctx.stanzaId = "some_stanza"
+        ctx.participant = "botlid123@lid"
+
+        etm = MagicMock()
+        etm.text = "replying"
+        etm.contextInfo = ctx
+        msg = _make_proto_message(extendedTextMessage=etm)
+
+        assert ch._is_bot_mentioned(msg, "replying") is True
+
+    def test_no_mention_returns_false(self):
+        ch = self._setup_channel()
+        msg = _make_proto_message(conversation="hello world")
+        assert ch._is_bot_mentioned(msg, "hello world") is False
+
+
+# ===================================================================
+# TestSend
+# ===================================================================
+
+class TestSend:
+    async def test_basic_text_send(self):
+        ch = _make_channel()
+        ch._client.send_message = AsyncMock()
+        await ch.send("+85200000000", "hello", {})
+        ch._client.send_message.assert_called_once()
+        args = ch._client.send_message.call_args[0]
+        assert args[1] == "hello"
+
+    async def test_empty_text_noop(self):
+        ch = _make_channel()
+        ch._client.send_message = AsyncMock()
+        await ch.send("+85200000000", "", {})
+        ch._client.send_message.assert_not_called()
+
+    async def test_disabled_noop(self):
+        ch = _make_channel(enabled=False)
+        ch._client = MagicMock()
+        ch._client.send_message = AsyncMock()
+        await ch.send("+85200000000", "hi")
+        ch._client.send_message.assert_not_called()
+
+    async def test_image_path_restricted_to_media_dir(self):
+        ch = _make_channel()
+        ch._client.send_image = AsyncMock()
+        ch._client.send_message = AsyncMock()
+        # Image outside media dir should be blocked
+        text = "[Image: /etc/passwd] check this"
+        await ch.send("+85200000000", text, {})
+        ch._client.send_image.assert_not_called()
+
+    async def test_text_chunking(self):
+        ch = _make_channel(text_chunk_limit=10)
+        ch._client.send_message = AsyncMock()
+        text = "AAAAAAAAAA" + "BBBBBBBBBB"  # 20 chars, limit 10
+        await ch.send("+85200000000", text, {})
+        assert ch._client.send_message.call_count == 2
+
+
+# ===================================================================
+# TestChunkText
+# ===================================================================
+
+class TestChunkText:
+    def test_short_text_not_chunked(self):
+        ch = _make_channel()
+        assert ch._chunk_text("hello") == ["hello"]
+
+    def test_empty_text(self):
+        ch = _make_channel()
+        assert ch._chunk_text("") == []
+
+    def test_long_text_chunked(self):
+        ch = _make_channel(text_chunk_limit=20)
+        text = "A" * 50
+        chunks = ch._chunk_text(text)
+        assert len(chunks) >= 2
+        assert "".join(chunks) == text
+
+    def test_chunking_prefers_newline_break(self):
+        ch = _make_channel(text_chunk_limit=30)
+        # Chunk limit 30, half = 15. Newline must be at index > 15 to trigger break.
+        # "A" * 16 + "\n" puts newline at index 16, which is > 15.
+        text = "A" * 16 + "\n" + "B" * 25
+        chunks = ch._chunk_text(text)
+        assert chunks[0] == "A" * 16
+
+
+# ===================================================================
+# TestTypingLoop
+# ===================================================================
+
+class TestTypingLoop:
+    async def test_typing_loop_created_and_cancelled(self):
+        ch = _make_channel()
+        mock_client = MagicMock()
+        mock_client._NewAClient__client = MagicMock()
+        mock_client._NewAClient__client.SendChatPresence = AsyncMock()
+        mock_client.uuid = "test-uuid"
+
+        typing_jid = MagicMock()
+        typing_jid.SerializeToString = lambda: b"\x00"
+
+        task = asyncio.create_task(ch._typing_loop(mock_client, typing_jid, interval=0.05))
+        await asyncio.sleep(0.15)
+        assert not task.done()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+# ===================================================================
+# Utility functions
+# ===================================================================
+
+class TestJidUtils:
+    def test_jid_to_str(self):
+        jid = MagicMock(User="85200000000", Server="s.whatsapp.net")
+        assert _jid_to_str(jid) == "85200000000@s.whatsapp.net"
+
+    def test_jid_to_str_no_user(self):
+        jid = MagicMock(spec=[])
+        result = _jid_to_str(jid)
+        assert isinstance(result, str)
+
+    def test_is_group_jid(self):
+        jid = MagicMock(Server="g.us")
+        assert _is_group_jid(jid) is True
+
+    def test_is_not_group_jid(self):
+        jid = MagicMock(Server="s.whatsapp.net")
+        assert _is_group_jid(jid) is False
+
+
+class TestFormatSender:
+    def test_with_phone_and_name(self):
+        ch = _make_channel()
+        ch._lid_cache["123@lid"] = {"phone": "85200000000", "name": "Alice"}
+        assert ch._format_sender("123@lid") == "+85200000000 (Alice)"
+
+    def test_with_phone_only(self):
+        ch = _make_channel()
+        ch._lid_cache["123@lid"] = {"phone": "85200000000", "name": ""}
+        assert ch._format_sender("123@lid") == "+85200000000"
+
+    def test_fallback_to_raw(self):
+        ch = _make_channel()
+        assert ch._format_sender("unknown@lid") == "unknown@lid"
+
+
+# ===================================================================
+# TestStripBotMention
+# ===================================================================
+
+class TestStripBotMention:
+    """Tests for bot @mention stripping (enables /command detection)."""
+
+    def test_strip_phone_mention_at_start(self):
+        ch = _make_channel()
+        ch._bot_phone = "817089933036"
+        assert ch._strip_bot_mention("@+817089933036 /new") == "/new"
+
+    def test_strip_phone_mention_no_plus(self):
+        ch = _make_channel()
+        ch._bot_phone = "817089933036"
+        assert ch._strip_bot_mention("@817089933036 hello") == "hello"
+
+    def test_strip_lid_mention(self):
+        ch = _make_channel()
+        ch._bot_lid = "229661330157571"
+        assert ch._strip_bot_mention("@229661330157571 /stop") == "/stop"
+
+    def test_strip_both_phone_and_lid(self):
+        ch = _make_channel()
+        ch._bot_phone = "817089933036"
+        ch._bot_lid = "229661330157571"
+        assert ch._strip_bot_mention("@+817089933036 @229661330157571 hi") == "hi"
+
+    def test_no_mention_unchanged(self):
+        ch = _make_channel()
+        ch._bot_phone = "817089933036"
+        assert ch._strip_bot_mention("just plain text") == "just plain text"
+
+    def test_no_bot_phone_or_lid_unchanged(self):
+        ch = _make_channel()
+        ch._bot_phone = ""
+        ch._bot_lid = ""
+        assert ch._strip_bot_mention("@+817089933036 hi") == "@+817089933036 hi"
+
+    def test_empty_text(self):
+        ch = _make_channel()
+        ch._bot_phone = "817089933036"
+        assert ch._strip_bot_mention("") == ""
+
+    def test_none_text(self):
+        ch = _make_channel()
+        ch._bot_phone = "817089933036"
+        assert ch._strip_bot_mention(None) is None
+
+    def test_different_mention_not_stripped(self):
+        ch = _make_channel()
+        ch._bot_phone = "817089933036"
+        # Mention of a DIFFERENT number should stay
+        assert ch._strip_bot_mention("@+85251159218 hello") == "@+85251159218 hello"
+
+    def test_mention_in_middle(self):
+        ch = _make_channel()
+        ch._bot_phone = "817089933036"
+        # Regex matches anywhere, not anchored — current impl strips any occurrence
+        assert ch._strip_bot_mention("hello @+817089933036 world").startswith("hello")
+
+
+# ===================================================================
+# TestSlashCommandDetection
+# ===================================================================
+
+class TestSlashCommandDetection:
+    """Tests for slash command detection after mention strip."""
+
+    def test_slash_command_after_mention(self):
+        ch = _make_channel()
+        ch._bot_phone = "817089933036"
+        body = ch._strip_bot_mention("@+817089933036 /new")
+        assert body.lstrip().startswith("/")
+
+    def test_slash_command_no_mention(self):
+        ch = _make_channel()
+        ch._bot_phone = "817089933036"
+        body = ch._strip_bot_mention("/clear")
+        assert body.lstrip().startswith("/")
+
+    def test_regular_text_not_command(self):
+        ch = _make_channel()
+        ch._bot_phone = "817089933036"
+        body = ch._strip_bot_mention("@+817089933036 what is this")
+        assert not body.lstrip().startswith("/")
+
+    def test_slash_in_middle_not_command(self):
+        ch = _make_channel()
+        body = "do /not detect this"
+        assert not body.lstrip().startswith("/")
