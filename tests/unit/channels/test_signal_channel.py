@@ -674,14 +674,14 @@ class TestSend:
         await ch.send("+85200000001", "hi")
         ch.daemon.send_message.assert_not_called()
 
-    async def test_markdown_converted(self):
+    async def test_markdown_passed_through(self):
+        """bbernhard parses markdown natively via text_mode=styled, so we
+        send the raw markdown text without pre-processing."""
         ch = _make_channel()
         await ch.send("+85200000001", "**bold** text", {})
         call_args = ch.daemon.send_message.call_args
-        # Text should have markdown stripped
-        sent_text = call_args.args[1] if len(call_args.args) > 1 else call_args.kwargs.get("text", "")
-        # The message arg is positional arg index 1
-        assert "**" not in str(call_args)
+        # Markdown preserved in sent text
+        assert "**bold**" in call_args.args[1]
 
     async def test_text_chunking(self):
         ch = _make_channel(text_chunk_limit=10)
@@ -777,3 +777,250 @@ class TestGetToHandle:
         result = ch.get_to_handle_from_request(req)
         # Should return source or user_id
         assert result is not None
+
+
+# ===================================================================
+# TestSignalDaemon (bbernhard REST API client)
+# ===================================================================
+
+class TestSignalDaemonToRecipient:
+    """Tests for _to_recipient: converts target to bbernhard recipient format."""
+
+    def test_phone_number_passthrough(self):
+        assert SignalDaemon._to_recipient("+85212345678", is_group=False) == "+85212345678"
+
+    def test_uuid_passthrough_for_dm(self):
+        uuid = "5720b72c-1051-47bd-962b-8c0c9db5aff1"
+        assert SignalDaemon._to_recipient(uuid, is_group=False) == uuid
+
+    def test_group_internal_id_to_group_prefix(self):
+        # internal_id like "sBlO8LhzR42XNBbUqUrNVNokyOe2NdDZCTs0fSuZnJc="
+        # → "group.{base64(internal_id)}"
+        internal = "sBlO8LhzR42XNBbUqUrNVNokyOe2NdDZCTs0fSuZnJc="
+        result = SignalDaemon._to_recipient(internal, is_group=True)
+        assert result.startswith("group.")
+
+    def test_group_already_prefixed_unchanged(self):
+        already = "group.c0JsTzhMaHpSNDJYTkJiVXFVck5WTm9reU9lMk5kRFpDVHMwZlN1Wm5KYz0="
+        assert SignalDaemon._to_recipient(already, is_group=True) == already
+
+
+class TestSignalDaemonConnect:
+    """Tests for SignalDaemon.connect() against bbernhard's /v1/about."""
+
+    async def test_connect_success(self):
+        d = SignalDaemon(account="+85200000000", http_url="http://localhost:8080")
+        # Mock the ClientSession's GET to /v1/about
+        import aiohttp
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=None)
+        mock_resp.json = AsyncMock(return_value={"mode": "json-rpc", "version": "0.98"})
+        with patch.object(aiohttp, "ClientSession") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session.get = MagicMock(return_value=mock_resp)
+            mock_session_cls.return_value = mock_session
+            result = await d.connect()
+        assert result is True
+        assert d.connected is True
+
+    async def test_connect_failure_404(self):
+        d = SignalDaemon(account="+85200000000", http_url="http://localhost:8080")
+        import aiohttp
+        mock_resp = AsyncMock()
+        mock_resp.status = 404
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=None)
+        with patch.object(aiohttp, "ClientSession") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session.get = MagicMock(return_value=mock_resp)
+            mock_session_cls.return_value = mock_session
+            result = await d.connect()
+        assert result is False
+        assert d.connected is False
+
+    async def test_connect_network_error(self):
+        d = SignalDaemon(account="+85200000000", http_url="http://localhost:8080")
+        import aiohttp
+        with patch.object(aiohttp, "ClientSession") as mock_session_cls:
+            mock_session = MagicMock()
+            mock_session.get = MagicMock(side_effect=Exception("connection refused"))
+            mock_session_cls.return_value = mock_session
+            result = await d.connect()
+        assert result is False
+
+    async def test_connect_idempotent(self):
+        d = SignalDaemon(account="+85200000000", http_url="http://localhost:8080")
+        d.connected = True
+        result = await d.connect()
+        assert result is True  # Should skip check
+
+
+class TestSignalDaemonSend:
+    """Tests for SignalDaemon.send_message() POST /v2/send."""
+
+    def _mock_daemon(self, response_status=201, response_body=None):
+        """Build a daemon with a mocked aiohttp session."""
+        d = SignalDaemon(account="+85200000000", http_url="http://localhost:8080")
+        d.connected = True
+        d.session = MagicMock()
+
+        body = response_body or {"timestamp": "1775382175305"}
+        mock_resp = AsyncMock()
+        mock_resp.status = response_status
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=None)
+        mock_resp.json = AsyncMock(return_value=body)
+        mock_resp.text = AsyncMock(return_value=str(body))
+        d.session.post = MagicMock(return_value=mock_resp)
+        return d, mock_resp
+
+    async def test_send_dm(self):
+        d, _ = self._mock_daemon()
+        ts = await d.send_message("+85212345678", "hello", is_group=False)
+        assert ts == 1775382175305
+        # Verify payload
+        call = d.session.post.call_args
+        assert call.args[0] == "http://localhost:8080/v2/send"
+        payload = call.kwargs["json"]
+        assert payload["number"] == "+85200000000"
+        assert payload["recipients"] == ["+85212345678"]
+        assert payload["message"] == "hello"
+        assert payload["text_mode"] == "styled"
+
+    async def test_send_group(self):
+        d, _ = self._mock_daemon()
+        gid = "sBlO8LhzR42XNBbUqUrNVNokyOe2NdDZCTs0fSuZnJc="
+        await d.send_message(gid, "group msg", is_group=True)
+        payload = d.session.post.call_args.kwargs["json"]
+        assert payload["recipients"][0].startswith("group.")
+
+    async def test_send_with_quote(self):
+        d, _ = self._mock_daemon()
+        await d.send_message(
+            "+85212345678", "reply",
+            quote_timestamp=1234567890, quote_author="+85298765432",
+        )
+        payload = d.session.post.call_args.kwargs["json"]
+        assert payload["quote_timestamp"] == 1234567890
+        assert payload["quote_author"] == "+85298765432"
+
+    async def test_send_returns_none_on_failure(self):
+        d, _ = self._mock_daemon(response_status=500, response_body={"error": "oops"})
+        result = await d.send_message("+85212345678", "hello")
+        assert result is None
+
+    async def test_send_returns_none_when_disconnected(self):
+        d = SignalDaemon(account="+85200000000", http_url="http://localhost:8080")
+        d.connected = False
+        result = await d.send_message("+85212345678", "hello")
+        assert result is None
+
+
+class TestSignalDaemonTyping:
+    """Tests for send_typing() PUT/DELETE /v1/typing-indicator."""
+
+    def _mock_daemon(self):
+        d = SignalDaemon(account="+85200000000", http_url="http://localhost:8080")
+        d.connected = True
+        d.session = MagicMock()
+        mock_resp = AsyncMock()
+        mock_resp.status = 204
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=None)
+        d.session.request = MagicMock(return_value=mock_resp)
+        return d
+
+    async def test_start_typing_uses_put(self):
+        d = self._mock_daemon()
+        await d.send_typing("+85212345678", start=True, is_group=False)
+        method = d.session.request.call_args.args[0]
+        assert method == "PUT"
+
+    async def test_stop_typing_uses_delete(self):
+        d = self._mock_daemon()
+        await d.send_typing("+85212345678", start=False, is_group=False)
+        method = d.session.request.call_args.args[0]
+        assert method == "DELETE"
+
+    async def test_typing_includes_recipient_in_body(self):
+        d = self._mock_daemon()
+        await d.send_typing("+85212345678", start=True, is_group=False)
+        payload = d.session.request.call_args.kwargs["json"]
+        assert payload["recipient"] == "+85212345678"
+
+    async def test_typing_noop_when_disconnected(self):
+        d = SignalDaemon(account="+85200000000", http_url="http://localhost:8080")
+        d.connected = False
+        # Should not raise
+        await d.send_typing("+85212345678", start=True)
+
+
+class TestSignalDaemonReaction:
+    """Tests for send_reaction() POST/DELETE /v1/reactions."""
+
+    def _mock_daemon(self, response_status=204):
+        d = SignalDaemon(account="+85200000000", http_url="http://localhost:8080")
+        d.connected = True
+        d.session = MagicMock()
+        mock_resp = AsyncMock()
+        mock_resp.status = response_status
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=None)
+        d.session.request = MagicMock(return_value=mock_resp)
+        return d
+
+    async def test_add_reaction_uses_post(self):
+        d = self._mock_daemon()
+        result = await d.send_reaction(
+            "+85212345678", "👍",
+            target_author="+85212345678", target_timestamp=1234567890,
+        )
+        assert result is True
+        assert d.session.request.call_args.args[0] == "POST"
+
+    async def test_remove_reaction_uses_delete(self):
+        d = self._mock_daemon()
+        await d.send_reaction(
+            "+85212345678", "👍",
+            target_author="+85212345678", target_timestamp=1234567890,
+            remove=True,
+        )
+        assert d.session.request.call_args.args[0] == "DELETE"
+
+    async def test_reaction_payload_format(self):
+        d = self._mock_daemon()
+        await d.send_reaction(
+            "+85212345678", "❤️",
+            target_author="+85298765432", target_timestamp=1775382175305,
+        )
+        payload = d.session.request.call_args.kwargs["json"]
+        assert payload["reaction"] == "❤️"
+        assert payload["recipient"] == "+85212345678"
+        assert payload["target_author"] == "+85298765432"
+        assert payload["timestamp"] == 1775382175305
+
+
+class TestSignalDaemonWhoami:
+    """Tests for whoami() GET /v1/accounts."""
+
+    async def test_whoami_returns_accounts(self):
+        d = SignalDaemon(account="+85200000000", http_url="http://localhost:8080")
+        d.connected = True
+        d.session = MagicMock()
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=None)
+        mock_resp.json = AsyncMock(return_value=["+85200000000"])
+        d.session.get = MagicMock(return_value=mock_resp)
+        result = await d.whoami()
+        assert result is not None
+        assert "+85200000000" in result["accounts"]
+
+    async def test_whoami_returns_none_when_disconnected(self):
+        d = SignalDaemon(account="+85200000000", http_url="http://localhost:8080")
+        d.connected = False
+        result = await d.whoami()
+        assert result is None

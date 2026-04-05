@@ -170,14 +170,18 @@ _MEDIA_DIR = Path(tempfile.gettempdir()) / "copaw_signal_media"
 
 
 class SignalDaemon:
-    """Manages signal-cli via HTTP JSON-RPC + SSE."""
+    """Signal client using bbernhard/signal-cli-rest-api REST+WebSocket API.
+
+    https://github.com/bbernhard/signal-cli-rest-api
+    Requires the REST API service (Docker container) running with MODE=json-rpc.
+    """
 
     def __init__(self, account: str, http_url: str):
         self.account = account
-        self.http_url = http_url
+        self.http_url = http_url.rstrip("/")
         self.connected = False
         self.connecting = False
-        self.sse_task: Optional[asyncio.Task] = None
+        self.ws_task: Optional[asyncio.Task] = None
         self.session: Optional[aiohttp.ClientSession] = None
 
     async def connect(self) -> bool:
@@ -187,59 +191,52 @@ class SignalDaemon:
         try:
             self.session = aiohttp.ClientSession()
             async with self.session.get(
-                f"{self.http_url}/api/v1/check",
+                f"{self.http_url}/v1/about",
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
                 if resp.status == 200:
-                    logger.info("Signal bridge connected: %s", self.http_url)
+                    info = await resp.json()
+                    logger.info(
+                        "Signal REST API connected: %s (mode=%s version=%s)",
+                        self.http_url, info.get("mode"), info.get("version"),
+                    )
                     self.connected = True
                     return True
-                logger.error("Signal bridge check failed: %s", resp.status)
+                logger.error("Signal REST API check failed: %s", resp.status)
                 return False
         except Exception as e:
-            logger.error("Signal bridge not available at %s: %s", self.http_url, e)
+            logger.error("Signal REST API not available at %s: %s", self.http_url, e)
             return False
         finally:
             self.connecting = False
 
     async def disconnect(self):
-        if self.sse_task:
-            self.sse_task.cancel()
+        if self.ws_task:
+            self.ws_task.cancel()
             try:
-                await self.sse_task
+                await self.ws_task
             except asyncio.CancelledError:
                 pass
-            self.sse_task = None
+            self.ws_task = None
         if self.session:
             await self.session.close()
             self.session = None
         self.connected = False
         logger.info("Signal disconnected")
 
-    async def _rpc_call(self, method: str, params: Optional[Dict] = None) -> Optional[Any]:
-        if not self.session or not self.connected:
-            return None
-        try:
-            rpc_payload: Dict[str, Any] = {
-                "jsonrpc": "2.0",
-                "id": int(time.time() * 1000),
-                "method": method,
-            }
-            if params:
-                rpc_payload["params"] = params
-            async with self.session.post(
-                f"{self.http_url}/api/v1/rpc",
-                json=rpc_payload,
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                result = await resp.json()
-                if "error" in result:
-                    logger.error("Signal RPC error [%s]: %s", method, result["error"])
-                    return None
-                return result.get("result")
-        except Exception as e:
-            logger.error("Signal RPC [%s] failed: %s", method, e)
-            return None
+    @staticmethod
+    def _to_recipient(target: str, is_group: bool) -> str:
+        """Convert a target ID to bbernhard's recipient format.
+
+        bbernhard uses `group.{base64(internal_id)}` for groups and the
+        raw phone number for direct recipients. Signal-cli's internal
+        group ID (what we store in config) is the base64 payload.
+        """
+        if not is_group:
+            return target
+        if target.startswith("group."):
+            return target
+        return "group." + base64.b64encode(target.encode()).decode().rstrip("=") + "="
 
     # ── Send ──────────────────────────────────────────────────────────
 
@@ -251,31 +248,59 @@ class SignalDaemon:
         quote_timestamp: int = 0,
         quote_author: str = "",
         attachments: Optional[List[str]] = None,
-        text_style: Optional[List[str]] = None,
-        mentions: Optional[List[str]] = None,
+        text_style: Optional[List[str]] = None,  # kept for compatibility, ignored
+        mentions: Optional[List[str]] = None,  # kept for compatibility, ignored
     ) -> Optional[int]:
-        """Send message. Returns sent timestamp on success."""
-        params: Dict[str, Any] = {"account": self.account}
+        """Send message via POST /v2/send. Returns timestamp on success.
+
+        text_style/mentions params are no longer needed — bbernhard's
+        `text_mode: "styled"` parses markdown natively (**bold**, *italic*,
+        ~~strike~~, `code`) and its mention syntax is inline.
+        """
+        if not self.session or not self.connected:
+            return None
+        recipient = self._to_recipient(target, is_group)
+        payload: Dict[str, Any] = {
+            "number": self.account,
+            "recipients": [recipient],
+        }
         if text:
-            params["message"] = text
-        if text_style:
-            params["text-style"] = text_style
-        if mentions:
-            params["mention"] = mentions
-        if is_group:
-            params["groupId"] = target
-        else:
-            params["recipients"] = [target]
+            payload["message"] = text
+            payload["text_mode"] = "styled"
         if quote_timestamp and quote_author:
-            params["quoteTimestamp"] = quote_timestamp
-            params["quoteAuthor"] = quote_author
+            payload["quote_timestamp"] = quote_timestamp
+            payload["quote_author"] = quote_author
         if attachments:
-            params["attachments"] = attachments
-        result = await self._rpc_call("send", params)
-        if result and "timestamp" in result:
-            return result["timestamp"]
-        logger.error("Signal send failed to %s", target)
-        return None
+            # bbernhard expects base64-encoded attachments inline.
+            encoded = []
+            for path in attachments:
+                try:
+                    with open(path, "rb") as f:
+                        import mimetypes
+                        mime, _ = mimetypes.guess_type(path)
+                        mime = mime or "application/octet-stream"
+                        data = base64.b64encode(f.read()).decode()
+                        encoded.append(f"data:{mime};base64,{data}")
+                except Exception as e:
+                    logger.warning("signal: failed to encode attachment %s: %s", path, e)
+            if encoded:
+                payload["base64_attachments"] = encoded
+        try:
+            async with self.session.post(
+                f"{self.http_url}/v2/send",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status in (200, 201):
+                    result = await resp.json()
+                    ts = result.get("timestamp")
+                    return int(ts) if ts else None
+                body = await resp.text()
+                logger.error("Signal send failed to %s: %s %s", target, resp.status, body[:200])
+                return None
+        except Exception as e:
+            logger.error("Signal send exception: %s", e)
+            return None
 
     async def send_reaction(
         self,
@@ -286,104 +311,138 @@ class SignalDaemon:
         is_group: bool = False,
         remove: bool = False,
     ) -> bool:
-        """Send emoji reaction to a message."""
-        params: Dict[str, Any] = {
-            "account": self.account,
-            "emoji": emoji,
-            "targetAuthor": target_author,
-            "targetTimestamp": target_timestamp,
+        """Send emoji reaction via POST/DELETE /v1/reactions/{number}."""
+        if not self.session or not self.connected:
+            return False
+        recipient = self._to_recipient(target, is_group)
+        payload = {
+            "reaction": emoji,
+            "recipient": recipient,
+            "target_author": target_author,
+            "timestamp": target_timestamp,
         }
-        if remove:
-            params["remove"] = True
-        if is_group:
-            params["groupId"] = target
-        else:
-            params["recipients"] = [target]
-        result = await self._rpc_call("sendReaction", params)
-        return result is not None
+        url = f"{self.http_url}/v1/reactions/{self.account}"
+        method = "DELETE" if remove else "POST"
+        try:
+            async with self.session.request(
+                method, url, json=payload,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                return resp.status in (200, 204)
+        except Exception as e:
+            logger.error("Signal reaction failed: %s", e)
+            return False
 
     async def send_typing(self, target: str, start: bool = True, is_group: bool = False):
+        """Send typing indicator via PUT/DELETE /v1/typing-indicator/{number}."""
+        if not self.session or not self.connected:
+            return
+        recipient = self._to_recipient(target, is_group)
+        payload = {"recipient": recipient}
+        url = f"{self.http_url}/v1/typing-indicator/{self.account}"
+        method = "PUT" if start else "DELETE"
         try:
-            method = "sendTyping" if start else "stopTyping"
-            params = {"account": self.account}
-            if is_group:
-                params["groupId"] = target
-            else:
-                params["recipients"] = [target]
-            await self._rpc_call(method, params)
+            async with self.session.request(
+                method, url, json=payload,
+                timeout=aiohttp.ClientTimeout(total=5),
+            ):
+                pass
         except Exception:
             pass
 
-    # ── Receive ───────────────────────────────────────────────────────
+    # ── Receive (WebSocket) ───────────────────────────────────────────
 
     async def start_receive(self, message_callback):
-        if self.sse_task:
+        if self.ws_task:
             return
-        self.sse_task = asyncio.create_task(
-            self._sse_loop(message_callback), name="signal_sse",
+        self.ws_task = asyncio.create_task(
+            self._ws_loop(message_callback), name="signal_ws",
         )
 
-    async def _sse_loop(self, message_callback):
+    async def _ws_loop(self, message_callback):
+        """Connect to bbernhard's WebSocket receive endpoint."""
+        # ws:// or wss:// based on http_url
+        ws_url = self.http_url.replace("http://", "ws://").replace("https://", "wss://")
+        ws_url = f"{ws_url}/v1/receive/{self.account}"
         backoff = 5
         while True:
             try:
-                url = f"{self.http_url}/api/v1/events"
-                if self.account:
-                    url += f"?account={self.account}"
-                logger.info("Signal SSE connecting: %s", url)
-                async with self.session.get(
-                    url, timeout=aiohttp.ClientTimeout(total=None, connect=10),
-                ) as resp:
-                    if resp.status != 200:
-                        logger.error("Signal SSE failed: %s", resp.status)
-                        await asyncio.sleep(backoff)
-                        backoff = min(backoff * 2, 60)
-                        continue
-                    logger.info("Signal SSE connected, listening...")
-                    backoff = 5  # Reset on successful connect
-                    async for line in resp.content:
-                        line = line.decode("utf-8").strip()
-                        if not line or not line.startswith("data:"):
-                            continue
-                        try:
-                            event = json.loads(line[5:].strip())
-                            await message_callback(event)
-                        except json.JSONDecodeError:
-                            pass
+                logger.info("Signal WS connecting: %s", ws_url)
+                async with self.session.ws_connect(
+                    ws_url, heartbeat=30,
+                    timeout=aiohttp.ClientWSTimeout(ws_close=10),
+                ) as ws:
+                    logger.info("Signal WS connected, listening...")
+                    backoff = 5
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            try:
+                                event = json.loads(msg.data)
+                                await message_callback(event)
+                            except json.JSONDecodeError:
+                                pass
+                        elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
+                            break
             except asyncio.CancelledError:
-                logger.info("Signal SSE loop cancelled")
+                logger.info("Signal WS loop cancelled")
                 break
             except Exception as e:
-                logger.error("Signal SSE error: %s, reconnecting in %ds...", e, backoff)
+                logger.error("Signal WS error: %s, reconnecting in %ds...", e, backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
 
     # ── Attachment download ───────────────────────────────────────────
 
     async def download_attachment(self, attachment_id: str, dest_dir: Path) -> Optional[Path]:
-        """Download attachment via getAttachment RPC."""
-        result = await self._rpc_call("getAttachment", {
-            "account": self.account,
-            "id": attachment_id,
-        })
-        if not result:
+        """Download attachment via GET /v1/attachments/{id}.
+
+        bbernhard stores attachments with correct file extensions already
+        (derived from content-type). We stream the file bytes directly.
+        """
+        if not self.session or not self.connected:
             return None
-        # result may contain base64 data or file path
-        if isinstance(result, str):
-            # It's a file path
-            return Path(result) if os.path.exists(result) else None
-        if isinstance(result, dict) and result.get("data"):
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            raw = base64.b64decode(result["data"])
-            ct = result.get("contentType") or "application/octet-stream"
-            ext = _detect_ext(raw, ct)
-            dest = dest_dir / f"signal_att_{attachment_id[:8]}.{ext}"
-            dest.write_bytes(raw)
-            return dest
-        return None
+        try:
+            async with self.session.get(
+                f"{self.http_url}/v1/attachments/{attachment_id}",
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status != 200:
+                    logger.error("Signal attachment %s: HTTP %s", attachment_id, resp.status)
+                    return None
+                raw = await resp.read()
+                ct = resp.headers.get("Content-Type", "application/octet-stream")
+                # Prefer extension from attachment_id (bbernhard names include ext)
+                # but fall back to magic-byte detection.
+                if "." in attachment_id:
+                    ext = attachment_id.rsplit(".", 1)[-1]
+                else:
+                    ext = _detect_ext(raw, ct)
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                safe_id = attachment_id.replace("/", "_").replace("..", "_")[:50]
+                dest = dest_dir / f"signal_att_{safe_id}"
+                if not str(dest).endswith(f".{ext}"):
+                    dest = dest.with_suffix(f".{ext}")
+                dest.write_bytes(raw)
+                return dest
+        except Exception as e:
+            logger.error("Signal attachment download failed: %s", e)
+            return None
 
     async def whoami(self) -> Optional[Dict]:
-        return await self._rpc_call("whoami")
+        """Check which accounts are registered."""
+        if not self.session or not self.connected:
+            return None
+        try:
+            async with self.session.get(
+                f"{self.http_url}/v1/accounts",
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status == 200:
+                    accounts = await resp.json()
+                    return {"accounts": accounts, "account": self.account}
+                return None
+        except Exception:
+            return None
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -807,65 +866,30 @@ class SignalChannel(BaseChannel):
         if is_group and group_id:
             to_handle = group_id
 
-        # ── Step 1: Extract [Image: ...] from raw text ──────────────
+        # Extract [Image: ...] tags and convert to attachment paths.
+        # Path is restricted to media_dir to prevent LLM exfiltration.
         img_re = __import__("re").compile(r'\[Image: (file:///[^\]]+|/[^\]]+)\]')
-        img_matches = img_re.findall(text)
+        safe_dir = str(self._media_dir.resolve())
         att_paths = []
-        for m in img_matches:
+        for m in img_re.findall(text):
             p = m.replace("file://", "") if m.startswith("file://") else m
-            if os.path.isfile(p):
-                att_paths.append(p)
+            resolved = str(Path(p).resolve())
+            if resolved.startswith(safe_dir) and os.path.isfile(resolved):
+                att_paths.append(resolved)
                 text = text.replace(f"[Image: {m}]", "").strip()
-                logger.info("signal: extracted image attachment: %s", p)
+                logger.info("signal: extracted image attachment: %s", resolved)
+            elif os.path.isfile(p):
+                logger.warning("signal: blocked send of %s — outside media dir", p)
+                text = text.replace(f"[Image: {m}]", "").strip()
 
-        # ── Step 2: Convert markdown → plain text + style ranges ─────
-        plain_text, style_ranges = _markdown_to_signal(text)
-
-        # ── Step 3: Parse mentions on the plain text ─────────────────
-        # _parse_mentions replaces @+number (N chars) with \ufffc (1 char).
-        # We must shift style ranges that come after each replacement.
-        final_text, mention_list = _parse_mentions(plain_text)
-        if mention_list:
-            # Build shift map using ORIGINAL positions in plain_text.
-            # Each mention @+number (N chars) → \ufffc (1 char), removing N-1 chars.
-            # Style ranges use original plain_text offsets, so compare against
-            # original match positions (not adjusted ones).
-            mention_pat = _re.compile(r"@(\+\d{7,15}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
-            shifts = []  # [(original_position, chars_removed)]
-            for mm in mention_pat.finditer(plain_text):
-                removed = len(mm.group(0)) - 1
-                shifts.append((mm.start(), removed))
-            # Adjust style ranges: for each style, subtract chars removed
-            # by all mentions that appear BEFORE it in the original text
-            for sr in style_ranges:
-                total_shift = 0
-                for orig_pos, shift_amt in shifts:
-                    if sr["start"] > orig_pos:
-                        total_shift += shift_amt
-                sr["start"] -= total_shift
-
-        mention_params = [
-            f"{m['start']}:{m['length']}:{m.get('uuid', m.get('number', ''))}"
-            for m in mention_list
-        ] if mention_list else None
-
-        text_style_params = [
-            f"{s['start']}:{s['length']}:{s['style']}" for s in style_ranges
-        ] if style_ranges else None
-
-        text = final_text
-
-        logger.debug("signal: send styles=%s mentions=%s text=%s",
-                      text_style_params, mention_params, text[:120])
-
+        # bbernhard parses markdown natively with text_mode: styled.
+        # No manual offset computation needed.
         chunks = self._chunk_text(text) if text.strip() else [""]
         for i, chunk in enumerate(chunks):
             atts = att_paths if i == 0 and att_paths else None
             if chunk.strip() or atts:
                 await self.daemon.send_message(
                     to_handle, chunk, is_group=is_group, attachments=atts,
-                    text_style=text_style_params if i == 0 else None,
-                    mentions=mention_params if i == 0 else None,
                 )
 
     async def send_media(
