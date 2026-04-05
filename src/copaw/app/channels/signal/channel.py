@@ -756,6 +756,21 @@ class SignalChannel(BaseChannel):
                     text=f"{envelope_prefix}: [media]",
                 ))
 
+            # Trusted bot-identity hint (so the agent knows its own Signal
+            # number and the mention syntax to tag other users in replies).
+            # Only emit in groups — in DMs the user already knows they're
+            # talking to the bot and mentions serve no purpose.
+            if is_group_flag:
+                bot_id = self._account or (f"uuid:{self._account_uuid[:8]}" if self._account_uuid else "")
+                hint_line = (
+                    f"[Signal bot {bot_id}. "
+                    f"To mention someone in a reply, write @+phone or @uuid:xxxxxxxx "
+                    f"(e.g. @+85251159218 or @uuid:82e0393a).]"
+                )
+                content_parts.insert(0, TextContent(
+                    type=ContentType.TEXT, text=hint_line,
+                ))
+
             channel_meta = {
                 "platform": "signal",
                 "account": self._account,

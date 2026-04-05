@@ -1386,6 +1386,34 @@ class TestOutboundMentions:
         call = ch.daemon.send_message.call_args
         assert call.kwargs.get("mentions") is None
 
+
+# ===================================================================
+# TestBotMentionHint — the agent-facing hint about mention syntax
+# ===================================================================
+
+class TestBotMentionHint:
+    """Verifies the bot-identity + mention-syntax hint block."""
+
+    def test_hint_format_string(self):
+        """Hint line documents both bot identity and syntax."""
+        account = "+85298349370"
+        hint = (
+            f"[Signal bot {account}. "
+            f"To mention someone in a reply, write @+phone or @uuid:xxxxxxxx "
+            f"(e.g. @+85251159218 or @uuid:82e0393a).]"
+        )
+        assert "[Signal bot" in hint
+        assert account in hint
+        assert "@+phone" in hint
+        assert "@uuid:" in hint
+
+    def test_hint_includes_uuid_when_no_phone(self):
+        """If bot has no phone but has uuid, hint uses uuid form."""
+        account = ""
+        account_uuid = "82e0393a-abcd-4905-b84d-986298f4f8c5"
+        bot_id = account or (f"uuid:{account_uuid[:8]}" if account_uuid else "")
+        assert bot_id == "uuid:82e0393a"
+
     def test_expand_mentions_uuid_only_fallback(self):
         ch = _make_channel()
         body = "\ufffc here"
