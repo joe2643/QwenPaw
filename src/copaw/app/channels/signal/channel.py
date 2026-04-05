@@ -44,6 +44,47 @@ from ..base import (
 
 import re as _re
 
+# ── File type detection by magic bytes ───────────────────────────
+_MAGIC_MAP = [
+    (b"\xff\xd8\xff",             "image/jpeg",  "jpg"),
+    (b"\x89PNG\r\n\x1a\n",       "image/png",   "png"),
+    (b"GIF87a",                   "image/gif",   "gif"),
+    (b"GIF89a",                   "image/gif",   "gif"),
+    (b"RIFF",                     "image/webp",  "webp"),  # RIFF....WEBP
+    (b"\x1a\x45\xdf\xa3",        "video/webm",  "webm"),
+    (b"\x00\x00\x00",            "video/mp4",   "mp4"),   # ftyp box
+    (b"OggS",                     "audio/ogg",   "ogg"),
+    (b"fLaC",                     "audio/flac",  "flac"),
+    (b"ID3",                      "audio/mpeg",  "mp3"),
+    (b"\xff\xfb",                 "audio/mpeg",  "mp3"),
+    (b"%PDF",                     "application/pdf", "pdf"),
+]
+
+
+def _detect_mime(data: bytes) -> str:
+    """Detect MIME type from file header bytes."""
+    for magic, mime, _ in _MAGIC_MAP:
+        if data[:len(magic)] == magic:
+            # Extra check for WEBP (RIFF....WEBP)
+            if magic == b"RIFF" and data[8:12] != b"WEBP":
+                continue
+            return mime
+    return ""
+
+
+def _detect_ext(data: bytes, declared_ct: str) -> str:
+    """Pick file extension: trust magic bytes over declared content-type."""
+    for magic, mime, ext in _MAGIC_MAP:
+        if data[:len(magic)] == magic:
+            if magic == b"RIFF" and data[8:12] != b"WEBP":
+                continue
+            return ext
+    # Fallback to declared content-type
+    if "/" in declared_ct and declared_ct != "application/octet-stream":
+        return declared_ct.split("/")[-1].split(";")[0]
+    return "bin"
+
+
 def _markdown_to_signal(text):
     """Convert markdown to plain text + Signal text-style ranges.
 
@@ -329,9 +370,11 @@ class SignalDaemon:
             return Path(result) if os.path.exists(result) else None
         if isinstance(result, dict) and result.get("data"):
             dest_dir.mkdir(parents=True, exist_ok=True)
-            ext = result.get("contentType", "application/octet-stream").split("/")[-1]
+            raw = base64.b64decode(result["data"])
+            ct = result.get("contentType") or "application/octet-stream"
+            ext = _detect_ext(raw, ct)
             dest = dest_dir / f"signal_att_{attachment_id[:8]}.{ext}"
-            dest.write_bytes(base64.b64decode(result["data"]))
+            dest.write_bytes(raw)
             return dest
         return None
 
@@ -539,6 +582,16 @@ class SignalChannel(BaseChannel):
             for m in downloaded_media:
                 ct = m["type"]
                 p = m["path"]
+                # If contentType is missing/generic, detect from file magic bytes
+                if not ct or ct == "application/octet-stream":
+                    try:
+                        with open(p, "rb") as _f:
+                            detected = _detect_mime(_f.read(16))
+                        if detected:
+                            ct = detected
+                            logger.debug("signal: detected %s for %s (was octet-stream)", ct, p)
+                    except Exception:
+                        pass
                 if ct.startswith("image/"):
                     content_parts.append(ImageContent(type=ContentType.IMAGE, image_url=p))
                 elif ct.startswith("video/"):
@@ -683,6 +736,15 @@ class SignalChannel(BaseChannel):
             if att_id:
                 local = await self.daemon.download_attachment(att_id, self._media_dir)
                 if local:
+                    # Detect real type if contentType is missing/generic
+                    if not att_ct or att_ct == "application/octet-stream":
+                        try:
+                            with open(str(local), "rb") as _qf:
+                                detected = _detect_mime(_qf.read(16))
+                            if detected:
+                                att_ct = detected
+                        except Exception:
+                            pass
                     if att_ct.startswith("image/"):
                         parts.append(ImageContent(type=ContentType.IMAGE, image_url=str(local)))
                     elif att_ct.startswith("video/"):
