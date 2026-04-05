@@ -225,6 +225,8 @@ class SignalConfig(BaseChannelConfig):
     text_chunk_limit: int = 4000
     groups: List[str] = Field(default_factory=list)
     group_allow_from: List[str] = Field(default_factory=list)
+    ack_reaction_thinking: str = "🤔"
+    ack_reaction_done: str = "👀"
 
 
 class ChannelConfig(BaseModel):

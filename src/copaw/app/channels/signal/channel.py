@@ -492,6 +492,8 @@ class SignalChannel(BaseChannel):
         require_mention: bool = False,
         send_read_receipts: bool = True,
         text_chunk_limit: int = SIGNAL_MAX_TEXT_LENGTH,
+        ack_reaction_thinking: str = "🤔",
+        ack_reaction_done: str = "👀",
         **kwargs,
     ):
         super().__init__(
@@ -510,6 +512,8 @@ class SignalChannel(BaseChannel):
         self._account = account
         self._send_read_receipts = send_read_receipts
         self._text_chunk_limit = text_chunk_limit
+        self._ack_reaction_thinking = ack_reaction_thinking or ""
+        self._ack_reaction_done = ack_reaction_done or ""
         self._groups: List[str] = kwargs.get("groups") or []
         self._group_allow_from: List[str] = kwargs.get("group_allow_from") or []
         self._account_uuid: str = kwargs.get("account_uuid") or ""
@@ -557,6 +561,8 @@ class SignalChannel(BaseChannel):
             require_mention=c.get("require_mention", False),
             send_read_receipts=c.get("send_read_receipts", True),
             text_chunk_limit=c.get("text_chunk_limit", SIGNAL_MAX_TEXT_LENGTH),
+            ack_reaction_thinking=c.get("ack_reaction_thinking", "🤔"),
+            ack_reaction_done=c.get("ack_reaction_done", "👀"),
             groups=c.get("groups") or [],
             group_allow_from=c.get("group_allow_from") or [],
             account_uuid=c.get("account_uuid") or c.get("accountUuid") or "",
@@ -810,6 +816,20 @@ class SignalChannel(BaseChannel):
             typing_target = group_id if is_group else (source or source_uuid)
             channel_meta["_typing_target"] = typing_target
             channel_meta["_typing_is_group"] = is_group
+            # Store reaction target for _stream_with_tracker to clear on done
+            channel_meta["_ack_target"] = typing_target
+            channel_meta["_ack_author"] = source or source_uuid
+            channel_meta["_ack_timestamp"] = timestamp
+
+            # Send thinking reaction (fire-and-forget)
+            if self._ack_reaction_thinking:
+                asyncio.create_task(self.daemon.send_reaction(
+                    typing_target,
+                    self._ack_reaction_thinking,
+                    target_author=source or source_uuid,
+                    target_timestamp=timestamp,
+                    is_group=is_group,
+                ))
 
             await self.consume_one(request)
 
@@ -1296,6 +1316,23 @@ class SignalChannel(BaseChannel):
             if self._on_reply_sent:
                 args = self.get_on_reply_sent_args(request, to_handle)
                 self._on_reply_sent(self.channel, *args)
+
+            # Replace "thinking" with "done" reaction on the original message
+            if self._ack_reaction_done:
+                ack_target = send_meta.get("_ack_target")
+                ack_author = send_meta.get("_ack_author")
+                ack_ts = send_meta.get("_ack_timestamp")
+                if ack_target and ack_author and ack_ts:
+                    try:
+                        await self.daemon.send_reaction(
+                            ack_target,
+                            self._ack_reaction_done,
+                            target_author=ack_author,
+                            target_timestamp=int(ack_ts),
+                            is_group=bool(send_meta.get("_typing_is_group")),
+                        )
+                    except Exception as e:
+                        logger.debug("signal: done reaction failed: %s", e)
 
         except asyncio.CancelledError:
             if process_iterator:

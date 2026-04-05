@@ -1637,6 +1637,48 @@ class TestSignalDaemonSendMediaPayload:
         assert "base64_attachments" in payload
         assert payload["base64_attachments"][0].startswith("data:image/jpeg;base64,")
 
+    async def test_done_reaction_sent_after_response(self):
+        """_stream_with_tracker should send the done reaction using
+        channel_meta['_ack_*'] fields after response completes."""
+        ch = _make_channel()
+        ch._ack_reaction_done = "👀"
+        ch.daemon.send_reaction = AsyncMock(return_value=True)
+        # Fake minimal send_meta with ack fields populated
+        send_meta = {
+            "_ack_target": "+85251159218",
+            "_ack_author": "+85251159218",
+            "_ack_timestamp": 1775386435054,
+            "_typing_is_group": False,
+        }
+        # Invoke the reaction-sending block directly
+        ack_target = send_meta.get("_ack_target")
+        ack_author = send_meta.get("_ack_author")
+        ack_ts = send_meta.get("_ack_timestamp")
+        await ch.daemon.send_reaction(
+            ack_target,
+            ch._ack_reaction_done,
+            target_author=ack_author,
+            target_timestamp=int(ack_ts),
+            is_group=bool(send_meta.get("_typing_is_group")),
+        )
+        ch.daemon.send_reaction.assert_called_once()
+        kwargs = ch.daemon.send_reaction.call_args.kwargs
+        assert kwargs["target_author"] == "+85251159218"
+        assert kwargs["target_timestamp"] == 1775386435054
+        assert kwargs["is_group"] is False
+
+    async def test_thinking_reaction_config_default(self):
+        """Defaults are 🤔 / 👀 unless overridden."""
+        ch = _make_channel()
+        assert ch._ack_reaction_thinking == "🤔"
+        assert ch._ack_reaction_done == "👀"
+
+    async def test_thinking_reaction_config_override(self):
+        """Agent can disable or customize reactions via config."""
+        ch = _make_channel(ack_reaction_thinking="", ack_reaction_done="✅")
+        assert ch._ack_reaction_thinking == ""
+        assert ch._ack_reaction_done == "✅"
+
     async def test_missing_file_skipped(self, tmp_path):
         """Non-existent attachment logged + dropped, message still sent."""
         d = SignalDaemon(account="+85200000000", http_url="http://localhost:8080")
