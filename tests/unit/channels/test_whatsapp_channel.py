@@ -1039,12 +1039,12 @@ class TestAckReactions:
     async def test_send_reaction_calls_build_and_send(self):
         ch = _make_channel()
         client = MagicMock()
-        client.build_reaction = MagicMock(return_value="REACTION_MSG")
+        client.build_reaction = AsyncMock(return_value="REACTION_MSG")
         client.send_message = AsyncMock()
         chat_jid = MagicMock()
         sender_jid = MagicMock()
         await ch._send_reaction(client, chat_jid, sender_jid, "MSGID", "🤔")
-        client.build_reaction.assert_called_once_with(
+        client.build_reaction.assert_awaited_once_with(
             chat_jid, sender_jid, "MSGID", "🤔",
         )
         client.send_message.assert_awaited_once_with(chat_jid, "REACTION_MSG")
@@ -1052,7 +1052,7 @@ class TestAckReactions:
     async def test_send_reaction_swallows_errors(self):
         ch = _make_channel()
         client = MagicMock()
-        client.build_reaction = MagicMock(side_effect=RuntimeError("boom"))
+        client.build_reaction = AsyncMock(side_effect=RuntimeError("boom"))
         # Should not raise
         await ch._send_reaction(
             client, MagicMock(), MagicMock(), "MSGID", "🤔",
@@ -1063,7 +1063,7 @@ class TestAckReactions:
         convention."""
         ch = _make_channel()
         client = MagicMock()
-        client.build_reaction = MagicMock(return_value="EMPTY")
+        client.build_reaction = AsyncMock(return_value="EMPTY")
         client.send_message = AsyncMock()
         await ch._send_reaction(
             client, MagicMock(), MagicMock(), "MSGID", "",

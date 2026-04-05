@@ -1117,12 +1117,15 @@ class WhatsAppChannel(BaseChannel):
         remove an existing reaction.
         """
         try:
-            reaction_msg = client.build_reaction(
+            reaction_msg = await client.build_reaction(
                 chat_jid, sender_jid, msg_id, emoji or "",
             )
             await client.send_message(chat_jid, reaction_msg)
+            logger.debug(
+                "whatsapp: reaction %r sent on msg=%s", emoji, msg_id,
+            )
         except Exception as e:
-            logger.debug("whatsapp: reaction %r failed: %s", emoji, e)
+            logger.warning("whatsapp: reaction %r failed: %s", emoji, e)
 
     # ── Process loop override ─────────────────────────────────────────
 
