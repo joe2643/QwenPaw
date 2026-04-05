@@ -579,8 +579,8 @@ class WhatsAppChannel(BaseChannel):
                         content_parts.insert(0, TextContent(type=ContentType.TEXT, text=ctx_text))
                     self._group_history[chat_str] = []
 
-            # Inject bot identity so the agent knows its own WhatsApp number
-            if self._bot_phone:
+            # Inject bot identity in groups so the agent knows its own WhatsApp number
+            if is_group and self._bot_phone:
                 bot_id_text = f"[You are WhatsApp bot +{self._bot_phone}]"
                 content_parts.insert(0, TextContent(type=ContentType.TEXT, text=bot_id_text))
 
@@ -630,8 +630,6 @@ class WhatsAppChannel(BaseChannel):
                 "timestamp": timestamp,
                 "bot_phone": f"+{self._bot_phone}" if self._bot_phone else "",
                 "bot_lid": self._bot_lid,
-                "_typing_jid": typing_jid,
-                "_typing_client": client,
             }
             session_id = self.resolve_session_id(effective_sender, channel_meta)
             request = self.build_agent_request_from_user_content(
@@ -642,6 +640,9 @@ class WhatsAppChannel(BaseChannel):
                 channel_meta=channel_meta,
             )
             request.channel_meta = channel_meta
+            # Store typing info on request (NOT in channel_meta — JID/client are not JSON-serializable)
+            request._wa_typing_jid = typing_jid
+            request._wa_typing_client = client
 
             # Mark as read
             if self._send_read_receipts:
@@ -933,8 +934,10 @@ class WhatsAppChannel(BaseChannel):
         typing_task = None
         try:
             # Start persistent typing loop (re-sends every 4s until cancelled)
-            typing_jid = send_meta.get("_typing_jid")
-            typing_client = send_meta.get("_typing_client")
+            # Typing info stored on request object (not channel_meta) to avoid
+            # JSON serialization issues with JID/client objects.
+            typing_jid = getattr(request, "_wa_typing_jid", None)
+            typing_client = getattr(request, "_wa_typing_client", None)
             if typing_jid and typing_client:
                 typing_task = asyncio.create_task(
                     self._typing_loop(typing_client, typing_jid)
@@ -986,7 +989,6 @@ class WhatsAppChannel(BaseChannel):
         finally:
             if typing_task and not typing_task.done():
                 typing_task.cancel()
-            raise
 
     # ── Session / routing ─────────────────────────────────────────────
 

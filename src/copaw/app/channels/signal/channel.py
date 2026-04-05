@@ -52,7 +52,6 @@ _MAGIC_MAP = [
     (b"GIF89a",                   "image/gif",   "gif"),
     (b"RIFF",                     "image/webp",  "webp"),  # RIFF....WEBP
     (b"\x1a\x45\xdf\xa3",        "video/webm",  "webm"),
-    (b"\x00\x00\x00",            "video/mp4",   "mp4"),   # ftyp box
     (b"OggS",                     "audio/ogg",   "ogg"),
     (b"fLaC",                     "audio/flac",  "flac"),
     (b"ID3",                      "audio/mpeg",  "mp3"),
@@ -65,10 +64,12 @@ def _detect_mime(data: bytes) -> str:
     """Detect MIME type from file header bytes."""
     for magic, mime, _ in _MAGIC_MAP:
         if data[:len(magic)] == magic:
-            # Extra check for WEBP (RIFF....WEBP)
             if magic == b"RIFF" and data[8:12] != b"WEBP":
                 continue
             return mime
+    # MP4/M4A: check for ftyp box (byte 4-7 = "ftyp")
+    if len(data) >= 8 and data[4:8] == b"ftyp":
+        return "video/mp4"
     return ""
 
 
@@ -79,6 +80,9 @@ def _detect_ext(data: bytes, declared_ct: str) -> str:
             if magic == b"RIFF" and data[8:12] != b"WEBP":
                 continue
             return ext
+    # MP4/M4A: check for ftyp box
+    if len(data) >= 8 and data[4:8] == b"ftyp":
+        return "mp4"
     # Fallback to declared content-type
     if "/" in declared_ct and declared_ct != "application/octet-stream":
         return declared_ct.split("/")[-1].split(";")[0]
@@ -543,6 +547,18 @@ class SignalChannel(BaseChannel):
                     if not self._groups or group_id not in self._groups:
                         logger.debug("signal: blocked group %s (allowlist=%s)", group_id[:12], self._groups)
                         return
+                # Enforce group_allow_from: restrict which senders can trigger in groups
+                if self._group_allow_from:
+                    sender_id = source or source_uuid
+                    if not (
+                        "*" in self._group_allow_from
+                        or sender_id in self._group_allow_from
+                        or source in self._group_allow_from
+                        or source_uuid in self._group_allow_from
+                        or f"uuid:{source_uuid}" in self._group_allow_from
+                    ):
+                        logger.debug("signal: blocked sender %s by group_allow_from", sender_id)
+                        return
                 if self.require_mention:
                     if not self._is_bot_mentioned(data_message, body):
                         # Record in group history buffer with media paths
@@ -810,21 +826,21 @@ class SignalChannel(BaseChannel):
         # We must shift style ranges that come after each replacement.
         final_text, mention_list = _parse_mentions(plain_text)
         if mention_list:
-            # Build a shift map: for each mention replacement, positions
-            # after it shift left by (original_len - 1).
-            # Recompute by scanning the plain_text for the same matches.
+            # Build shift map using ORIGINAL positions in plain_text.
+            # Each mention @+number (N chars) → \ufffc (1 char), removing N-1 chars.
+            # Style ranges use original plain_text offsets, so compare against
+            # original match positions (not adjusted ones).
             mention_pat = _re.compile(r"@(\+\d{7,15}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
-            shifts = []  # [(original_start, chars_removed)]
-            cumulative = 0
+            shifts = []  # [(original_position, chars_removed)]
             for mm in mention_pat.finditer(plain_text):
-                removed = len(mm.group(0)) - 1  # replaced with single \ufffc
-                shifts.append((mm.start() - cumulative, removed))
-                cumulative += removed
-            # Adjust style ranges
+                removed = len(mm.group(0)) - 1
+                shifts.append((mm.start(), removed))
+            # Adjust style ranges: for each style, subtract chars removed
+            # by all mentions that appear BEFORE it in the original text
             for sr in style_ranges:
                 total_shift = 0
-                for shift_pos, shift_amt in shifts:
-                    if sr["start"] > shift_pos:
+                for orig_pos, shift_amt in shifts:
+                    if sr["start"] > orig_pos:
                         total_shift += shift_amt
                 sr["start"] -= total_shift
 
