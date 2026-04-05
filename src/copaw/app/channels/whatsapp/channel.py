@@ -323,7 +323,7 @@ class WhatsAppChannel(BaseChannel):
             try:
                 self._media_dir.mkdir(parents=True, exist_ok=True)
                 path = self._media_dir / f"wa_img_{msg_id}.jpg"
-                await client.download_media_with_path(msg, str(path))
+                await client.download_any(msg, path=str(path))
                 content_parts.append(ImageContent(type=ContentType.IMAGE, image_url=str(path)))
             except Exception as e:
                 logger.warning("whatsapp: image download failed: %s", e)
@@ -334,7 +334,7 @@ class WhatsAppChannel(BaseChannel):
                 self._media_dir.mkdir(parents=True, exist_ok=True)
                 ext = "ogg" if msg.audioMessage.ptt else "m4a"
                 path = self._media_dir / f"wa_audio_{msg_id}.{ext}"
-                await client.download_media_with_path(msg, str(path))
+                await client.download_any(msg, path=str(path))
                 content_parts.append(AudioContent(type=ContentType.AUDIO, data=str(path)))
             except Exception as e:
                 logger.warning("whatsapp: audio download failed: %s", e)
@@ -347,7 +347,7 @@ class WhatsAppChannel(BaseChannel):
                 # Sanitize filename to prevent path traversal
                 fname = Path(raw_fname).name or f"wa_doc_{msg_id}"
                 path = self._media_dir / fname
-                await client.download_media_with_path(msg, str(path))
+                await client.download_any(msg, path=str(path))
                 content_parts.append(FileContent(type=ContentType.FILE, file_url=str(path)))
             except Exception as e:
                 logger.warning("whatsapp: document download failed: %s", e)
@@ -426,7 +426,7 @@ class WhatsAppChannel(BaseChannel):
             try:
                 self._media_dir.mkdir(parents=True, exist_ok=True)
                 path = self._media_dir / f"wa_quote_{stanza_id[:12]}.jpg"
-                await client.download_media_with_path(quoted_msg, str(path))
+                await client.download_any(quoted_msg, path=str(path))
                 if path.exists() and path.stat().st_size > 0:
                     return [
                         TextContent(type=ContentType.TEXT, text=f"[Replying to {sender_label}: {quote_body}]"),
@@ -578,6 +578,11 @@ class WhatsAppChannel(BaseChannel):
                         ctx_text = "--- Recent group messages (context only, not directed at you) ---\n" + "\n".join(ctx_lines)
                         content_parts.insert(0, TextContent(type=ContentType.TEXT, text=ctx_text))
                     self._group_history[chat_str] = []
+
+            # Inject bot identity so the agent knows its own WhatsApp number
+            if self._bot_phone:
+                bot_id_text = f"[You are WhatsApp bot +{self._bot_phone}]"
+                content_parts.insert(0, TextContent(type=ContentType.TEXT, text=bot_id_text))
 
             # For group messages, prepend sender identity to the actual message
             # (skip history context blocks that start with "---")
