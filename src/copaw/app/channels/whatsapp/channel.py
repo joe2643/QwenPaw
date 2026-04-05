@@ -354,6 +354,64 @@ class WhatsAppChannel(BaseChannel):
 
         return body, content_parts
 
+    async def _extract_quote_content(self, client, msg) -> List[Any]:
+        """Extract the content of a quoted/replied-to WhatsApp message.
+
+        Returns content parts (text + media) so the agent has full context
+        of what the user is responding to — not just a stanza ID.
+        """
+        # contextInfo lives on extendedTextMessage, imageMessage, etc.
+        ctx = None
+        for field in ("extendedTextMessage", "imageMessage", "videoMessage",
+                       "audioMessage", "documentMessage"):
+            if msg.HasField(field):
+                sub = getattr(msg, field)
+                if hasattr(sub, "contextInfo"):
+                    ctx = sub.contextInfo
+                    break
+        if not ctx:
+            return []
+        if not (ctx.HasField("quotedMessage") if hasattr(ctx, "HasField") else False):
+            return []
+
+        quoted_msg = ctx.quotedMessage
+        participant = getattr(ctx, "participant", "") or ""
+        if isinstance(participant, str):
+            sender_label = participant.split("@")[0] if "@" in participant else participant
+        elif hasattr(participant, "User"):
+            sender_label = participant.User
+        else:
+            sender_label = "unknown"
+
+        # Resolve LID to phone for display
+        if sender_label and f"{sender_label}@lid" in self._lid_cache:
+            cached = self._lid_cache[f"{sender_label}@lid"]
+            phone = cached.get("phone", "")
+            if phone:
+                sender_label = f"+{phone}"
+
+        # Extract quoted message content by reusing _extract_message_content
+        # Generate a unique ID for downloaded media
+        stanza_id = getattr(ctx, "stanzaId", "") or "quote"
+        quote_body, quote_parts = await self._extract_message_content(
+            client, quoted_msg, f"reply_{stanza_id[:12]}"
+        )
+
+        parts: List[Any] = []
+        # Build header text
+        body_preview = quote_body[:200] if quote_body else ""
+        media_count = sum(1 for p in quote_parts if getattr(p, "type", None) != ContentType.TEXT)
+        media_desc = f" [+{media_count} media]" if media_count else ""
+        header = f"[Replying to {sender_label}: {body_preview}{media_desc}]"
+        parts.append(TextContent(type=ContentType.TEXT, text=header))
+
+        # Include quoted media so the agent can see what was replied to
+        for p in quote_parts:
+            if getattr(p, "type", None) != ContentType.TEXT:
+                parts.append(p)
+
+        return parts
+
     def _check_access(self, is_group, chat_str, sender_str, sender_jid, client, msg, body) -> bool:
         """Check access control for incoming message.
 
@@ -400,6 +458,11 @@ class WhatsAppChannel(BaseChannel):
             # Extract message content via helper
             msg = message.Message
             body, content_parts = await self._extract_message_content(client, msg, msg_id)
+
+            # Extract quoted/replied-to message content
+            quote_parts = await self._extract_quote_content(client, msg)
+            if quote_parts:
+                content_parts = quote_parts + content_parts
 
             if not content_parts:
                 return
