@@ -579,26 +579,50 @@ class WhatsAppChannel(BaseChannel):
                         content_parts.insert(0, TextContent(type=ContentType.TEXT, text=ctx_text))
                     self._group_history[chat_str] = []
 
-            # Inject bot identity in groups so the agent knows its own WhatsApp number
-            if is_group and self._bot_phone:
-                bot_id_text = f"[You are WhatsApp bot +{self._bot_phone}]"
-                content_parts.insert(0, TextContent(type=ContentType.TEXT, text=bot_id_text))
+            # Strip bot @mention from body text so commands like "/new" work
+            # even when prefixed with @+phone. This happens BEFORE the
+            # [From ...] prefix wrap so command detection sees clean text.
+            if self._bot_phone or self._bot_lid:
+                import re as _re
+                mention_patterns = []
+                if self._bot_phone:
+                    mention_patterns.append(rf"@\+?{_re.escape(self._bot_phone)}\s*")
+                if self._bot_lid:
+                    mention_patterns.append(rf"@{_re.escape(self._bot_lid)}\s*")
+                for i, part in enumerate(content_parts):
+                    if hasattr(part, "type") and part.type == ContentType.TEXT:
+                        txt = part.text or ""
+                        if txt.startswith("---") or txt.startswith("[Replying"):
+                            continue
+                        for pat in mention_patterns:
+                            txt = _re.sub(pat, "", txt).strip()
+                        if txt != (part.text or ""):
+                            content_parts[i] = TextContent(type=ContentType.TEXT, text=txt)
+                        break
+                # Update body so command detection sees stripped text
+                if body:
+                    for pat in mention_patterns:
+                        body = _re.sub(pat, "", body).strip()
+
+            # Detect slash commands (/new, /stop, /clear, etc.)
+            has_bot_command = bool(body and body.lstrip().startswith("/"))
 
             # For group messages, prepend sender identity to the actual message
-            # (skip history context blocks that start with "---")
+            # (skip history context blocks that start with "---" or "[Replying")
+            # Also append bot identity so the agent knows who it is.
             if is_group and content_parts:
                 sender_label = friendly_sender
                 if resolved_name:
                     sender_label = f"{resolved_name} ({friendly_sender})"
+                bot_ident = f" (to WhatsApp bot +{self._bot_phone})" if self._bot_phone else ""
                 for i, part in enumerate(content_parts):
                     if hasattr(part, "type") and part.type == ContentType.TEXT:
                         txt = part.text or ""
-                        # Don't prepend [From] to history context blocks
-                        if txt.startswith("---"):
+                        if txt.startswith("---") or txt.startswith("[Replying"):
                             continue
                         content_parts[i] = TextContent(
                             type=ContentType.TEXT,
-                            text=f"[From {sender_label}]: {txt}"
+                            text=f"[From {sender_label}{bot_ident}]: {txt}"
                         )
                         break
 
@@ -630,6 +654,8 @@ class WhatsAppChannel(BaseChannel):
                 "timestamp": timestamp,
                 "bot_phone": f"+{self._bot_phone}" if self._bot_phone else "",
                 "bot_lid": self._bot_lid,
+                "has_bot_command": has_bot_command,
+                "bot_mentioned": True,  # We only reach here if mention check passed
             }
             session_id = self.resolve_session_id(effective_sender, channel_meta)
             request = self.build_agent_request_from_user_content(
@@ -655,14 +681,16 @@ class WhatsAppChannel(BaseChannel):
                 except Exception:
                     pass
 
-            # For commands like /stop, pass raw body for detection
-            if body and body.strip().startswith("/"):
+            # For slash commands (/new, /stop, /clear, etc.), strip [From ...]
+            # prefix so the command registry sees the raw command text.
+            if has_bot_command:
                 for i, part in enumerate(content_parts):
                     if hasattr(part, "text") and part.text.startswith("[From "):
                         idx = part.text.find("]: ")
                         if idx > 0:
                             raw_text = part.text[idx + 3:]
                             content_parts[i] = TextContent(type=ContentType.TEXT, text=raw_text)
+                        break
                 request = self.build_agent_request_from_user_content(
                     channel_id=self.channel,
                     sender_id=effective_sender,
@@ -671,6 +699,8 @@ class WhatsAppChannel(BaseChannel):
                     channel_meta=channel_meta,
                 )
                 request.channel_meta = channel_meta
+                request._wa_typing_jid = typing_jid
+                request._wa_typing_client = client
 
             await self.consume_one(request)
 
