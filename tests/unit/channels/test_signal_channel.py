@@ -1499,3 +1499,158 @@ class TestUuidLikeNameFilter:
         mentions = [{"start": 0, "length": 1}]  # no uuid/number/name
         result = ch._expand_mentions(body, mentions)
         assert "@someone" in result
+
+
+# ===================================================================
+# TestSendMedia — outbound media via SignalChannel.send_media
+# ===================================================================
+
+class TestSendMedia:
+    """Tests for SignalChannel.send_media (routes OutgoingContentPart
+    to daemon.send_message with the file as an attachment)."""
+
+    def _make_ready_channel(self, tmp_path):
+        ch = _make_channel()
+        ch.enabled = True
+        ch.daemon.connected = True
+        ch.daemon.send_message = AsyncMock()
+        # Create a real file for existence checks
+        f = tmp_path / "wa.jpg"
+        f.write_bytes(b"\xff\xd8\xff\xe0fake jpeg")
+        return ch, f
+
+    async def test_send_image_dm(self, tmp_path):
+        ch, f = self._make_ready_channel(tmp_path)
+        part = ImageContent(type=ContentType.IMAGE, image_url=str(f))
+        await ch.send_media("+85200000001", part, {})
+        call = ch.daemon.send_message.call_args
+        assert call.args[0] == "+85200000001"
+        assert call.kwargs["is_group"] is False
+        assert call.kwargs["attachments"] == [str(f)]
+
+    async def test_send_image_to_group(self, tmp_path):
+        ch, f = self._make_ready_channel(tmp_path)
+        part = ImageContent(type=ContentType.IMAGE, image_url=str(f))
+        group = "sBlO8LhzR42X...="
+        await ch.send_media(group, part, {"group_id": group})
+        call = ch.daemon.send_message.call_args
+        assert call.args[0] == group
+        assert call.kwargs["is_group"] is True
+        assert call.kwargs["attachments"] == [str(f)]
+
+    async def test_send_file(self, tmp_path):
+        ch, _ = self._make_ready_channel(tmp_path)
+        doc = tmp_path / "doc.pdf"
+        doc.write_bytes(b"%PDF-1.5")
+        part = FileContent(type=ContentType.FILE, file_url=str(doc))
+        await ch.send_media("+85200000001", part, {})
+        assert ch.daemon.send_message.call_args.kwargs["attachments"] == [str(doc)]
+
+    async def test_send_audio(self, tmp_path):
+        ch, _ = self._make_ready_channel(tmp_path)
+        audio = tmp_path / "voice.ogg"
+        audio.write_bytes(b"OggS" + b"\x00" * 10)
+        part = AudioContent(type=ContentType.AUDIO, data=str(audio))
+        await ch.send_media("+85200000001", part, {})
+        assert ch.daemon.send_message.call_args.kwargs["attachments"] == [str(audio)]
+
+    async def test_send_video(self, tmp_path):
+        ch, _ = self._make_ready_channel(tmp_path)
+        video = tmp_path / "clip.mp4"
+        video.write_bytes(b"\x00\x00\x00\x20ftypmp42" + b"\x00" * 10)
+        part = VideoContent(type=ContentType.VIDEO, video_url=str(video))
+        await ch.send_media("+85200000001", part, {})
+        assert ch.daemon.send_message.call_args.kwargs["attachments"] == [str(video)]
+
+    async def test_send_media_strips_file_scheme(self, tmp_path):
+        ch, f = self._make_ready_channel(tmp_path)
+        part = ImageContent(type=ContentType.IMAGE, image_url=f"file://{f}")
+        await ch.send_media("+85200000001", part, {})
+        # Attachment path has file:// stripped
+        assert ch.daemon.send_message.call_args.kwargs["attachments"] == [str(f)]
+
+    async def test_send_media_missing_file_noop(self, tmp_path):
+        ch, _ = self._make_ready_channel(tmp_path)
+        missing = tmp_path / "does_not_exist.jpg"
+        part = ImageContent(type=ContentType.IMAGE, image_url=str(missing))
+        await ch.send_media("+85200000001", part, {})
+        # Daemon NOT called
+        ch.daemon.send_message.assert_not_called()
+
+    async def test_send_media_no_path_noop(self, tmp_path):
+        ch, _ = self._make_ready_channel(tmp_path)
+        part = ImageContent(type=ContentType.IMAGE, image_url="")
+        await ch.send_media("+85200000001", part, {})
+        ch.daemon.send_message.assert_not_called()
+
+    async def test_send_media_disconnected_noop(self, tmp_path):
+        ch, f = self._make_ready_channel(tmp_path)
+        ch.daemon.connected = False
+        part = ImageContent(type=ContentType.IMAGE, image_url=str(f))
+        await ch.send_media("+85200000001", part, {})
+        ch.daemon.send_message.assert_not_called()
+
+    async def test_send_media_disabled_noop(self, tmp_path):
+        ch, f = self._make_ready_channel(tmp_path)
+        ch.enabled = False
+        part = ImageContent(type=ContentType.IMAGE, image_url=str(f))
+        await ch.send_media("+85200000001", part, {})
+        ch.daemon.send_message.assert_not_called()
+
+    async def test_send_media_file_id_fallback(self, tmp_path):
+        """FileContent uses file_id as fallback when file_url is missing."""
+        ch, _ = self._make_ready_channel(tmp_path)
+        doc = tmp_path / "doc.pdf"
+        doc.write_bytes(b"%PDF-1.5")
+        part = MagicMock()
+        part.type = ContentType.FILE
+        part.file_url = None
+        part.file_id = str(doc)
+        await ch.send_media("+85200000001", part, {})
+        assert ch.daemon.send_message.call_args.kwargs["attachments"] == [str(doc)]
+
+
+# ===================================================================
+# TestSignalDaemonSendMediaPayload — daemon-level encoding
+# ===================================================================
+
+class TestSignalDaemonSendMediaPayload:
+    """When send_message receives attachments, it must base64-encode
+    and shove them into base64_attachments for bbernhard."""
+
+    async def test_attachment_base64_encoded(self, tmp_path):
+        """daemon base64-encodes the file and attaches with data: prefix."""
+        img = tmp_path / "x.jpg"
+        img.write_bytes(b"\xff\xd8\xff\xe0hello")
+        d = SignalDaemon(account="+85200000000", http_url="http://localhost:8080")
+        d.connected = True
+        d.session = MagicMock()
+        mock_resp = AsyncMock()
+        mock_resp.status = 201
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=None)
+        mock_resp.json = AsyncMock(return_value={"timestamp": "123"})
+        mock_resp.text = AsyncMock(return_value="")
+        d.session.post = MagicMock(return_value=mock_resp)
+        await d.send_message("+85212345678", "caption", attachments=[str(img)])
+        payload = d.session.post.call_args.kwargs["json"]
+        assert "base64_attachments" in payload
+        assert payload["base64_attachments"][0].startswith("data:image/jpeg;base64,")
+
+    async def test_missing_file_skipped(self, tmp_path):
+        """Non-existent attachment logged + dropped, message still sent."""
+        d = SignalDaemon(account="+85200000000", http_url="http://localhost:8080")
+        d.connected = True
+        d.session = MagicMock()
+        mock_resp = AsyncMock()
+        mock_resp.status = 201
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=None)
+        mock_resp.json = AsyncMock(return_value={"timestamp": "123"})
+        mock_resp.text = AsyncMock(return_value="")
+        d.session.post = MagicMock(return_value=mock_resp)
+        missing = tmp_path / "nope.jpg"
+        await d.send_message("+85212345678", "txt", attachments=[str(missing)])
+        payload = d.session.post.call_args.kwargs["json"]
+        # base64_attachments key omitted when encoding list empty
+        assert "base64_attachments" not in payload
