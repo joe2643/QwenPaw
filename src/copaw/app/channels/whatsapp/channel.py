@@ -423,9 +423,9 @@ class WhatsAppChannel(BaseChannel):
         history for context injection.
         """
         if is_group:
-            if self.group_policy == "allowlist" and self._groups:
-                if chat_str not in self._groups:
-                    logger.debug("whatsapp: blocked by group allowlist")
+            if self.group_policy == "allowlist":
+                if not self._groups or chat_str not in self._groups:
+                    logger.debug("whatsapp: blocked group %s (allowlist=%s)", chat_str[:20], self._groups)
                     return False
         return True
 

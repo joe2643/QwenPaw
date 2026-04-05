@@ -496,8 +496,9 @@ class SignalChannel(BaseChannel):
 
             # ── Access control ────────────────────────────────────────
             if group_id:
-                if self.group_policy == "allowlist" and self._groups:
-                    if group_id not in self._groups:
+                if self.group_policy == "allowlist":
+                    if not self._groups or group_id not in self._groups:
+                        logger.debug("signal: blocked group %s (allowlist=%s)", group_id[:12], self._groups)
                         return
                 if self.require_mention:
                     if not self._is_bot_mentioned(data_message, body):
