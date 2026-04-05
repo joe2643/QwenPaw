@@ -727,22 +727,7 @@ class SignalChannel(BaseChannel):
         if is_group and group_id:
             to_handle = group_id
 
-        # Convert markdown to Signal text styles
-        plain_text, style_ranges = _markdown_to_signal(text)
-        text_style_params = [
-            f"{s['start']}:{s['length']}:{s['style']}" for s in style_ranges
-        ] if style_ranges else None
-        
-        # Parse mentions (@+number or @uuid)
-        plain_text, mention_list = _parse_mentions(plain_text)
-        mention_params = [
-            f"{m['start']}:{m['length']}:{m.get('uuid', m.get('number', ''))}" 
-            for m in mention_list
-        ] if mention_list else None
-        
-        text = plain_text
-
-        # Extract [Image: file:///...] or [Image: /path] and send as attachments
+        # ── Step 1: Extract [Image: ...] from raw text ──────────────
         img_re = __import__("re").compile(r'\[Image: (file:///[^\]]+|/[^\]]+)\]')
         img_matches = img_re.findall(text)
         att_paths = []
@@ -752,6 +737,46 @@ class SignalChannel(BaseChannel):
                 att_paths.append(p)
                 text = text.replace(f"[Image: {m}]", "").strip()
                 logger.info("signal: extracted image attachment: %s", p)
+
+        # ── Step 2: Convert markdown → plain text + style ranges ─────
+        plain_text, style_ranges = _markdown_to_signal(text)
+
+        # ── Step 3: Parse mentions on the plain text ─────────────────
+        # _parse_mentions replaces @+number (N chars) with \ufffc (1 char).
+        # We must shift style ranges that come after each replacement.
+        final_text, mention_list = _parse_mentions(plain_text)
+        if mention_list:
+            # Build a shift map: for each mention replacement, positions
+            # after it shift left by (original_len - 1).
+            # Recompute by scanning the plain_text for the same matches.
+            mention_pat = _re.compile(r"@(\+\d{7,15}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
+            shifts = []  # [(original_start, chars_removed)]
+            cumulative = 0
+            for mm in mention_pat.finditer(plain_text):
+                removed = len(mm.group(0)) - 1  # replaced with single \ufffc
+                shifts.append((mm.start() - cumulative, removed))
+                cumulative += removed
+            # Adjust style ranges
+            for sr in style_ranges:
+                total_shift = 0
+                for shift_pos, shift_amt in shifts:
+                    if sr["start"] > shift_pos:
+                        total_shift += shift_amt
+                sr["start"] -= total_shift
+
+        mention_params = [
+            f"{m['start']}:{m['length']}:{m.get('uuid', m.get('number', ''))}"
+            for m in mention_list
+        ] if mention_list else None
+
+        text_style_params = [
+            f"{s['start']}:{s['length']}:{s['style']}" for s in style_ranges
+        ] if style_ranges else None
+
+        text = final_text
+
+        logger.debug("signal: send styles=%s mentions=%s text=%s",
+                      text_style_params, mention_params, text[:120])
 
         chunks = self._chunk_text(text) if text.strip() else [""]
         for i, chunk in enumerate(chunks):
