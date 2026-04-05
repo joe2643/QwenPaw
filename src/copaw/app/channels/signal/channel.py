@@ -249,13 +249,16 @@ class SignalDaemon:
         quote_author: str = "",
         attachments: Optional[List[str]] = None,
         text_style: Optional[List[str]] = None,  # kept for compatibility, ignored
-        mentions: Optional[List[str]] = None,  # kept for compatibility, ignored
+        mentions: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[int]:
         """Send message via POST /v2/send. Returns timestamp on success.
 
-        text_style/mentions params are no longer needed — bbernhard's
-        `text_mode: "styled"` parses markdown natively (**bold**, *italic*,
-        ~~strike~~, `code`) and its mention syntax is inline.
+        `text_style` is ignored — bbernhard's `text_mode: "styled"` parses
+        markdown natively.
+
+        `mentions` is a list of dicts `{start, length, author}` where
+        `author` is either "+phone" or a Signal UUID. The `text` must
+        contain U+FFFC placeholders at each mention's `start` position.
         """
         if not self.session or not self.connected:
             return None
@@ -267,6 +270,8 @@ class SignalDaemon:
         if text:
             payload["message"] = text
             payload["text_mode"] = "styled"
+        if mentions:
+            payload["mentions"] = mentions
         if quote_timestamp and quote_author:
             payload["quote_timestamp"] = quote_timestamp
             payload["quote_author"] = quote_author
@@ -861,6 +866,53 @@ class SignalChannel(BaseChannel):
             return f"uuid:{source_uuid[:8]}"
         return "unknown"
 
+    @staticmethod
+    def _compile_outbound_mentions(text: str) -> tuple:
+        """Parse '@+phone' and '@uuid:xxxxxxxx' tokens in outbound text.
+
+        Returns (cleaned_text, mentions) where cleaned_text has one U+FFFC
+        per mention (as Signal expects) and mentions is the list bbernhard's
+        /v2/send endpoint wants: [{start, length, author}].
+
+        Recognised tokens (matched in order):
+          @Name (+85251159218)        → author=+85251159218
+          @Name (uuid:abc12345)       → author=abc12345…
+          @+85251159218               → author=+85251159218
+          @uuid:abc12345              → author=abc12345…
+
+        Bare @Name without an id is ignored (Signal can't mention by name).
+        """
+        pat = _re.compile(
+            r"@(?:[^@\s()]+\s*)?"
+            r"(?:"
+            r"\(\+(\d{7,15})\)"
+            r"|\(uuid:([0-9a-f]{8}[0-9a-f-]*)\)"
+            r"|\+(\d{7,15})"
+            r"|uuid:([0-9a-f]{8}[0-9a-f-]*)"
+            r")"
+        )
+        out = []
+        mentions: List[Dict[str, Any]] = []
+        cursor = 0
+        for m in pat.finditer(text):
+            # Everything before this token passes through unchanged
+            out.append(text[cursor:m.start()])
+            phone = m.group(1) or m.group(3) or ""
+            uuid = m.group(2) or m.group(4) or ""
+            author = f"+{phone}" if phone else uuid
+            if author:
+                mentions.append({
+                    "start": sum(len(p) for p in out),
+                    "length": 1,
+                    "author": author,
+                })
+                out.append("\ufffc")
+            else:
+                out.append(m.group(0))
+            cursor = m.end()
+        out.append(text[cursor:])
+        return "".join(out), mentions
+
     def _expand_mentions(self, body: str, mentions: List[Dict[str, Any]]) -> str:
         """Replace Signal's U+FFFC mention placeholders with readable references.
 
@@ -1015,13 +1067,41 @@ class SignalChannel(BaseChannel):
                 text = text.replace(f"[Image: {m}]", "").strip()
 
         # bbernhard parses markdown natively with text_mode: styled.
-        # No manual offset computation needed.
+        # Parse outbound @+phone / @uuid:xxx markers into bbernhard mention format
+        # (U+FFFC placeholder + mentions array).
+        text, mentions = self._compile_outbound_mentions(text)
+
         chunks = self._chunk_text(text) if text.strip() else [""]
         for i, chunk in enumerate(chunks):
             atts = att_paths if i == 0 and att_paths else None
+            # Only attach mentions to chunks where ALL placeholders live.
+            # For simplicity: if the message was chunked, send mentions only
+            # on the first chunk that still contains U+FFFC placeholders.
+            chunk_mentions = None
+            if mentions and "\ufffc" in chunk:
+                chunk_placeholder_positions = [
+                    idx for idx, ch in enumerate(chunk) if ch == "\ufffc"
+                ]
+                # Map mentions onto this chunk (offsets are always aligned
+                # when chunking is naive; if split would break this, skip).
+                # Walk mentions and keep those whose (new) start falls in chunk.
+                remapped = []
+                # Rebuild offsets: count placeholders consumed by earlier chunks.
+                consumed_before = sum(
+                    1 for c in "".join(chunks[:i]) if c == "\ufffc"
+                )
+                mentions_in_chunk = mentions[
+                    consumed_before:consumed_before + len(chunk_placeholder_positions)
+                ]
+                for pos, orig in zip(chunk_placeholder_positions, mentions_in_chunk):
+                    remapped.append({
+                        "start": pos, "length": 1, "author": orig["author"],
+                    })
+                chunk_mentions = remapped or None
             if chunk.strip() or atts:
                 await self.daemon.send_message(
                     to_handle, chunk, is_group=is_group, attachments=atts,
+                    mentions=chunk_mentions,
                 )
 
     async def send_media(

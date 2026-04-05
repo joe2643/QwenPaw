@@ -1299,6 +1299,93 @@ class TestSenderDisplayAndMentions:
         result = ch._expand_mentions(body, mentions)
         assert result == "@Eve (+852111) hi"
 
+
+# ===================================================================
+# TestOutboundMentions — parsing @markers for Signal send
+# ===================================================================
+
+class TestOutboundMentions:
+    """Tests for _compile_outbound_mentions (agent text → bbernhard format)."""
+
+    def test_bare_phone_marker(self):
+        text, mentions = SignalChannel._compile_outbound_mentions("Hi @+85251159218 there")
+        assert text == "Hi \ufffc there"
+        assert mentions == [{"start": 3, "length": 1, "author": "+85251159218"}]
+
+    def test_bare_uuid_marker(self):
+        text, mentions = SignalChannel._compile_outbound_mentions("yo @uuid:abc12345-def please")
+        assert "\ufffc" in text
+        assert mentions[0]["author"].startswith("abc12345")
+
+    def test_name_with_phone_form(self):
+        """Output of _expand_mentions feeds back in: '@Alice (+85298765432)'."""
+        text, mentions = SignalChannel._compile_outbound_mentions(
+            "hey @Alice (+85298765432) come look"
+        )
+        assert text == "hey \ufffc come look"
+        assert mentions == [{"start": 4, "length": 1, "author": "+85298765432"}]
+
+    def test_name_with_uuid_form(self):
+        text, mentions = SignalChannel._compile_outbound_mentions(
+            "@Bob (uuid:82e0393a) hi"
+        )
+        assert text.startswith("\ufffc")
+        assert mentions[0]["author"] == "82e0393a"
+
+    def test_multiple_mentions_in_one_message(self):
+        text, mentions = SignalChannel._compile_outbound_mentions(
+            "@+85211111 and @+85222222 please review"
+        )
+        assert text.count("\ufffc") == 2
+        assert len(mentions) == 2
+        assert mentions[0]["author"] == "+85211111"
+        assert mentions[1]["author"] == "+85222222"
+        # Verify offsets are correct within the cleaned text
+        assert text[mentions[0]["start"]] == "\ufffc"
+        assert text[mentions[1]["start"]] == "\ufffc"
+
+    def test_no_mention_marker_passes_through(self):
+        text, mentions = SignalChannel._compile_outbound_mentions("just plain text")
+        assert text == "just plain text"
+        assert mentions == []
+
+    def test_bare_name_without_id_ignored(self):
+        """@Alice alone (no phone/uuid) is NOT converted to a mention."""
+        text, mentions = SignalChannel._compile_outbound_mentions("hi @Alice how are you")
+        assert text == "hi @Alice how are you"
+        assert mentions == []
+
+    def test_email_not_matched(self):
+        """Don't treat email addresses as mentions."""
+        text, mentions = SignalChannel._compile_outbound_mentions("email me at foo@bar.com ok")
+        assert "\ufffc" not in text
+        assert mentions == []
+
+    async def test_send_with_mentions_calls_daemon_with_payload(self):
+        ch = _make_channel()
+        ch.enabled = True
+        ch.daemon.connected = True
+        ch.daemon.send_message = AsyncMock()
+        await ch.send("+85200000001", "Hi @+85251159218 look!", {})
+        call = ch.daemon.send_message.call_args
+        # Check mentions kwarg
+        assert call.kwargs.get("mentions") == [
+            {"start": 3, "length": 1, "author": "+85251159218"}
+        ]
+        # Text has placeholder
+        sent_text = call.args[1]
+        assert "\ufffc" in sent_text
+
+    async def test_send_without_mentions(self):
+        """No mention markers → no mentions param (or None)."""
+        ch = _make_channel()
+        ch.enabled = True
+        ch.daemon.connected = True
+        ch.daemon.send_message = AsyncMock()
+        await ch.send("+85200000001", "plain message", {})
+        call = ch.daemon.send_message.call_args
+        assert call.kwargs.get("mentions") is None
+
     def test_expand_mentions_uuid_only_fallback(self):
         ch = _make_channel()
         body = "\ufffc here"
