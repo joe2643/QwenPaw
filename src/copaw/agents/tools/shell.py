@@ -352,6 +352,22 @@ async def execute_shell_command(
                 response_parts.append(f"\n[stderr]\n{stderr_str}")
             response_text = "".join(response_parts)
 
+        # Guard: truncate oversized output to prevent context explosion.
+        # Shell commands like `cat large_file` or `grep -r` can return MB+
+        # of text that overwhelms the LLM context window.
+        _SHELL_MAX_BYTES = 50 * 1024  # 50KB — same as read_file
+        output_bytes = len(response_text.encode("utf-8"))
+        if output_bytes > _SHELL_MAX_BYTES:
+            # Keep first 40KB + last 5KB with truncation notice
+            head = response_text[:40000]
+            tail = response_text[-5000:]
+            response_text = (
+                f"{head}\n\n"
+                f"... [OUTPUT TRUNCATED: {output_bytes:,} bytes total, "
+                f"showing first 40KB + last 5KB] ...\n\n"
+                f"{tail}"
+            )
+
         return ToolResponse(
             content=[
                 TextBlock(
