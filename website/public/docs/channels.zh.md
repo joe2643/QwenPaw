@@ -774,7 +774,7 @@ WhatsApp 频道使用 [neonize](https://github.com/krypton-byte/neonize)（whats
 
 | 字段                  | 类型    | 默认值            | 说明                                                    |
 | -------------------- | ------- | ---------------- | ------------------------------------------------------ |
-| `auth_dir`           | string  | `""`             | neonize 会话数据目录。默认 `~/.copaw/credentials/whatsapp` |
+| `auth_dir`           | string  | `""`             | neonize 会话数据目录。默认 `~/.copaw/credentials/whatsapp/default` |
 | `send_read_receipts` | bool    | `true`           | 发送已读回执（蓝色双勾）                                    |
 | `self_chat_mode`     | bool    | `false`          | 处理自己号码发出的消息（用于自我命令）                         |
 | `text_chunk_limit`   | int     | `4096`           | 单条消息最大字符数（超出时自动分段）                          |

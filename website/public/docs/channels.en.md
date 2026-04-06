@@ -770,7 +770,7 @@ The session is persisted under `~/.copaw/credentials/whatsapp/default/neonize.db
 
 | Field                | Type    | Default            | Description                                                          |
 | -------------------- | ------- | ------------------ | -------------------------------------------------------------------- |
-| `auth_dir`           | string  | `""`               | Directory for neonize session DB. Defaults to `~/.copaw/credentials/whatsapp` |
+| `auth_dir`           | string  | `""`               | Directory for neonize session DB. Defaults to `~/.copaw/credentials/whatsapp/default` |
 | `send_read_receipts` | bool    | `true`             | Send read receipts (double blue ticks)                               |
 | `self_chat_mode`     | bool    | `false`            | Process messages sent from the bot's own number (for self-commands)  |
 | `text_chunk_limit`   | int     | `4096`             | Maximum characters per outgoing message (longer replies are split)   |

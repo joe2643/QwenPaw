@@ -209,6 +209,7 @@ class WhatsAppConfig(BaseChannelConfig):
     send_read_receipts: bool = True
     self_chat_mode: bool = False
     text_chunk_limit: int = 4096
+    media_max_mb: int = 50
     groups: List[str] = Field(default_factory=list)
     group_allow_from: List[str] = Field(default_factory=list)
     ack_reaction_thinking: str = "🤔"

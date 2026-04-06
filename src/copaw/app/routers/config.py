@@ -685,7 +685,7 @@ async def start_whatsapp_pair(request: Request, phone: str = "") -> dict:
     import asyncio
     try:
         from neonize.aioze.client import NewAClient
-        from neonize.events import ConnectedEv, QREv
+        from neonize.events import ConnectedEv
     except ImportError:
         raise HTTPException(status_code=500, detail="neonize not installed")
 
@@ -879,16 +879,20 @@ async def get_whatsapp_status(request: Request) -> dict:
         db_path = Path(auth_dir).expanduser() / "neonize.db"
         if not db_path.exists():
             return {"linked": False, "phone": None}
+        import asyncio
         import sqlite3
-        conn = sqlite3.connect(str(db_path))
-        try:
-            rows = conn.execute("SELECT * FROM whatsmeow_device LIMIT 1").fetchall()
-            if rows:
-                return {"linked": True, "phone": "linked"}
-            return {"linked": False, "phone": None}
-        except Exception:
-            return {"linked": False, "phone": None}
-        finally:
-            conn.close()
+        def _check_linked():
+            conn = sqlite3.connect(str(db_path))
+            try:
+                rows = conn.execute("SELECT * FROM whatsmeow_device LIMIT 1").fetchall()
+                return bool(rows)
+            except Exception:
+                return False
+            finally:
+                conn.close()
+        linked = await asyncio.to_thread(_check_linked)
+        if linked:
+            return {"linked": True, "phone": "linked"}
+        return {"linked": False, "phone": None}
     except Exception as e:
         return {"linked": False, "error": str(e)}

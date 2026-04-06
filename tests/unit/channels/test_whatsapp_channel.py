@@ -9,7 +9,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -37,7 +37,6 @@ _utils_mod = sys.modules["neonize.utils"]
 _utils_mod.build_jid = lambda user, server: MagicMock(User=user, Server=server)
 
 # Ensure NEONIZE_AVAILABLE is True so WhatsAppChannel can be instantiated
-import importlib
 from copaw.app.channels.whatsapp import channel as _wa_mod
 _wa_mod.NEONIZE_AVAILABLE = True
 _wa_mod.NewAClient = MagicMock

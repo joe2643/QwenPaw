@@ -49,16 +49,8 @@ try:
         MessageEv,
         ConnectedEv,
         QREv,
-        PairStatusEv,
     )
-    NEONIZE_AVAILABLE = True
     from neonize.utils import build_jid
-    from neonize.proto.waE2E.WAWebProtobufsE2E_pb2 import (
-        Message as WAMessage,
-        ExtendedTextMessage,
-        ContextInfo,
-        ImageMessage,
-    )
     NEONIZE_AVAILABLE = True
 except ImportError:
     NEONIZE_AVAILABLE = False
@@ -130,7 +122,7 @@ class WhatsAppChannel(BaseChannel):
             require_mention=require_mention,
         )
         self.enabled = enabled
-        self._auth_dir = Path(auth_dir).expanduser() if auth_dir else Path.home() / ".copaw" / "credentials" / "whatsapp"
+        self._auth_dir = Path(auth_dir).expanduser() if auth_dir else Path.home() / ".copaw" / "credentials" / "whatsapp" / "default"
         self._send_read_receipts = send_read_receipts
         self._text_chunk_limit = text_chunk_limit
         self._self_chat_mode = self_chat_mode
@@ -224,12 +216,14 @@ class WhatsAppChannel(BaseChannel):
             # Read bot JID from database (client.me may be empty at connect time)
             try:
                 import sqlite3
-                db_path = str(self._auth_dir / "neonize.db")
-                conn = sqlite3.connect(db_path)
-                try:
-                    row = conn.execute("SELECT jid, lid FROM whatsmeow_device LIMIT 1").fetchone()
-                finally:
-                    conn.close()
+                def _read_device_jid():
+                    _db = str(self._auth_dir / "neonize.db")
+                    _conn = sqlite3.connect(_db)
+                    try:
+                        return _conn.execute("SELECT jid, lid FROM whatsmeow_device LIMIT 1").fetchone()
+                    finally:
+                        _conn.close()
+                row = await asyncio.to_thread(_read_device_jid)
                 if row:
                     jid_str = row[0] or ""  # e.g. "817089933036:1@s.whatsapp.net"
                     lid_str = row[1] or ""  # e.g. "229661330157571:1@lid"
@@ -244,12 +238,13 @@ class WhatsAppChannel(BaseChannel):
                     logger.info("whatsapp: connected as phone=%s lid=%s", bot_phone, bot_lid)
             except Exception as e:
                 logger.warning("whatsapp: failed to read JID from DB: %s", e)
-            # Enable delivery receipts (double check marks)
-            try:
-                await client.set_force_activate_delivery_receipts(True)
-                logger.info("whatsapp: delivery receipts activated")
-            except Exception as e:
-                logger.warning("whatsapp: delivery receipts failed: %s", e)
+            # Enable delivery receipts (double check marks) - gated on config
+            if self._send_read_receipts:
+                try:
+                    await client.set_force_activate_delivery_receipts(True)
+                    logger.info("whatsapp: delivery receipts activated")
+                except Exception as e:
+                    logger.warning("whatsapp: delivery receipts failed: %s", e)
 
         @self._client.event(QREv)
         async def on_qr(client, evt):
@@ -328,6 +323,7 @@ class WhatsAppChannel(BaseChannel):
             img_msg = msg.imageMessage
             caption = img_msg.caption or ""
             if caption and not body:
+                body = caption
                 content_parts.append(TextContent(type=ContentType.TEXT, text=caption))
             try:
                 self._media_dir.mkdir(parents=True, exist_ok=True)
@@ -397,7 +393,13 @@ class WhatsAppChannel(BaseChannel):
             sender_label = "unknown"
 
         # Resolve LID to phone/name for display
-        lid_key = f"{sender_label}@lid" if sender_label and not sender_label.startswith("+") else ""
+        # Only treat as LID if the participant JID server is "lid", not just because it is numeric
+        is_lid = False
+        if isinstance(participant, str) and "@lid" in participant:
+            is_lid = True
+        elif hasattr(participant, "Server") and getattr(participant, "Server", "") == "lid":
+            is_lid = True
+        lid_key = f"{sender_label}@lid" if is_lid and sender_label else ""
         if lid_key:
             if lid_key not in self._lid_cache:
                 try:
@@ -497,6 +499,14 @@ class WhatsAppChannel(BaseChannel):
             if self.group_policy == "allowlist":
                 if not self._groups or chat_str not in self._groups:
                     logger.debug("whatsapp: blocked group %s (allowlist=%s)", chat_str[:20], self._groups)
+                    return False
+            # Enforce group_allow_from: if set and not ["*"], check sender
+            if self._group_allow_from and "*" not in self._group_allow_from:
+                sender_user = sender_str.split("@")[0] if "@" in sender_str else sender_str
+                if (sender_str not in self._group_allow_from
+                        and sender_user not in self._group_allow_from
+                        and f"+{sender_user}" not in self._group_allow_from):
+                    logger.debug("whatsapp: blocked sender %s in group (group_allow_from=%s)", sender_str[:20], self._group_allow_from)
                     return False
         return True
 
@@ -604,7 +614,12 @@ class WhatsAppChannel(BaseChannel):
             resolved = self._lid_cache.get(sender_str, {})
             resolved_phone = resolved.get("phone", "")
             resolved_name = resolved.get("name", "")
-            friendly_sender = f"+{resolved_phone}" if resolved_phone else sender_str
+            if resolved_phone:
+                friendly_sender = f"+{resolved_phone}"
+            elif sender_str.endswith("@s.whatsapp.net"):
+                friendly_sender = f"+{sender_str.split('@')[0]}"
+            else:
+                friendly_sender = sender_str
 
             # Inject group history context when bot is mentioned.
             # Format: OpenClaw-style bounded block with clear sender+media.
@@ -631,8 +646,10 @@ class WhatsAppChannel(BaseChannel):
                     ctx_text = "\n".join(ctx_lines)
                     content_parts.insert(0, TextContent(type=ContentType.TEXT, text=ctx_text))
                     # Attach referenced images (cap at 3 to limit token burn)
+                    _IMG_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
                     for mp in media_to_add[-3:]:
-                        content_parts.append(ImageContent(type=ContentType.IMAGE, image_url=mp))
+                        if Path(mp).suffix.lower() in _IMG_EXTS:
+                            content_parts.append(ImageContent(type=ContentType.IMAGE, image_url=mp))
                     self._group_history[chat_str] = []
 
             # Strip bot @mention from body text so commands like "/new" work
@@ -906,9 +923,9 @@ class WhatsAppChannel(BaseChannel):
         import re as _re
         patterns = []
         if self._bot_phone:
-            patterns.append(rf"@\+?{_re.escape(self._bot_phone)}\s*")
+            patterns.append(rf"^@\+?{_re.escape(self._bot_phone)}\s*")
         if self._bot_lid:
-            patterns.append(rf"@{_re.escape(self._bot_lid)}\s*")
+            patterns.append(rf"^@{_re.escape(self._bot_lid)}\s*")
         out = text
         for pat in patterns:
             out = _re.sub(pat, "", out).strip()
@@ -950,7 +967,7 @@ class WhatsAppChannel(BaseChannel):
         for m in img_matches:
             p = m.replace("file://", "") if m.startswith("file://") else m
             resolved = str(Path(p).resolve())
-            if resolved.startswith(safe_dir) and os.path.isfile(resolved):
+            if Path(resolved).is_relative_to(safe_dir) and os.path.isfile(resolved):
                 try:
                     await self._client.send_image(jid, resolved)
                     logger.info("whatsapp: sent image %s", resolved)

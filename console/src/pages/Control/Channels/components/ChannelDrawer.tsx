@@ -157,7 +157,7 @@ export function ChannelDrawer({
         if (type === "expired") {
           message.warning(t("channels.weixinQrcodeExpired"));
         } else {
-          message.error(t("channels.wecomAuthFailed"));
+          message.error(t("channels.wecomAuthFailedGeneric"));
         }
       },
       [message, t],
@@ -165,6 +165,7 @@ export function ChannelDrawer({
   });
 
   // WhatsApp pair code state
+  const [waPhone, setWaPhone] = useState<string>("");
   const [waPairCode, setWaPairCode] = useState<string>("");
   const [waQrImage, setWaQrImage] = useState<string>("");
   const [waPairLoading, setWaPairLoading] = useState(false);
@@ -173,8 +174,13 @@ export function ChannelDrawer({
   // WhatsApp linked state
   const [waLinked, setWaLinked] = useState(false);
   useEffect(() => {
-    api.getWhatsappStatus().then((s) => setWaLinked(s.linked)).catch(() => {});
-  }, []);
+    if (activeKey === "whatsapp") {
+      api.getWhatsappStatus().then((s) => setWaLinked(s.linked)).catch(() => {});
+    }
+    return () => {
+      stopWaPoll();
+    };
+  }, [activeKey, stopWaPoll]);
 
 
   const stopWaPoll = useCallback(() => {
@@ -191,7 +197,7 @@ export function ChannelDrawer({
     setWaQrImage("");
     setWaPairStatus("pairing");
     try {
-      const data = await api.startWhatsappPair();
+      const data = await api.startWhatsappPair(waPhone);
       if (data.pair_code) {
         setWaPairCode(data.pair_code);
         setWaPairStatus("waiting_pair");
@@ -210,12 +216,12 @@ export function ChannelDrawer({
             setWaQrImage("");
             setWaPairStatus("connected");
             setWaPairLoading(false);
-            message.success("WhatsApp linked successfully!");
+            t("channels.whatsappLinkedSuccess") && message.success(t("channels.whatsappLinkedSuccess"));
           }
         } catch { /* ignore */ }
       }, 3000);
     } catch (err) {
-      message.error("Failed to start WhatsApp pairing");
+      message.error(t("channels.whatsappPairFailed"));
       setWaPairStatus("idle");
     } finally {
       setWaPairLoading(false);
@@ -228,9 +234,9 @@ export function ChannelDrawer({
       setWaPairCode("");
       setWaQrImage("");
       setWaPairStatus("idle");
-      message.success("WhatsApp unlinked");
+      message.success(t("channels.whatsappUnlinked"));
     } catch (err) {
-      message.error("Failed to unbind WhatsApp");
+      message.error(t("channels.whatsappUnbindFailed"));
     }
   }, [message]);
 
@@ -906,14 +912,14 @@ export function ChannelDrawer({
       case "whatsapp":
         return (
           <>
-            <Form.Item label="WhatsApp Connection">
+            <Form.Item label={t("channels.whatsappConnection")}>
               {waPairStatus === "connected" ? (
                 <>
                   <Alert
                     type="success"
                     showIcon
-                    message="WhatsApp Connected"
-                    description="Session is active. Messages are being received."
+                    message={t("channels.whatsappConnected")}
+                    description={t("channels.whatsappSessionActive")}
                     style={{ marginBottom: 12 }}
                   />
                   <Button
@@ -922,18 +928,25 @@ export function ChannelDrawer({
                     loading={waPairLoading}
                     onClick={handleWhatsappUnbind}
                   >
-                    Unbind WhatsApp
+                    {t("channels.whatsappUnbind")}
                   </Button>
                 </>
               ) : (
                 <>
+                  <Input
+                    placeholder={t("channels.whatsappPhonePlaceholder")}
+                    value={waPhone}
+                    onChange={(e) => setWaPhone(e.target.value)}
+                    style={{ marginBottom: 8 }}
+                  />
                   <Button
                     type="primary"
                     block
                     loading={waPairLoading}
                     onClick={handleWhatsappPair}
+                    disabled={!waPhone}
                   >
-                    Get Pair Code
+                    {t("channels.whatsappGetPairCode")}
                   </Button>
                   <Button
                     style={{ marginTop: 8 }}
@@ -951,13 +964,13 @@ export function ChannelDrawer({
                       setWaPairLoading(false);
                     }}
                   >
-                    Show QR Code
+                    {t("channels.whatsappShowQR")}
                   </Button>
                   {waPairCode && (
                     <div style={{ textAlign: "center", marginTop: 12, padding: "16px", background: "rgba(0,0,0,0.05)", borderRadius: 8 }}>
                       <div style={{ fontSize: 24, fontWeight: "bold", letterSpacing: 4 }}>{waPairCode}</div>
                       <div style={{ marginTop: 8, fontSize: 12, opacity: 0.6 }}>
-                        WhatsApp &rarr; Settings &rarr; Linked Devices &rarr; Link with phone number
+                        {t("channels.whatsappPairInstructions")}
                       </div>
                     </div>
                   )}
@@ -969,7 +982,7 @@ export function ChannelDrawer({
                         style={{ width: 200, height: 200 }}
                       />
                       <div style={{ marginTop: 8, fontSize: 12, opacity: 0.6 }}>
-                        Scan with WhatsApp camera
+                        {t("channels.whatsappScanQR")}
                       </div>
                     </div>
                   )}
@@ -986,7 +999,7 @@ export function ChannelDrawer({
                     setWaPairCode("");
                     setWaQrImage("");
                     setWaPairStatus("idle");
-                    message.success("WhatsApp unlinked");
+                    message.success(t("channels.whatsappUnlinked"));
                   }}
                 >
                   Unlink Device
@@ -997,21 +1010,21 @@ export function ChannelDrawer({
               <Alert
                 type="info"
                 showIcon
-                message="WhatsApp Channel uses QR code login. Session will be saved in auth_dir."
+                message={t("channels.whatsappAuthInfo")}
                 style={{ marginBottom: 16 }}
               />
             </ConfigProvider>
             <Form.Item
               name="auth_dir"
-              label="Auth Directory"
-              tooltip="Directory to store WhatsApp session credentials"
+              label={t("channels.whatsappAuthDir")}
+              tooltip={t("channels.whatsappAuthDirTooltip")}
               initialValue="~/.copaw/credentials/whatsapp/default"
             >
               <Input placeholder="~/.copaw/credentials/whatsapp/default" />
             </Form.Item>
             <Form.Item
               name="send_read_receipts"
-              label="Send Read Receipts"
+              label={t("channels.whatsappReadReceipts")}
               valuePropName="checked"
               initialValue={true}
             >
@@ -1019,30 +1032,30 @@ export function ChannelDrawer({
             </Form.Item>
             <Form.Item
               name="text_chunk_limit"
-              label="Text Chunk Limit"
-              tooltip="Maximum characters per message chunk"
+              label={t("channels.whatsappTextChunkLimit")}
+              tooltip={t("channels.whatsappTextChunkLimitTooltip")}
               initialValue={4096}
             >
               <InputNumber min={256} max={8192} step={256} style={{ width: "100%" }} />
             </Form.Item>
             <Form.Item
               name="media_max_mb"
-              label="Media Max Size (MB)"
-              tooltip="Maximum media file size in MB"
+              label={t("channels.whatsappMediaMaxMb")}
+              tooltip={t("channels.whatsappMediaMaxMbTooltip")}
               initialValue={50}
             >
               <InputNumber min={1} max={100} step={1} style={{ width: "100%" }} />
             </Form.Item>
-            <Form.Item name="self_chat_mode" label="Self Chat Mode" valuePropName="checked" tooltip="Process own messages">
+            <Form.Item name="self_chat_mode" label={t("channels.whatsappSelfChatMode")} valuePropName="checked" tooltip={t("channels.whatsappSelfChatModeTooltip")}>
               <Switch />
             </Form.Item>
-            <Form.Item name="groups" label="Group Allowlist" tooltip="WhatsApp group JIDs">
+            <Form.Item name="groups" label={t("channels.whatsappGroupAllowlist")} tooltip={t("channels.whatsappGroupAllowlistTooltip")}>
               <Select mode="tags" placeholder="120363421135228220@g.us" tokenSeparators={[","," ","\n"]} />
             </Form.Item>
-            <Form.Item name="group_allow_from" label="Group Allow From" tooltip='Who can trigger bot in groups. ["*"] = everyone.'>
+            <Form.Item name="group_allow_from" label={t("channels.whatsappGroupAllowFrom")} tooltip={t("channels.whatsappGroupAllowFromTooltip")}>
               <Select mode="tags" placeholder="* (everyone)" tokenSeparators={[","," "]} />
             </Form.Item>
-            <Form.Item name="filter_thinking" label="Filter Thinking" valuePropName="checked" tooltip="Hide reasoning/thinking blocks from replies">
+            <Form.Item name="filter_thinking" label={t("channels.filterThinking")} valuePropName="checked" tooltip={t("channels.filterThinkingTooltip")}>
               <Switch />
             </Form.Item>
           </>
