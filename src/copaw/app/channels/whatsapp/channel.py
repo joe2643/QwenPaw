@@ -48,6 +48,9 @@ try:
     from neonize.events import (
         MessageEv,
         ConnectedEv,
+        DisconnectedEv,
+        ConnectFailureEv,
+        KeepAliveTimeoutEv,
         QREv,
     )
     from neonize.utils import build_jid
@@ -252,6 +255,24 @@ class WhatsAppChannel(BaseChannel):
         @self._client.event(QREv)
         async def on_qr(client, evt):
             logger.info("whatsapp: QR code event received (authentication needed)")
+
+        @self._client.event(DisconnectedEv)
+        async def on_disconnected(client, evt):
+            self._connected = False
+            logger.warning("whatsapp: DISCONNECTED — scheduling auto-reconnect in 10s")
+            asyncio.get_event_loop().call_later(10, lambda: asyncio.ensure_future(self._auto_reconnect()))
+
+        @self._client.event(ConnectFailureEv)
+        async def on_connect_failure(client, evt):
+            self._connected = False
+            reason = getattr(evt, "reason", "unknown")
+            logger.error("whatsapp: connection failure (reason=%s) — scheduling reconnect in 30s", reason)
+            asyncio.get_event_loop().call_later(30, lambda: asyncio.ensure_future(self._auto_reconnect()))
+
+        @self._client.event(KeepAliveTimeoutEv)
+        async def on_keepalive_timeout(client, evt):
+            logger.warning("whatsapp: keepalive timeout — scheduling reconnect in 15s")
+            asyncio.get_event_loop().call_later(15, lambda: asyncio.ensure_future(self._auto_reconnect()))
 
         # Start connection - connect_task must be kept running
         try:
@@ -938,6 +959,49 @@ class WhatsAppChannel(BaseChannel):
         return out
 
     # ── Outbound send ─────────────────────────────────────────────────
+
+    _reconnect_lock = None  # initialized in start()
+
+    async def _auto_reconnect(self):
+        """Attempt to reconnect the WhatsApp neonize client after disconnect.
+
+        Uses a lock to prevent concurrent reconnect attempts. Retries with
+        exponential backoff up to 5 times.
+        """
+        if self._reconnect_lock is None:
+            self._reconnect_lock = asyncio.Lock()
+
+        if self._reconnect_lock.locked():
+            logger.debug("whatsapp: reconnect already in progress, skipping")
+            return
+
+        async with self._reconnect_lock:
+            backoff = 10
+            for attempt in range(1, 6):
+                logger.info("whatsapp: reconnect attempt %d/5...", attempt)
+                try:
+                    # Stop old connection if still lingering
+                    if self._connect_task and not self._connect_task.done():
+                        self._connect_task.cancel()
+                        try:
+                            await self._connect_task
+                        except (asyncio.CancelledError, Exception):
+                            pass
+
+                    # Re-connect
+                    self._connect_task = await self._client.connect()
+                    # Wait for ConnectedEv to set self._connected
+                    await asyncio.sleep(5)
+                    if self._connected:
+                        logger.info("whatsapp: reconnected successfully on attempt %d", attempt)
+                        return
+                except Exception as e:
+                    logger.error("whatsapp: reconnect attempt %d failed: %s", attempt, e)
+
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 120)
+
+            logger.error("whatsapp: all 5 reconnect attempts failed — channel dead until restart")
 
     async def send(
         self,
