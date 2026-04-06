@@ -260,3 +260,55 @@ class TestViewVideo:
                         source = block.get("source", {})
                         assert source.get("type") != "base64", \
                             "FATAL: Video served as base64 — this will blow up the context window!"
+
+
+# ---------------------------------------------------------------------------
+# Model capability check tests
+# ---------------------------------------------------------------------------
+
+class TestModelCapabilityCheck:
+
+    @pytest.mark.asyncio
+    async def test_video_unsupported_model_uses_keyframes(self, tmp_path):
+        """When model doesn't support video, always extract keyframes even if media server is ON."""
+        import subprocess
+        video = tmp_path / "test.mp4"
+        try:
+            subprocess.run([
+                "ffmpeg", "-f", "lavfi", "-i", "color=c=green:s=64x64:d=2",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-y", str(video),
+            ], capture_output=True, timeout=10)
+        except Exception:
+            pytest.skip("ffmpeg not available")
+        if not video.exists():
+            pytest.skip("ffmpeg failed")
+
+        with patch("copaw.agents.tools.view_media._model_supports_video", return_value=False):
+            result = await view_video(str(video))
+            types = [b.get("type") for b in result.content if isinstance(b, dict)]
+            # Should be keyframes (images), NOT video block
+            assert "video" not in types
+            assert "image" in types
+            text = " ".join(b.get("text", "") for b in result.content if isinstance(b, dict))
+            assert "does not support video" in text
+
+    @pytest.mark.asyncio
+    async def test_video_supported_model_sends_video(self, tmp_video):
+        """When model supports video AND media server available, send video block."""
+        with patch("copaw.agents.tools.view_media._model_supports_video", return_value=True):
+            with patch("copaw.agents.tools.view_media._get_signed_url", return_value="https://media.example.com/v"):
+                result = await view_video(str(tmp_video))
+                types = [b.get("type") for b in result.content if isinstance(b, dict)]
+                assert "video" in types
+
+    @pytest.mark.asyncio
+    async def test_video_unsupported_no_ffmpeg_returns_error(self, tmp_video):
+        """Model doesn't support video AND keyframe extraction fails → error."""
+        with patch("copaw.agents.tools.view_media._model_supports_video", return_value=False):
+            with patch("copaw.agents.tools.view_media._extract_keyframes", return_value=[]):
+                result = await view_video(str(tmp_video))
+                text = " ".join(b.get("text", "") for b in result.content if isinstance(b, dict))
+                assert "does not support video" in text
+                types = [b.get("type") for b in result.content if isinstance(b, dict)]
+                assert "video" not in types
+                assert "image" not in types

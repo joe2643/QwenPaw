@@ -253,6 +253,31 @@ def _extract_keyframes(resolved: Path, max_frames: int = 6) -> list:
     return frames
 
 
+
+def _model_supports_video() -> bool:
+    """Check if the active LLM model supports video input."""
+    try:
+        from ..prompt import _get_active_model_info
+        model_info, _ = _get_active_model_info()
+        if model_info is None:
+            return False
+        return bool(getattr(model_info, "supports_video", False))
+    except Exception:
+        return False
+
+
+def _model_supports_image() -> bool:
+    """Check if the active LLM model supports image input."""
+    try:
+        from ..prompt import _get_active_model_info
+        model_info, _ = _get_active_model_info()
+        if model_info is None:
+            return True  # assume yes for images (most models do)
+        return bool(getattr(model_info, "supports_image", True))
+    except Exception:
+        return True
+
+
 async def view_image(image_path: str) -> ToolResponse:
     """Load an image file into the LLM context so the model can see it.
 
@@ -310,6 +335,31 @@ async def view_video(video_path: str) -> ToolResponse:
     )
     if err is not None:
         return err
+
+    # Check if model supports video — if not, always use keyframes
+    if not _model_supports_video():
+        frames = _extract_keyframes(resolved)
+        if frames:
+            content = [
+                TextBlock(
+                    type="text",
+                    text=f"Video: {resolved.name} — model does not support video, "
+                    f"extracted {len(frames)} keyframes (path: {resolved})",
+                ),
+            ]
+            for frame_path, timestamp in frames:
+                content.append(ImageBlock(
+                    type="image",
+                    source=_local_to_base64_source(frame_path, "image"),
+                ))
+                content.append(TextBlock(type="text", text=f"Frame at {timestamp}"))
+            return ToolResponse(content=content)
+        return ToolResponse(content=[
+            TextBlock(
+                type="text",
+                text=f"Error: Model does not support video and keyframe extraction failed for {resolved.name}.",
+            ),
+        ])
 
     source = _resolve_media_source(resolved, "video")
     if source is not None:
