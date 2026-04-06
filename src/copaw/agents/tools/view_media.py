@@ -403,6 +403,15 @@ async def view_video(video_path: str) -> ToolResponse:
 
     source = await _resolve_media_source(resolved, "video")
     if source is not None:
+        import logging as _log
+        _logger = _log.getLogger(__name__)
+        _logger.info(
+            "view_media: VIDEO BLOCK SENT TO LLM — source.type=%s url=%s path=%s size=%s",
+            source.get("type", "?"),
+            str(source.get("url", ""))[:200],
+            str(resolved),
+            resolved.stat().st_size,
+        )
         return ToolResponse(
             content=[
                 VideoBlock(
