@@ -577,7 +577,9 @@ class WhatsAppChannel(BaseChannel):
                 return
 
             # Group mention gate — record non-mentioned messages for context
-            if is_group and self.require_mention:
+            # Slash commands (/new, /stop, /clear, etc.) bypass mention gate
+            is_slash_command = bool(body and body.lstrip().startswith("/"))
+            if is_group and self.require_mention and not is_slash_command:
                 if not self._is_bot_mentioned(msg, body):
                     # Buffer for later context injection when bot IS mentioned
                     if body or content_parts:
