@@ -109,21 +109,24 @@ class TestLocalToBase64:
 
 class TestResolveMediaSource:
 
-    @patch("copaw.agents.tools.view_media._get_signed_url", return_value="https://media.example.com/signed")
-    def test_prefers_signed_url(self, mock_sign, tmp_image):
-        source = _resolve_media_source(tmp_image, "image")
+    @patch("copaw.agents.tools.view_media._get_signed_url", new_callable=AsyncMock, return_value="https://media.example.com/signed")
+    @pytest.mark.asyncio
+    async def test_prefers_signed_url(self, mock_sign, tmp_image):
+        source = await _resolve_media_source(tmp_image, "image")
         assert source["type"] == "url"
         assert source["url"] == "https://media.example.com/signed"
 
-    @patch("copaw.agents.tools.view_media._get_signed_url", return_value=None)
-    def test_image_fallback_to_base64(self, mock_sign, tmp_image):
-        source = _resolve_media_source(tmp_image, "image")
+    @patch("copaw.agents.tools.view_media._get_signed_url", new_callable=AsyncMock, return_value=None)
+    @pytest.mark.asyncio
+    async def test_image_fallback_to_base64(self, mock_sign, tmp_image):
+        source = await _resolve_media_source(tmp_image, "image")
         assert source["type"] == "base64"
 
-    @patch("copaw.agents.tools.view_media._get_signed_url", return_value=None)
-    def test_video_no_base64_fallback(self, mock_sign, tmp_video):
+    @patch("copaw.agents.tools.view_media._get_signed_url", new_callable=AsyncMock, return_value=None)
+    @pytest.mark.asyncio
+    async def test_video_no_base64_fallback(self, mock_sign, tmp_video):
         """Videos must NEVER fallback to base64 (blows up context)."""
-        source = _resolve_media_source(tmp_video, "video")
+        source = await _resolve_media_source(tmp_video, "video")
         assert source is None
 
 
@@ -171,7 +174,7 @@ class TestViewImage:
 
     @pytest.mark.asyncio
     async def test_valid_image_returns_image_block(self, tmp_image):
-        with patch("copaw.agents.tools.view_media._get_signed_url", return_value=None):
+        with patch("copaw.agents.tools.view_media._get_signed_url", new_callable=AsyncMock, return_value=None):
             result = await view_image(str(tmp_image))
             types = [b.get("type") if isinstance(b, dict) else b["type"] for b in result.content]
             assert "image" in types
@@ -185,7 +188,7 @@ class TestViewImage:
 
     @pytest.mark.asyncio
     async def test_signed_url_used_when_available(self, tmp_image):
-        with patch("copaw.agents.tools.view_media._get_signed_url", return_value="https://media.example.com/img"):
+        with patch("copaw.agents.tools.view_media._get_signed_url", new_callable=AsyncMock, return_value="https://media.example.com/img"):
             result = await view_image(str(tmp_image))
             img_block = [b for b in result.content if (b.get("type") if isinstance(b, dict) else None) == "image"][0]
             assert img_block["source"]["type"] == "url"
@@ -200,7 +203,7 @@ class TestViewVideo:
 
     @pytest.mark.asyncio
     async def test_signed_url_returns_video_block(self, tmp_video):
-        with patch("copaw.agents.tools.view_media._get_signed_url", return_value="https://media.example.com/vid"):
+        with patch("copaw.agents.tools.view_media._get_signed_url", new_callable=AsyncMock, return_value="https://media.example.com/vid"):
             result = await view_video(str(tmp_video))
             types = [b.get("type") if isinstance(b, dict) else b["type"] for b in result.content]
             assert "video" in types
@@ -222,7 +225,8 @@ class TestViewVideo:
         if not video.exists():
             pytest.skip("ffmpeg failed")
 
-        with patch("copaw.agents.tools.view_media._get_signed_url", return_value=None):
+        with patch("copaw.agents.tools.view_media._get_signed_url", new_callable=AsyncMock, return_value=None), \
+             patch("copaw.agents.tools.view_media._model_supports_video", return_value=False):
             result = await view_video(str(video))
             types = [b.get("type") if isinstance(b, dict) else b["type"] for b in result.content]
             # Should have image frames, NOT video block
@@ -233,8 +237,9 @@ class TestViewVideo:
     @pytest.mark.asyncio
     async def test_no_server_no_ffmpeg_returns_error(self, tmp_video):
         """If no server AND keyframe extraction fails, return error (not base64)."""
-        with patch("copaw.agents.tools.view_media._get_signed_url", return_value=None):
-            with patch("copaw.agents.tools.view_media._extract_keyframes", return_value=[]):
+        with patch("copaw.agents.tools.view_media._get_signed_url", new_callable=AsyncMock, return_value=None), \
+             patch("copaw.agents.tools.view_media._model_supports_video", return_value=False), \
+             patch("copaw.agents.tools.view_media._extract_keyframes", return_value=[]):
                 result = await view_video(str(tmp_video))
                 text = " ".join(b.get("text", "") for b in result.content if isinstance(b, dict))
                 assert "media server" in text.lower() or "error" in text.lower()
@@ -252,8 +257,9 @@ class TestViewVideo:
     @pytest.mark.asyncio
     async def test_video_never_uses_base64(self, tmp_video):
         """CRITICAL: Videos must never be base64 encoded (context explosion)."""
-        with patch("copaw.agents.tools.view_media._get_signed_url", return_value=None):
-            with patch("copaw.agents.tools.view_media._extract_keyframes", return_value=[]):
+        with patch("copaw.agents.tools.view_media._get_signed_url", new_callable=AsyncMock, return_value=None), \
+             patch("copaw.agents.tools.view_media._model_supports_video", return_value=False), \
+             patch("copaw.agents.tools.view_media._extract_keyframes", return_value=[]):
                 result = await view_video(str(tmp_video))
                 for block in result.content:
                     if isinstance(block, dict) and block.get("type") == "video":
@@ -296,7 +302,7 @@ class TestModelCapabilityCheck:
     async def test_video_supported_model_sends_video(self, tmp_video):
         """When model supports video AND media server available, send video block."""
         with patch("copaw.agents.tools.view_media._model_supports_video", return_value=True):
-            with patch("copaw.agents.tools.view_media._get_signed_url", return_value="https://media.example.com/v"):
+            with patch("copaw.agents.tools.view_media._get_signed_url", new_callable=AsyncMock, return_value="https://media.example.com/v"):
                 result = await view_video(str(tmp_video))
                 types = [b.get("type") for b in result.content if isinstance(b, dict)]
                 assert "video" in types

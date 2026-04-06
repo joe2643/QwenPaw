@@ -143,7 +143,7 @@ def _get_media_config() -> dict:
     return cfg
 
 
-def _get_signed_url(resolved: Path) -> str:
+async def _get_signed_url(resolved: Path) -> str:
     """Get a signed public URL for a local media file via the media server.
 
     Falls back to base64 if media server is unavailable.
@@ -166,10 +166,15 @@ def _get_signed_url(resolved: Path) -> str:
         return None
 
     try:
+        import asyncio
         from urllib.parse import quote as _quote
         url = f"{media_cfg['server_url']}/sign?path={_quote(str(resolved), safe="")}&ttl=3600"
-        resp = urllib.request.urlopen(url, timeout=5)
-        data = _json.loads(resp.read())
+        # MUST use to_thread — media server runs on the same event loop,
+        # so blocking urllib would deadlock.
+        def _fetch():
+            return urllib.request.urlopen(url, timeout=5).read()
+        raw = await asyncio.to_thread(_fetch)
+        data = _json.loads(raw)
         signed = data["url"]
         # If tunnel domain is set, rewrite URL to use public domain
         if media_cfg["tunnel_domain"]:
@@ -181,8 +186,12 @@ def _get_signed_url(resolved: Path) -> str:
                 netloc=tunnel.netloc,
             ))
         return signed
-    except Exception:
-        # Fallback to base64 if media server is down
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            "view_media: _get_signed_url failed: %s (server_url=%s, path=%s)",
+            e, media_cfg["server_url"], str(resolved)[:100],
+        )
         return None
 
 
@@ -197,13 +206,13 @@ def _local_to_base64_source(resolved: Path, mime_prefix: str) -> dict:
     return {"type": "base64", "media_type": mime, "data": b64}
 
 
-def _resolve_media_source(resolved: Path, mime_prefix: str) -> dict:
+async def _resolve_media_source(resolved: Path, mime_prefix: str) -> dict:
     """Get media source — prefer signed URL, fallback to base64 for images only.
     
     Videos never use base64 (too large, blows up context). Instead extract
     keyframes and return as images.
     """
-    signed_url = _get_signed_url(resolved)
+    signed_url = await _get_signed_url(resolved)
     if signed_url:
         return {"type": "url", "url": signed_url}
     # For images: base64 is fine (usually < 5MB)
@@ -311,7 +320,7 @@ async def view_image(image_path: str) -> ToolResponse:
         content=[
             ImageBlock(
                 type="image",
-                source=_resolve_media_source(resolved, "image"),
+                source=await _resolve_media_source(resolved, "image"),
             ),
             TextBlock(
                 type="text",
