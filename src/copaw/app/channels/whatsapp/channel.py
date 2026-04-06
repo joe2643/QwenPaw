@@ -995,7 +995,7 @@ class WhatsAppChannel(BaseChannel):
                 logger.info("whatsapp: SENDING to %s: %s", _jid_to_str(jid), chunk[:100])
                 if i == 0 and quote_msg is not None and self._client:
                     # Build reply message quoting the inbound trigger
-                    reply_built = self._client.build_reply_message(
+                    reply_built = await self._client.build_reply_message(
                         message=chunk,
                         quoted=quote_msg,
                     )
