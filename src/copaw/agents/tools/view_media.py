@@ -366,7 +366,7 @@ async def view_video(video_path: str) -> ToolResponse:
             for frame_path, timestamp in frames:
                 content.append(ImageBlock(
                     type="image",
-                    source=_resolve_media_source(frame_path, "image"),
+                    source=await _resolve_media_source(frame_path, "image"),
                 ))
                 content.append(TextBlock(type="text", text=f"Frame at {timestamp}"))
             return ToolResponse(content=content)
@@ -396,12 +396,12 @@ async def view_video(video_path: str) -> ToolResponse:
                 ),
             ]
             for frame_path, timestamp in frames:
-                frame_source = _resolve_media_source(frame_path, "image")
+                frame_source = await _resolve_media_source(frame_path, "image")
                 content.append(ImageBlock(type="image", source=frame_source))
                 content.append(TextBlock(type="text", text=f"Frame at {timestamp}"))
             return ToolResponse(content=content)
 
-    source = _resolve_media_source(resolved, "video")
+    source = await _resolve_media_source(resolved, "video")
     if source is not None:
         return ToolResponse(
             content=[
@@ -439,7 +439,7 @@ async def view_video(video_path: str) -> ToolResponse:
     for frame_path, timestamp in frames:
         content.append(ImageBlock(
             type="image",
-            source=_resolve_media_source(frame_path, "image"),
+            source=await _resolve_media_source(frame_path, "image"),
         ))
         content.append(TextBlock(
             type="text",
