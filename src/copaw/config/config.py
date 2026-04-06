@@ -202,43 +202,35 @@ class WeixinConfig(BaseChannelConfig):
     media_dir: Optional[str] = None
 
 
+class WhatsAppConfig(BaseChannelConfig):
+    """WhatsApp channel config (neonize backend)."""
+
+    auth_dir: str = ""
+    send_read_receipts: bool = True
+    self_chat_mode: bool = False
+    text_chunk_limit: int = 4096
+    groups: List[str] = Field(default_factory=list)
+    group_allow_from: List[str] = Field(default_factory=list)
+    ack_reaction_thinking: str = "🤔"
+    ack_reaction_done: str = "👀"
+    ack_reaction_error: str = "⚠️"
+
+
 class SignalConfig(BaseChannelConfig):
-    """Signal channel config (via signal-cli bridge)."""
+    """Signal channel config (signal-cli REST daemon)."""
 
     account: str = ""
-    cli_path: str = "signal-cli"
     http_url: str = ""
     http_host: str = "127.0.0.1"
     http_port: int = 8080
-    auto_start: bool = True
-    startup_timeout_ms: int = 30000
-    group_allow_from: List[str] = Field(default_factory=list)
-    groups: List[str] = Field(default_factory=list)
+    auto_start: bool = False
     send_read_receipts: bool = True
     text_chunk_limit: int = 4000
-    chunk_mode: Literal["length", "newline"] = "length"
-    media_max_mb: int = 8
-    ignore_attachments: bool = False
-    require_mention: bool = True
-    history_limit: int = 50
-    dm_history_limit: int = 0
-    reaction_level: Literal["off", "ack", "minimal", "extensive"] = "minimal"
-
-
-class WhatsAppConfig(BaseChannelConfig):
-    """WhatsApp channel config (via neonize bridge)."""
-
-    auth_dir: str = ""
-    group_allow_from: List[str] = Field(default_factory=list)
     groups: List[str] = Field(default_factory=list)
-    send_read_receipts: bool = True
-    text_chunk_limit: int = 4096
-    chunk_mode: Literal["length", "newline"] = "length"
-    media_max_mb: int = 50
-    self_chat_mode: bool = False
-    history_limit: int = 50
-    dm_history_limit: int = 0
-    reaction_level: Literal["off", "ack", "minimal", "extensive"] = "minimal"
+    group_allow_from: List[str] = Field(default_factory=list)
+    ack_reaction_thinking: str = "🤔"
+    ack_reaction_done: str = "👀"
+    ack_reaction_error: str = "⚠️"
 
 
 class ChannelConfig(BaseModel):
@@ -260,9 +252,9 @@ class ChannelConfig(BaseModel):
     wecom: WecomConfig = WecomConfig()
     xiaoyi: XiaoYiConfig = XiaoYiConfig()
     weixin: WeixinConfig = WeixinConfig()
+    whatsapp: WhatsAppConfig = WhatsAppConfig()
+    signal: SignalConfig = SignalConfig()
     onebot: OneBotConfig = OneBotConfig()
-    signal: SignalConfig = Field(default_factory=SignalConfig)
-    whatsapp: WhatsAppConfig = Field(default_factory=WhatsAppConfig)
 
 
 class LastApiConfig(BaseModel):
@@ -1155,6 +1147,8 @@ ChannelConfigUnion = Union[
     WecomConfig,
     XiaoYiConfig,
     WeixinConfig,
+    WhatsAppConfig,
+    SignalConfig,
 ]
 
 
