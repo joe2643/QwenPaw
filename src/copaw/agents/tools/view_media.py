@@ -197,11 +197,60 @@ def _local_to_base64_source(resolved: Path, mime_prefix: str) -> dict:
 
 
 def _resolve_media_source(resolved: Path, mime_prefix: str) -> dict:
-    """Get media source — prefer signed URL, fallback to base64."""
+    """Get media source — prefer signed URL, fallback to base64 for images only.
+    
+    Videos never use base64 (too large, blows up context). Instead extract
+    keyframes and return as images.
+    """
     signed_url = _get_signed_url(resolved)
     if signed_url:
         return {"type": "url", "url": signed_url}
-    return _local_to_base64_source(resolved, mime_prefix)
+    # For images: base64 is fine (usually < 5MB)
+    if mime_prefix == "image":
+        return _local_to_base64_source(resolved, mime_prefix)
+    # For videos: no base64 fallback
+    return None
+
+
+def _extract_keyframes(resolved: Path, max_frames: int = 6) -> list:
+    """Extract keyframes from video using ffmpeg.
+    
+    Returns list of (ImageBlock, TextBlock) pairs for each frame.
+    """
+    import subprocess
+    import tempfile
+
+    duration_cmd = [
+        "ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+        "-of", "csv=p=0", str(resolved),
+    ]
+    try:
+        duration = float(subprocess.check_output(duration_cmd).decode().strip())
+    except Exception:
+        duration = 60.0  # assume 1 min if probe fails
+
+    # Extract frames at evenly spaced intervals
+    interval = max(duration / (max_frames + 1), 1.0)
+    frames = []
+    tmpdir = tempfile.mkdtemp(prefix="copaw_frames_")
+
+    for i in range(max_frames):
+        ts = interval * (i + 1)
+        if ts >= duration:
+            break
+        out_path = Path(tmpdir) / f"frame_{i:02d}.jpg"
+        cmd = [
+            "ffmpeg", "-ss", f"{ts:.1f}", "-i", str(resolved),
+            "-vframes", "1", "-q:v", "3", "-y", str(out_path),
+        ]
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=10)
+            if out_path.exists():
+                frames.append((out_path, f"{ts:.1f}s"))
+        except Exception:
+            pass
+
+    return frames
 
 
 async def view_image(image_path: str) -> ToolResponse:
@@ -262,15 +311,48 @@ async def view_video(video_path: str) -> ToolResponse:
     if err is not None:
         return err
 
-    return ToolResponse(
-        content=[
-            VideoBlock(
-                type="video",
-                source=_resolve_media_source(resolved, "video"),
-            ),
-            TextBlock(
-                type="text",
-                text=f"Video loaded: {resolved.name} (path: {resolved})",
-            ),
-        ],
-    )
+    source = _resolve_media_source(resolved, "video")
+    if source is not None:
+        return ToolResponse(
+            content=[
+                VideoBlock(
+                    type="video",
+                    source=source,
+                ),
+                TextBlock(
+                    type="text",
+                    text=f"Video loaded: {resolved.name} (path: {resolved})",
+                ),
+            ],
+        )
+
+    # No signed URL available — extract keyframes instead
+    frames = _extract_keyframes(resolved)
+    if not frames:
+        return ToolResponse(
+            content=[
+                TextBlock(
+                    type="text",
+                    text=f"Error: Cannot serve {resolved.name} — "
+                    "media server not configured and frame extraction failed. "
+                    "Enable media server in Agent Config or compress the video.",
+                ),
+            ],
+        )
+
+    content = [
+        TextBlock(
+            type="text",
+            text=f"Video: {resolved.name} ({len(frames)} keyframes extracted, path: {resolved})",
+        ),
+    ]
+    for frame_path, timestamp in frames:
+        content.append(ImageBlock(
+            type="image",
+            source=_local_to_base64_source(frame_path, "image"),
+        ))
+        content.append(TextBlock(
+            type="text",
+            text=f"Frame at {timestamp}",
+        ))
+    return ToolResponse(content=content)

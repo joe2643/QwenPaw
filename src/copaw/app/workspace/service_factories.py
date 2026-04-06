@@ -205,3 +205,22 @@ async def reload_channel_service(ws, cm) -> None:
         "channel_manager reload: updated %d channels to new runner (id=%s)",
         len(cm.channels), id(runner),
     )
+
+async def create_media_server(ws, _):
+    """Create embedded media server if enabled in config."""
+    config = ws._config
+    running = getattr(config, "running", None) or getattr(config, "agents", None)
+    if running is None:
+        return None
+    ms_cfg = getattr(running, "media_server", None)
+    if ms_cfg is None or not getattr(ms_cfg, "enabled", False):
+        return None
+
+    from ..media_server import MediaServer
+    return MediaServer(
+        port=8089,
+        secret=ms_cfg.media_secret,
+        allowed_dirs=list(ms_cfg.allowed_dirs),
+        max_size_mb=ms_cfg.max_size_mb,
+        tunnel_domain=ms_cfg.tunnel_domain,
+    )
