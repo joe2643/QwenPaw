@@ -1190,14 +1190,10 @@ class WhatsAppChannel(BaseChannel):
                     pass
                 await asyncio.sleep(interval)
         except asyncio.CancelledError:
-            # Send "stopped typing" (presence type 2 = paused)
-            try:
-                _jb = typing_jid.SerializeToString()
-                await client._NewAClient__client.SendChatPresence(
-                    client.uuid, _jb, len(_jb), 2, 0
-                )
-            except Exception:
-                pass
+            # Note: presence type 2 (paused) causes neonize Go panic
+            # (index out of range [2] with length 2 in SendChatPresence).
+            # WhatsApp auto-clears typing after ~5s, so we just let it expire.
+            pass
 
     # ── Reactions ─────────────────────────────────────────────────────
 
