@@ -779,7 +779,14 @@ class WhatsAppChannel(BaseChannel):
             # For slash commands (/new, /stop, /clear, etc.), strip the
             # envelope prefix ([WhatsApp group xxx] Sender: ...) so the
             # command registry sees the raw command text.
+            # Also remove group history context — it prepends text that
+            # breaks command detection (query must start with /command).
             if has_bot_command:
+                content_parts = [
+                    p for p in content_parts
+                    if not (hasattr(p, "text") and isinstance(p.text, str)
+                            and p.text.startswith("=== UNTRUSTED"))
+                ]
                 for i, part in enumerate(content_parts):
                     if hasattr(part, "text") and part.text.startswith("[WhatsApp "):
                         # Format is: [WhatsApp group xxx] Name (+phone): text
