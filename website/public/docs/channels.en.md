@@ -796,42 +796,63 @@ The session is persisted under `~/.copaw/credentials/whatsapp/default/neonize.db
 ---
 
 ## Signal
-
 The Signal channel uses the [bbernhard/signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api) Docker image (2.5k★), which wraps the official `signal-cli` in a REST + WebSocket API. Run this container alongside CoPaw.
 
-### Run the REST API service
+### Prerequisites
+
+- **Docker** or **Podman** installed on the host
+- **Signal** installed on your phone (the linked-device approach needs an existing Signal account)
+- Port **8082** available (or adjust the `-p` flag below)
+
+### Step 1: Start signal-cli REST API daemon
 
 ```bash
-# with podman
-podman run -d --name signal-api --restart unless-stopped \
-  -p 8082:8080 \
-  -v ~/.local/share/signal-cli:/home/.local/share/signal-cli:Z \
-  -e MODE=json-rpc \
-  bbernhard/signal-cli-rest-api:latest
-
-# or with docker
-docker run -d --name signal-api --restart unless-stopped \
+# With Docker
+docker run -d --name signal-cli \
   -p 8082:8080 \
   -v ~/.local/share/signal-cli:/home/.local/share/signal-cli \
   -e MODE=json-rpc \
   bbernhard/signal-cli-rest-api:latest
+
+# Or with Podman
+podman run -d --name signal-cli --restart unless-stopped \
+  -p 8082:8080 \
+  -v ~/.local/share/signal-cli:/home/.local/share/signal-cli:Z \
+  -e MODE=json-rpc \
+  bbernhard/signal-cli-rest-api:latest
 ```
 
-### Register an account
+### Step 2: Link to your Signal account
 
-Either use an **existing signal-cli account** (mount its data directory as shown above) or register a new one:
+The easiest method is linking as a secondary device (your phone must already have Signal installed):
 
 ```bash
-# Register a new number
-curl -X POST http://localhost:8082/v1/register/+85212345678
-
-# Verify with the SMS code you receive
-curl -X POST http://localhost:8082/v1/register/+85212345678/verify/123456
+# Generate a linking QR code in the terminal
+curl -s http://localhost:8082/v1/qrcodelink?device_name=CoPaw | qrencode -t ANSIUTF8
 ```
 
-Alternatively, link to an existing Signal account as a secondary device by opening `http://localhost:8082/v1/qrcodelink/copaw-bot` in a browser, then scan from Signal → Settings → Linked Devices → Link new device.
+If `qrencode` is not installed, open `http://localhost:8082/v1/qrcodelink?device_name=CoPaw` directly in a browser to see the QR code.
 
-### Configure
+Scan the QR code with your phone: **Signal → Settings → Linked Devices → Link New Device**.
+
+> **Alternative: Register a new number** (if you have a dedicated phone number):
+> ```bash
+> curl -X POST http://localhost:8082/v1/register/+85212345678
+> curl -X POST http://localhost:8082/v1/register/+85212345678/verify/123456
+> ```
+
+### Step 3: Verify connection
+
+```bash
+curl -s http://localhost:8082/v1/about
+# Should return: {"versions":["v1","v2"],...,"mode":"json-rpc"}
+```
+
+If you see a JSON response with `"mode":"json-rpc"`, the daemon is ready.
+
+### Step 4: Configure in CoPaw
+
+Set the channel config in CoPaw (via the console UI or directly in config):
 
 ```json
 "signal": {
@@ -848,18 +869,23 @@ Alternatively, link to an existing Signal account as a secondary device by openi
 }
 ```
 
-**Signal-specific fields:**
+### Configuration reference
 
 | Field                | Type    | Default              | Description                                                |
 | -------------------- | ------- | -------------------- | ---------------------------------------------------------- |
-| `account`            | string  | `""` (required)      | Phone number registered with signal-cli, E.164 format      |
+| `account`            | string  | `""` (required)      | Phone number registered with signal-cli, E.164 format (e.g. `+85212345678`) |
 | `http_url`           | string  | `""`                 | Full URL of bbernhard REST API (e.g. `http://127.0.0.1:8082`) |
 | `http_host`          | string  | `"127.0.0.1"`        | Host (used if `http_url` empty)                            |
 | `http_port`          | int     | `8080`               | Port (used if `http_url` empty)                            |
-| `send_read_receipts` | bool    | `true`               | Send read receipts                                         |
+| `auto_start`         | bool    | `false`              | Auto-start the signal-cli daemon process                   |
+| `send_read_receipts` | bool    | `true`               | Send read receipts when messages are processed             |
 | `text_chunk_limit`   | int     | `4000`               | Maximum characters per outgoing message                    |
-| `groups`             | list    | `[]`                 | Group internal-id allowlist (base64-ish values from signal-cli) |
+| `media_max_mb`       | int     | `8`                  | Maximum media attachment size in MB                        |
+| `groups`             | list    | `[]`                 | Group internal-id allowlist (base64 values from signal-cli) |
 | `group_allow_from`   | list    | `[]`                 | Who can trigger the bot in groups. `["*"]` = everyone; supports `+phone` or `uuid:...` |
+| `reply_to_trigger`   | bool    | `true`               | Quote-reply the original inbound message when sending responses |
+| `filter_thinking`    | bool    | `false`              | Hide reasoning/thinking blocks from replies                |
+| `text_mode`          | string  | `"styled"`           | Message format: `"styled"` for markdown, `"plain"` for plain text |
 
 ### Features
 
@@ -871,12 +897,24 @@ Alternatively, link to an existing Signal account as a secondary device by openi
 - **Typing indicator**: continuously refreshed during response generation
 - **WebSocket receive**: real-time message stream, no polling
 
+### Troubleshooting
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| Container fails to start | Port 8082 already in use | Change `-p 8082:8080` to another port (e.g. `-p 8083:8080`) and update `http_url` |
+| QR code expired | Linking URI has a short TTL | Re-run the `qrcodelink` command to generate a fresh code |
+| `Connection refused` in CoPaw | Daemon not ready or wrong URL | Check `docker logs signal-cli`; verify `http_url` matches the published port |
+| Messages not received | Account not linked or WebSocket disconnected | Verify with `curl http://localhost:8082/v1/about`; restart container if needed |
+| Group messages ignored | Group ID not in allowlist | Get group IDs via `curl http://localhost:8082/v1/groups/+YOUR_NUMBER` and add the `internal-id` to `groups` |
+| `signal-cli` data lost after restart | Volume not mounted | Ensure `-v ~/.local/share/signal-cli:/home/.local/share/signal-cli` is present |
+| Bot replies but phone shows duplicate | Linked device echoes | This is normal; the phone shows both sides of the conversation |
+
 ### Notes
 
-- Signal doesn't expose a public API — `signal-cli` is the only bridge, and `bbernhard/signal-cli-rest-api` is the most popular wrapper.
+- Signal does not expose a public API — `signal-cli` is the only bridge, and `bbernhard/signal-cli-rest-api` is the most popular wrapper.
 - Group IDs in `groups` are the **internal-id** from `GET /v1/groups/{number}` (base64-looking strings like `sBlO8LhzR42X...=`), NOT the `group.xxx` external form.
 - `group_allow_from` accepts phone numbers (`+85212345678`), UUIDs (`uuid:xxx-xxx-...`), or `"*"` for everyone.
-- If the container fails to start, check `podman logs signal-api` — most common issue is port conflict or missing signal-cli data directory.
+- If the container fails to start, check `docker logs signal-cli` or `podman logs signal-cli` for details.
 
 ---
 

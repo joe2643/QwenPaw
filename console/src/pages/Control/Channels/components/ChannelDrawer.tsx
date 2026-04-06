@@ -1068,37 +1068,37 @@ export function ChannelDrawer({
       case "signal":
         return (
           <>
-            <Form.Item name="account" label="Account" tooltip="Bot phone number (E.164)" rules={[{ required: true }]}>
+            <Form.Item name="account" label={t("channels.signalAccount")} tooltip={t("channels.signalAccountTooltip")} rules={[{ required: true }]}>
               <Input placeholder="+85298349370" />
             </Form.Item>
-            <Form.Item name="http_url" label="Bridge URL" tooltip="signal-cli bridge URL">
+            <Form.Item name="http_url" label={t("channels.signalHttpUrl")} tooltip={t("channels.signalHttpUrlTooltip")}>
               <Input placeholder="http://127.0.0.1:8082" />
             </Form.Item>
-            <Form.Item name="http_port" label="Bridge Port" initialValue={8082}>
+            <Form.Item name="http_port" label={t("channels.signalBridgePort")} initialValue={8082}>
               <InputNumber min={1} max={65535} style={{ width: "100%" }} />
             </Form.Item>
-            <Form.Item name="auto_start" label="Auto Start Daemon" valuePropName="checked">
+            <Form.Item name="auto_start" label={t("channels.signalAutoStart")} valuePropName="checked">
               <Switch />
             </Form.Item>
-            <Form.Item name="send_read_receipts" label="Read Receipts" valuePropName="checked" initialValue={true}>
+            <Form.Item name="send_read_receipts" label={t("channels.signalSendReadReceipts")} valuePropName="checked" initialValue={true}>
               <Switch defaultChecked />
             </Form.Item>
-            <Form.Item name="text_chunk_limit" label="Chunk Limit" initialValue={4000}>
+            <Form.Item name="text_chunk_limit" label={t("channels.signalTextChunkLimit")} initialValue={4000}>
               <InputNumber min={256} max={8192} step={256} style={{ width: "100%" }} />
             </Form.Item>
-            <Form.Item name="media_max_mb" label="Media Max (MB)" initialValue={8}>
+            <Form.Item name="media_max_mb" label={t("channels.signalMediaMaxMb")} tooltip={t("channels.signalMediaMaxMbTooltip")} initialValue={8}>
               <InputNumber min={1} max={100} style={{ width: "100%" }} />
             </Form.Item>
-            <Form.Item name="groups" label="Group Allowlist" tooltip="Signal group IDs (base64)">
+            <Form.Item name="groups" label={t("channels.signalGroups")} tooltip={t("channels.signalGroupsTooltip")}>
               <Select mode="tags" placeholder="sBlO8LhzR42X...=" tokenSeparators={[","," ","\n"]} />
             </Form.Item>
-            <Form.Item name="group_allow_from" label="Group Allow From" tooltip='Who can trigger bot in groups. ["*"] = everyone.'>
+            <Form.Item name="group_allow_from" label={t("channels.signalGroupAllowFrom")} tooltip={t("channels.signalGroupAllowFromTooltip")}>
               <Select mode="tags" placeholder="* (everyone)" tokenSeparators={[","," "]} />
             </Form.Item>
             <Form.Item name="reply_to_trigger" label={t("channels.replyToTrigger")} valuePropName="checked" tooltip={t("channels.replyToTriggerTooltip")} initialValue={true}>
               <Switch defaultChecked />
             </Form.Item>
-            <Form.Item name="filter_thinking" label="Filter Thinking" valuePropName="checked" tooltip="Hide reasoning/thinking blocks from replies">
+            <Form.Item name="filter_thinking" label={t("channels.signalFilterThinking")} valuePropName="checked" tooltip={t("channels.signalFilterThinkingTooltip")}>
               <Switch />
             </Form.Item>
           </>
