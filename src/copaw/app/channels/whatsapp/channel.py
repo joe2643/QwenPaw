@@ -30,7 +30,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
     RunStatus,
 )
 
-from ....config.config import BaseChannelConfig as WhatsAppConfig
+from ....config.config import WhatsAppConfig
 from ..base import (
     BaseChannel,
     OnReplySent,
@@ -112,6 +112,9 @@ class WhatsAppChannel(BaseChannel):
         send_read_receipts: bool = True,
         text_chunk_limit: int = WHATSAPP_MAX_TEXT_LENGTH,
         self_chat_mode: bool = False,
+        ack_reaction_thinking: str = "🤔",
+        ack_reaction_done: str = "👀",
+        ack_reaction_error: str = "⚠️",
         **kwargs,
     ):
         super().__init__(
@@ -131,6 +134,9 @@ class WhatsAppChannel(BaseChannel):
         self._send_read_receipts = send_read_receipts
         self._text_chunk_limit = text_chunk_limit
         self._self_chat_mode = self_chat_mode
+        self._ack_reaction_thinking = ack_reaction_thinking or ""
+        self._ack_reaction_done = ack_reaction_done or ""
+        self._ack_reaction_error = ack_reaction_error or ""
         self._groups: List[str] = kwargs.get("groups") or []
         self._group_allow_from: List[str] = kwargs.get("group_allow_from") or []
         self._media_dir = _MEDIA_DIR
@@ -140,9 +146,9 @@ class WhatsAppChannel(BaseChannel):
         self._connect_task = None
         self._my_jid = None
         self._bot_phone = ""
-        self._group_history: Dict[str, list] = {}
-        self._group_history_limit = 50
         self._bot_lid = ""
+        self._group_history: Dict[str, list] = {}  # chat_jid -> [{sender, body, ts}]
+        self._group_history_limit = 50
 
         if self.enabled and not NEONIZE_AVAILABLE:
             logger.error("whatsapp: neonize not installed, channel disabled")
@@ -185,6 +191,9 @@ class WhatsAppChannel(BaseChannel):
             send_read_receipts=c.get("send_read_receipts", True),
             text_chunk_limit=c.get("text_chunk_limit", WHATSAPP_MAX_TEXT_LENGTH),
             self_chat_mode=c.get("self_chat_mode", False),
+            ack_reaction_thinking=c.get("ack_reaction_thinking", "🤔"),
+            ack_reaction_done=c.get("ack_reaction_done", "👀"),
+            ack_reaction_error=c.get("ack_reaction_error", "⚠️"),
             groups=c.get("groups") or [],
             group_allow_from=c.get("group_allow_from") or [],
         )
@@ -217,8 +226,10 @@ class WhatsAppChannel(BaseChannel):
                 import sqlite3
                 db_path = str(self._auth_dir / "neonize.db")
                 conn = sqlite3.connect(db_path)
-                row = conn.execute("SELECT jid, lid FROM whatsmeow_device LIMIT 1").fetchone()
-                conn.close()
+                try:
+                    row = conn.execute("SELECT jid, lid FROM whatsmeow_device LIMIT 1").fetchone()
+                finally:
+                    conn.close()
                 if row:
                     jid_str = row[0] or ""  # e.g. "817089933036:1@s.whatsapp.net"
                     lid_str = row[1] or ""  # e.g. "229661330157571:1@lid"
@@ -321,7 +332,7 @@ class WhatsAppChannel(BaseChannel):
             try:
                 self._media_dir.mkdir(parents=True, exist_ok=True)
                 path = self._media_dir / f"wa_img_{msg_id}.jpg"
-                await client.download_media_with_path(msg, str(path))
+                await client.download_any(msg, path=str(path))
                 content_parts.append(ImageContent(type=ContentType.IMAGE, image_url=str(path)))
             except Exception as e:
                 logger.warning("whatsapp: image download failed: %s", e)
@@ -332,7 +343,7 @@ class WhatsAppChannel(BaseChannel):
                 self._media_dir.mkdir(parents=True, exist_ok=True)
                 ext = "ogg" if msg.audioMessage.ptt else "m4a"
                 path = self._media_dir / f"wa_audio_{msg_id}.{ext}"
-                await client.download_media_with_path(msg, str(path))
+                await client.download_any(msg, path=str(path))
                 content_parts.append(AudioContent(type=ContentType.AUDIO, data=str(path)))
             except Exception as e:
                 logger.warning("whatsapp: audio download failed: %s", e)
@@ -341,14 +352,136 @@ class WhatsAppChannel(BaseChannel):
         if msg.HasField("documentMessage"):
             try:
                 self._media_dir.mkdir(parents=True, exist_ok=True)
-                fname = msg.documentMessage.fileName or f"wa_doc_{msg_id}"
+                raw_fname = msg.documentMessage.fileName or f"wa_doc_{msg_id}"
+                # Sanitize filename to prevent path traversal
+                fname = Path(raw_fname).name or f"wa_doc_{msg_id}"
                 path = self._media_dir / fname
-                await client.download_media_with_path(msg, str(path))
-                content_parts.append(VideoContent(type=ContentType.VIDEO, video_url=str(path)))
+                await client.download_any(msg, path=str(path))
+                content_parts.append(FileContent(type=ContentType.FILE, file_url=str(path)))
             except Exception as e:
                 logger.warning("whatsapp: document download failed: %s", e)
 
         return body, content_parts
+
+    async def _extract_quote_content(self, client, msg) -> List[Any]:
+        """Extract the content of a quoted/replied-to WhatsApp message.
+
+        Returns content parts (text + media) so the agent has full context
+        of what the user is responding to — not just a stanza ID.
+
+        Note: quotedMessage is a stripped-down proto — media download keys
+        are usually absent, so we extract text/captions and describe media
+        types rather than attempting (and failing) to download.
+        """
+        # contextInfo lives on extendedTextMessage, imageMessage, etc.
+        ctx = None
+        for field in ("extendedTextMessage", "imageMessage", "videoMessage",
+                       "audioMessage", "documentMessage", "stickerMessage"):
+            if msg.HasField(field):
+                sub = getattr(msg, field)
+                if hasattr(sub, "contextInfo"):
+                    ctx = sub.contextInfo
+                    break
+        if not ctx:
+            return []
+        if not (ctx.HasField("quotedMessage") if hasattr(ctx, "HasField") else False):
+            return []
+
+        quoted_msg = ctx.quotedMessage
+        participant = getattr(ctx, "participant", "") or ""
+        if isinstance(participant, str):
+            sender_label = participant.split("@")[0] if "@" in participant else participant
+        elif hasattr(participant, "User"):
+            sender_label = participant.User
+        else:
+            sender_label = "unknown"
+
+        # Resolve LID to phone/name for display
+        lid_key = f"{sender_label}@lid" if sender_label and not sender_label.startswith("+") else ""
+        if lid_key:
+            if lid_key not in self._lid_cache:
+                try:
+                    from neonize.utils import build_jid
+                    lid_jid = build_jid(sender_label, "lid")
+                    await self._resolve_lid(client, lid_key, lid_jid)
+                except Exception:
+                    pass
+            cached = self._lid_cache.get(lid_key, {})
+            phone = cached.get("phone", "")
+            name = cached.get("name", "")
+            if phone and name:
+                sender_label = f"+{phone} ({name})"
+            elif phone:
+                sender_label = f"+{phone}"
+
+        # Extract what we can from the quoted message proto
+        quote_body = ""
+        media_types = []
+
+        # Text
+        if getattr(quoted_msg, "conversation", ""):
+            quote_body = quoted_msg.conversation
+        elif quoted_msg.HasField("extendedTextMessage") and quoted_msg.extendedTextMessage.text:
+            quote_body = quoted_msg.extendedTextMessage.text
+
+        # Detect media types present in quoted message
+        if quoted_msg.HasField("imageMessage"):
+            caption = getattr(quoted_msg.imageMessage, "caption", "") or ""
+            if caption and not quote_body:
+                quote_body = caption
+            media_types.append("image")
+            # Try to download quoted image (may work if media key is present)
+            stanza_id = getattr(ctx, "stanzaId", "") or "quote"
+            try:
+                self._media_dir.mkdir(parents=True, exist_ok=True)
+                path = self._media_dir / f"wa_quote_{stanza_id[:12]}.jpg"
+                await client.download_any(quoted_msg, path=str(path))
+                if path.exists() and path.stat().st_size > 0:
+                    block = self._format_reply_context(
+                        sender=sender_label,
+                        body=quote_body,
+                        media_types=["image"],
+                    )
+                    return [
+                        TextContent(type=ContentType.TEXT, text=block),
+                        ImageContent(type=ContentType.IMAGE, image_url=str(path)),
+                    ]
+            except Exception:
+                pass  # Download failed — describe instead
+        if quoted_msg.HasField("videoMessage"):
+            media_types.append("video")
+        if quoted_msg.HasField("audioMessage"):
+            ptt = getattr(quoted_msg.audioMessage, "ptt", False)
+            media_types.append("voice note" if ptt else "audio")
+        if quoted_msg.HasField("documentMessage"):
+            fname = getattr(quoted_msg.documentMessage, "fileName", "") or ""
+            media_types.append(f"file: {fname}" if fname else "document")
+        if quoted_msg.HasField("stickerMessage"):
+            media_types.append("sticker")
+
+        if not quote_body and not media_types:
+            return []
+
+        return [TextContent(
+            type=ContentType.TEXT,
+            text=self._format_reply_context(
+                sender=sender_label,
+                body=quote_body,
+                media_types=media_types,
+            ),
+        )]
+
+    @staticmethod
+    def _format_reply_context(sender: str, body: str, media_types: List[str]) -> str:
+        """Build the OpenClaw-style bounded reply-to context block."""
+        lines = ["=== UNTRUSTED reply-to (this message quotes an earlier one) ==="]
+        lines.append(f"From: {sender}")
+        if body:
+            lines.append(f"Message: {body[:400]}")
+        if media_types:
+            lines.append(f"Media: {', '.join(media_types)}")
+        lines.append("=== end of reply-to ===")
+        return "\n".join(lines)
 
     def _check_access(self, is_group, chat_str, sender_str, sender_jid, client, msg, body) -> bool:
         """Check access control for incoming message.
@@ -356,15 +489,14 @@ class WhatsAppChannel(BaseChannel):
         Returns True if message is allowed, False if blocked.
         Note: DM allowlist checks that need async LID resolution are
         handled separately in _on_message.
+        Note: Mention checks are handled in _on_message (after content
+        extraction) so non-mentioned messages can be recorded in group
+        history for context injection.
         """
         if is_group:
-            if self.group_policy == "allowlist" and self._groups:
-                if chat_str not in self._groups:
-                    logger.debug("whatsapp: blocked by group allowlist")
-                    return False
-            if self.require_mention:
-                if not self._is_bot_mentioned(msg, body):
-                    logger.warning("whatsapp: BLOCKED - mention required but not mentioned")
+            if self.group_policy == "allowlist":
+                if not self._groups or chat_str not in self._groups:
+                    logger.debug("whatsapp: blocked group %s (allowlist=%s)", chat_str[:20], self._groups)
                     return False
         return True
 
@@ -398,28 +530,47 @@ class WhatsAppChannel(BaseChannel):
             msg = message.Message
             body, content_parts = await self._extract_message_content(client, msg, msg_id)
 
+            # Extract quoted/replied-to message content
+            quote_parts = await self._extract_quote_content(client, msg)
+            if quote_parts:
+                content_parts = quote_parts + content_parts
+
             if not content_parts:
                 return
 
-            # Access control (sync checks: group allowlist, mention)
+            # Access control (sync checks: group allowlist)
             if not self._check_access(is_group, chat_str, sender_str, sender_jid, client, msg, body):
-                # Record non-mentioned group messages in history buffer
-                if is_group and (body or content_parts):
-                    resolved = self._lid_cache.get(sender_str, {})
-                    sender_label = f"+{resolved.get('phone', '')}" if resolved.get('phone') else sender_str
-                    media_paths = []
-                    for p in content_parts:
-                        for attr in ("image_url", "video_url", "data", "file_url"):
-                            v = getattr(p, attr, None)
-                            if v:
-                                media_paths.append(v)
-                                break
-                    history = self._group_history.setdefault(chat_str, [])
-                    history.append({"sender": sender_label, "body": body or "[media]", "ts": timestamp, "media": media_paths})
-                    if len(history) > self._group_history_limit:
-                        self._group_history[chat_str] = history[-self._group_history_limit:]
-                    logger.info("whatsapp: recorded in group history (%d entries)", len(history))
                 return
+
+            # Group mention gate — record non-mentioned messages for context
+            if is_group and self.require_mention:
+                if not self._is_bot_mentioned(msg, body):
+                    # Buffer for later context injection when bot IS mentioned
+                    if body or content_parts:
+                        # Resolve LID to phone/name for readable history
+                        if sender_str.endswith("@lid"):
+                            await self._resolve_lid(client, sender_str, sender_jid)
+                        display = self._format_sender(sender_str)
+                        # Collect media paths from the already-downloaded
+                        # attachments so the agent can see them when
+                        # context is injected.
+                        media_paths = []
+                        for part in content_parts:
+                            for attr in ("image_url", "video_url", "file_url", "data"):
+                                v = getattr(part, attr, None)
+                                if v and os.path.isfile(str(v)):
+                                    media_paths.append(str(v))
+                                    break
+                        history = self._group_history.setdefault(chat_str, [])
+                        history.append({
+                            "sender": display,
+                            "body": body or "[media]",
+                            "ts": str(timestamp),
+                            "media": media_paths,
+                        })
+                        if len(history) > self._group_history_limit:
+                            self._group_history[chat_str] = history[-self._group_history_limit:]
+                    return
 
             # Async DM allowlist check (needs LID resolution)
             if not is_group:
@@ -437,22 +588,7 @@ class WhatsAppChannel(BaseChannel):
                     if not allowed:
                         logger.warning("whatsapp: blocked - sender=%s phone=%s allow_from=%s",
                                       sender_str, resolved_phone or sender_phone, self.allow_from)
-                        # Record in group history even when blocked
-                    if is_group and (body or content_parts):
-                        resolved = self._lid_cache.get(sender_str, {})
-                        sender_label = f"+{resolved.get('phone', '')}" if resolved.get('phone') else sender_str
-                        media_paths = []
-                        for p in content_parts:
-                            for attr in ("image_url", "video_url", "data", "file_url"):
-                                v = getattr(p, attr, None)
-                                if v:
-                                    media_paths.append(v)
-                                    break
-                        history = self._group_history.setdefault(chat_str, [])
-                        history.append({"sender": sender_label, "body": body or "[media]", "ts": timestamp, "media": media_paths})
-                        if len(history) > self._group_history_limit:
-                            self._group_history[chat_str] = history[-self._group_history_limit:]
-                    return
+                        return
 
             # Resolve sender for display
             if sender_str.endswith("@lid"):
@@ -464,47 +600,79 @@ class WhatsAppChannel(BaseChannel):
                         f" (group {chat_str[:20]})" if is_group else "",
                         body[:80] if body else "[media]")
 
-            # Inject group history context
-            if is_group and chat_str in self._group_history:
-                history = self._group_history.get(chat_str, [])
-                if history:
-                    ctx_lines = []
-                    media_to_add = []
-                    for i, h in enumerate(history[-10:]):
-                        ctx_lines.append(f"[{i+1}] {h['sender']}: {h['body']}")
-                        for mp in h.get("media", []):
-                            if os.path.isfile(mp):
-                                media_to_add.append(mp)
-                    if ctx_lines:
-                        ctx_text = "=== Recent group chat history (for context only \u2014 you were not mentioned in these) ===\n" + "\n".join(ctx_lines)
-                        content_parts.insert(0, TextContent(type=ContentType.TEXT, text=ctx_text))
-                    for mp in media_to_add[-3:]:
-                        content_parts.append(ImageContent(type=ContentType.IMAGE, image_url=mp))
-                    self._group_history[chat_str] = []
-
             # Build request - use resolved phone number for sender identity
             resolved = self._lid_cache.get(sender_str, {})
             resolved_phone = resolved.get("phone", "")
             resolved_name = resolved.get("name", "")
             friendly_sender = f"+{resolved_phone}" if resolved_phone else sender_str
 
-            # For group messages, prepend sender identity to the actual message
-            # (skip history context blocks that start with "---")
-            if is_group and content_parts:
-                sender_label = friendly_sender
-                if resolved_name:
-                    sender_label = f"{resolved_name} ({friendly_sender})"
-                for i, part in enumerate(content_parts):
-                    if hasattr(part, "type") and part.type == ContentType.TEXT:
-                        txt = part.text or ""
-                        # Don't prepend [From] to history context blocks
-                        if txt.startswith("==="):
-                            continue
-                        content_parts[i] = TextContent(
-                            type=ContentType.TEXT,
-                            text=f"[From {sender_label}]: {txt}"
-                        )
-                        break
+            # Inject group history context when bot is mentioned.
+            # Format: OpenClaw-style bounded block with clear sender+media.
+            if is_group and chat_str in self._group_history:
+                history = self._group_history.get(chat_str, [])
+                if history:
+                    ctx_lines = [
+                        f"=== UNTRUSTED WhatsApp group history (context only, not directed at you) ===",
+                        f"Group: {chat_str}",
+                    ]
+                    media_to_add = []
+                    for h in history[-10:]:
+                        ts = h.get("ts", "")
+                        ts_prefix = f"[{ts}] " if ts else ""
+                        line = f"  {ts_prefix}{h['sender']}: {h['body']}"
+                        media_paths = h.get("media") or []
+                        if media_paths:
+                            line += f"  [media: {len(media_paths)}]"
+                            for mp in media_paths:
+                                if os.path.isfile(mp):
+                                    media_to_add.append(mp)
+                        ctx_lines.append(line)
+                    ctx_lines.append("=== end of group history ===")
+                    ctx_text = "\n".join(ctx_lines)
+                    content_parts.insert(0, TextContent(type=ContentType.TEXT, text=ctx_text))
+                    # Attach referenced images (cap at 3 to limit token burn)
+                    for mp in media_to_add[-3:]:
+                        content_parts.append(ImageContent(type=ContentType.IMAGE, image_url=mp))
+                    self._group_history[chat_str] = []
+
+            # Strip bot @mention from body text so commands like "/new" work
+            # even when prefixed with @+phone. This happens BEFORE the
+            # envelope prefix wrap so command detection sees clean text.
+            body = self._strip_bot_mention(body)
+            for i, part in enumerate(content_parts):
+                if hasattr(part, "type") and part.type == ContentType.TEXT:
+                    txt = part.text or ""
+                    if txt.startswith("===") or txt.startswith("[Replying"):
+                        continue
+                    stripped = self._strip_bot_mention(txt)
+                    if stripped != txt:
+                        content_parts[i] = TextContent(type=ContentType.TEXT, text=stripped)
+                    break
+
+            # Detect slash commands (/new, /stop, /clear, etc.)
+            has_bot_command = bool(body and body.lstrip().startswith("/"))
+
+            # Envelope: clear chat-type + sender prefix so the agent never
+            # mistakes a group for a DM.
+            # Group:  [WhatsApp group {chat_jid}] Joe HO (+85251159218): text
+            # DM:     [WhatsApp DM] +85251159218: text
+            sender_label = friendly_sender
+            if resolved_name:
+                sender_label = f"{resolved_name} ({friendly_sender})"
+            if is_group:
+                envelope = f"[WhatsApp group {chat_str}] {sender_label}"
+            else:
+                envelope = f"[WhatsApp DM] {sender_label}"
+            for i, part in enumerate(content_parts):
+                if hasattr(part, "type") and part.type == ContentType.TEXT:
+                    txt = part.text or ""
+                    if txt.startswith("===") or txt.startswith("[Replying"):
+                        continue
+                    content_parts[i] = TextContent(
+                        type=ContentType.TEXT,
+                        text=f"{envelope}: {txt}"
+                    )
+                    break
 
             effective_sender = f"group:{chat_str}" if is_group else friendly_sender
             # Also resolve chat LID to phone for send target
@@ -515,6 +683,14 @@ class WhatsAppChannel(BaseChannel):
                 if chat_phone:
                     send_chat_jid = f"{chat_phone}@s.whatsapp.net"
 
+            # Resolve typing JID for typing loop during response
+            typing_jid = chat_jid
+            if chat_str.endswith("@lid"):
+                c_info = self._lid_cache.get(chat_str, {})
+                c_phone = c_info.get("phone", "")
+                if c_phone:
+                    typing_jid = _str_to_jid(c_phone)
+
             channel_meta = {
                 "platform": "whatsapp",
                 "chat_jid": send_chat_jid,
@@ -524,6 +700,10 @@ class WhatsAppChannel(BaseChannel):
                 "is_group": is_group,
                 "msg_id": msg_id,
                 "timestamp": timestamp,
+                "bot_phone": f"+{self._bot_phone}" if self._bot_phone else "",
+                "bot_lid": self._bot_lid,
+                "has_bot_command": has_bot_command,
+                "bot_mentioned": True,  # We only reach here if mention check passed
             }
             session_id = self.resolve_session_id(effective_sender, channel_meta)
             request = self.build_agent_request_from_user_content(
@@ -534,6 +714,13 @@ class WhatsAppChannel(BaseChannel):
                 channel_meta=channel_meta,
             )
             request.channel_meta = channel_meta
+            # Store typing info on request (NOT in channel_meta — JID/client are not JSON-serializable)
+            request._wa_typing_jid = typing_jid
+            request._wa_typing_client = client
+            # Store ack-reaction target so _stream_with_tracker can clear it
+            request._wa_ack_chat_jid = chat_jid
+            request._wa_ack_sender_jid = sender_jid
+            request._wa_ack_msg_id = msg_id
 
             # Mark as read
             if self._send_read_receipts:
@@ -546,34 +733,22 @@ class WhatsAppChannel(BaseChannel):
                 except Exception:
                     pass
 
-            # Send typing indicator
-            try:
-                typing_jid = chat_jid
-                if chat_str.endswith("@lid"):
-                    c_info = self._lid_cache.get(chat_str, {})
-                    c_phone = c_info.get("phone", "")
-                    if c_phone:
-                        typing_jid = _str_to_jid(c_phone)
-                _jb = typing_jid.SerializeToString()
-                # WORKAROUND: access private __client to call SendChatPresence directly.
-                # neonize wraps this method but its Go binding has an off-by-one enum
-                # index bug for the presence type, so we bypass the wrapper.
-                # TODO: Remove once neonize exposes a public API for chat presence.
-                await client._NewAClient__client.SendChatPresence(
-                    client.uuid, _jb, len(_jb), 0, 0
-                )
-                logger.info("whatsapp: typing sent to %s", _jid_to_str(typing_jid))
-            except Exception as e:
-                logger.warning("whatsapp: typing FAILED: %s", e)
-
-            # For commands like /stop, pass raw body for detection
-            if body and body.strip().startswith("/"):
+            # For slash commands (/new, /stop, /clear, etc.), strip the
+            # envelope prefix ([WhatsApp group xxx] Sender: ...) so the
+            # command registry sees the raw command text.
+            if has_bot_command:
                 for i, part in enumerate(content_parts):
-                    if hasattr(part, "text") and part.text.startswith("[From "):
-                        idx = part.text.find("]: ")
-                        if idx > 0:
-                            raw_text = part.text[idx + 3:]
-                            content_parts[i] = TextContent(type=ContentType.TEXT, text=raw_text)
+                    if hasattr(part, "text") and part.text.startswith("[WhatsApp "):
+                        # Format is: [WhatsApp group xxx] Name (+phone): text
+                        # Strip up to the first ": " after the closing bracket.
+                        bracket_end = part.text.find("] ")
+                        if bracket_end > 0:
+                            after_bracket = part.text[bracket_end + 2:]
+                            idx = after_bracket.find(": ")
+                            if idx > 0:
+                                raw_text = after_bracket[idx + 2:]
+                                content_parts[i] = TextContent(type=ContentType.TEXT, text=raw_text)
+                        break
                 request = self.build_agent_request_from_user_content(
                     channel_id=self.channel,
                     sender_id=effective_sender,
@@ -582,8 +757,37 @@ class WhatsAppChannel(BaseChannel):
                     channel_meta=channel_meta,
                 )
                 request.channel_meta = channel_meta
+                request._wa_typing_jid = typing_jid
+                request._wa_typing_client = client
+                request._wa_ack_chat_jid = chat_jid
+                request._wa_ack_sender_jid = sender_jid
+                request._wa_ack_msg_id = msg_id
 
-            await self.consume_one(request)
+            # Fire "thinking" reaction (fire-and-forget) so the user
+            # knows the bot has picked up their message before the
+            # agent's reply lands.
+            if self._ack_reaction_thinking:
+                asyncio.create_task(self._send_reaction(
+                    client, chat_jid, sender_jid, msg_id,
+                    self._ack_reaction_thinking,
+                ))
+
+            # Route through UnifiedQueueManager (via self._enqueue) so
+            # each (whatsapp, session_id, priority) gets its own queue
+            # and worker task. Messages from different chats process
+            # in parallel; same-chat messages still serialize
+            # (prevents races inside one conversation).
+            #
+            # NOTE: direct `await self.consume_one(request)` would
+            # block neonize's message callback until the agent's full
+            # response finishes, which serializes ALL inbound traffic
+            # (DM + group messages stack up). Fall back to direct call
+            # if no enqueue callback is attached (unit tests set up
+            # channels without the manager).
+            if self._enqueue is not None:
+                self._enqueue(request)
+            else:
+                await self.consume_one(request)
 
         except Exception:
             logger.exception("whatsapp: error processing message")
@@ -635,10 +839,10 @@ class WhatsAppChannel(BaseChannel):
                 else:
                     qp_user = ""
                 if qp_user and (qp_user == my_lid or qp_user == my_phone):
-                    logger.warning("whatsapp: reply-to-bot DETECTED")
+                    logger.debug("whatsapp: reply-to-bot detected")
                     return True
         
-        logger.warning("whatsapp: mention check FAILED - my_lid=%s my_phone=%s body=%s",
+        logger.debug("whatsapp: mention check failed - my_lid=%s my_phone=%s body=%s",
                      my_lid, my_phone, body[:60])
         return False
 
@@ -691,6 +895,25 @@ class WhatsAppChannel(BaseChannel):
             return f"+{phone}"
         return lid_str
 
+    def _strip_bot_mention(self, text: str) -> str:
+        """Remove bot @mention (e.g. '@+817089933036') from text.
+
+        Handles both @phone and @LID forms so that slash commands
+        preceded by a mention ("@+817089933036 /new") are recognized.
+        """
+        if not text:
+            return text
+        import re as _re
+        patterns = []
+        if self._bot_phone:
+            patterns.append(rf"@\+?{_re.escape(self._bot_phone)}\s*")
+        if self._bot_lid:
+            patterns.append(rf"@{_re.escape(self._bot_lid)}\s*")
+        out = text
+        for pat in patterns:
+            out = _re.sub(pat, "", out).strip()
+        return out
+
     # ── Outbound send ─────────────────────────────────────────────────
 
     async def send(
@@ -719,17 +942,22 @@ class WhatsAppChannel(BaseChannel):
         chat_jid_str = meta.get("chat_jid") or to_handle
         jid = _str_to_jid(chat_jid_str)
 
-        # Extract [Image: /path] patterns
+        # Extract [Image: /path] patterns — restricted to media dir to prevent
+        # LLM-driven file exfiltration (e.g. /etc/passwd)
         img_re = re.compile(r'\[Image: (file:///[^\]]+|/[^\]]+)\]')
         img_matches = img_re.findall(text)
+        safe_dir = str(self._media_dir.resolve())
         for m in img_matches:
             p = m.replace("file://", "") if m.startswith("file://") else m
-            if os.path.isfile(p):
+            resolved = str(Path(p).resolve())
+            if resolved.startswith(safe_dir) and os.path.isfile(resolved):
                 try:
-                    await self._client.send_image(jid, p)
-                    logger.info("whatsapp: sent image %s", p)
+                    await self._client.send_image(jid, resolved)
+                    logger.info("whatsapp: sent image %s", resolved)
                 except Exception as e:
                     logger.warning("whatsapp: image send failed: %s", e)
+            elif os.path.isfile(p):
+                logger.warning("whatsapp: blocked send of %s — outside media dir %s", p, safe_dir)
             text = text.replace(f"[Image: {m}]", "").strip()
 
         if not text:
@@ -749,32 +977,82 @@ class WhatsAppChannel(BaseChannel):
         part: OutgoingContentPart,
         meta: Optional[dict] = None,
     ) -> None:
+        """Send a single outbound media attachment (image / video / audio / file).
+
+        This is the primary outbound media path for WhatsApp. It is
+        invoked by the base channel's ``send_content_parts`` for every
+        non-text content block in the agent's reply — so when the
+        agent returns an ``ImageBlock`` / ``AudioBlock`` / etc.
+        (including via the ``send_file_to_user`` tool), the file
+        ends up here.
+
+        Extracts the local path from the content part (``image_url``,
+        ``video_url``, ``file_url``/``file_id`` or ``data``), strips the
+        ``file://`` scheme if present, then dispatches through neonize
+        (``send_image`` / ``send_video`` / ``send_audio`` /
+        ``send_document``).
+
+        ✅ Images, video, audio AND documents all flow through here.
+        """
+        t = getattr(part, "type", None)
+        logger.info(
+            "whatsapp: send_media called, type=%s to=%s", t, to_handle,
+        )
         if not self.enabled or not self._client or not self._connected:
+            logger.warning(
+                "whatsapp: send_media skipped — enabled=%s client=%s connected=%s",
+                self.enabled, bool(self._client), self._connected,
+            )
             return
         meta = meta or {}
         chat_jid_str = meta.get("chat_jid") or to_handle
         jid = _str_to_jid(chat_jid_str)
 
-        t = getattr(part, "type", None)
-        file_path = None
+        # Extract the local file path from the content part
+        raw_path = None
         if t == ContentType.IMAGE:
-            file_path = getattr(part, "image_url", None)
+            raw_path = getattr(part, "image_url", None)
+        elif t == ContentType.VIDEO:
+            raw_path = getattr(part, "video_url", None)
         elif t == ContentType.FILE:
-            file_path = getattr(part, "file_url", None)
+            raw_path = getattr(part, "file_url", None) or getattr(part, "file_id", None)
         elif t == ContentType.AUDIO:
-            file_path = getattr(part, "data", None)
+            raw_path = getattr(part, "data", None)
 
-        if file_path and os.path.isfile(file_path):
-            try:
-                if t == ContentType.IMAGE:
-                    await self._client.send_image(jid, file_path)
-                elif t == ContentType.AUDIO:
-                    await self._client.send_audio(jid, file_path, ptt=True)
-                else:
-                    await self._client.send_document(jid, file_path)
-                logger.info("whatsapp: sent media %s", file_path)
-            except Exception as e:
-                logger.warning("whatsapp: media send failed: %s", e)
+        if not raw_path:
+            logger.warning("whatsapp: send_media missing path for type=%s", t)
+            return
+        # Strip file:// scheme (LLM tools often emit file:///path form)
+        file_path = (
+            raw_path.replace("file://", "")
+            if isinstance(raw_path, str) and raw_path.startswith("file://")
+            else raw_path
+        )
+        exists = os.path.isfile(file_path) if file_path else False
+        logger.info(
+            "whatsapp: send_media file_path=%s exists=%s", file_path, exists,
+        )
+        if not exists:
+            logger.warning("whatsapp: media file not found: %s", file_path)
+            return
+        try:
+            if t == ContentType.IMAGE:
+                await self._client.send_image(jid, file_path)
+            elif t == ContentType.VIDEO:
+                await self._client.send_video(jid, file_path)
+            elif t == ContentType.AUDIO:
+                await self._client.send_audio(jid, file_path, ptt=True)
+            else:  # FILE
+                await self._client.send_document(jid, file_path)
+            logger.info(
+                "whatsapp: sent media to %s (type=%s, size=%d bytes)",
+                to_handle, t, os.path.getsize(file_path),
+            )
+        except Exception as e:
+            logger.error(
+                "whatsapp: send_media FAILED to=%s type=%s path=%s: %s",
+                to_handle, t, file_path, e,
+            )
 
     # ── Text chunking ─────────────────────────────────────────────────
 
@@ -795,6 +1073,62 @@ class WhatsAppChannel(BaseChannel):
             rest = rest[len(chunk):]
         return chunks
 
+    # ── Typing indicator loop ──────────────────────────────────────────
+
+    async def _typing_loop(self, client, typing_jid, interval: float = 4.0):
+        """Re-send typing indicator every `interval` seconds until cancelled.
+
+        WhatsApp typing indicators expire after ~5s, so we need to keep
+        re-sending during the entire response generation.
+        """
+        try:
+            while True:
+                try:
+                    _jb = typing_jid.SerializeToString()
+                    await client._NewAClient__client.SendChatPresence(
+                        client.uuid, _jb, len(_jb), 0, 0
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            # Send "stopped typing" (presence type 2 = paused)
+            try:
+                _jb = typing_jid.SerializeToString()
+                await client._NewAClient__client.SendChatPresence(
+                    client.uuid, _jb, len(_jb), 2, 0
+                )
+            except Exception:
+                pass
+
+    # ── Reactions ─────────────────────────────────────────────────────
+
+    async def _send_reaction(
+        self,
+        client,
+        chat_jid,
+        sender_jid,
+        msg_id: str,
+        emoji: str,
+    ) -> None:
+        """Build + send a reaction to a specific message.
+
+        neonize exposes ``build_reaction(chat, sender, message_id, emoji)``
+        which returns a Message protobuf; we then push it through
+        ``send_message(to=chat_jid, message=...)``. Pass emoji="" to
+        remove an existing reaction.
+        """
+        try:
+            reaction_msg = await client.build_reaction(
+                chat_jid, sender_jid, msg_id, emoji or "",
+            )
+            await client.send_message(chat_jid, reaction_msg)
+            logger.debug(
+                "whatsapp: reaction %r sent on msg=%s", emoji, msg_id,
+            )
+        except Exception as e:
+            logger.warning("whatsapp: reaction %r failed: %s", emoji, e)
+
     # ── Process loop override ─────────────────────────────────────────
 
     async def _stream_with_tracker(self, payload):
@@ -809,7 +1143,18 @@ class WhatsAppChannel(BaseChannel):
         text_parts = []
         message_completed = False
         process_iterator = None
+        typing_task = None
         try:
+            # Start persistent typing loop (re-sends every 4s until cancelled)
+            # Typing info stored on request object (not channel_meta) to avoid
+            # JSON serialization issues with JID/client objects.
+            typing_jid = getattr(request, "_wa_typing_jid", None)
+            typing_client = getattr(request, "_wa_typing_client", None)
+            if typing_jid and typing_client:
+                typing_task = asyncio.create_task(
+                    self._typing_loop(typing_client, typing_jid)
+                )
+
             process_iterator = self._process(request)
             async for event in process_iterator:
                 if hasattr(event, "model_dump_json"):
@@ -847,13 +1192,50 @@ class WhatsAppChannel(BaseChannel):
                 args = self.get_on_reply_sent_args(request, to_handle)
                 self._on_reply_sent(self.channel, *args)
 
+            # Pick the right closing reaction:
+            # - done  when the agent actually produced some reply
+            # - error when nothing was sent (agent crashed silently or
+            #   produced no content) — user would otherwise see the
+            #   thinking emoji stuck forever.
+            produced_reply = message_completed or bool(text_parts)
+            ack_emoji = (
+                self._ack_reaction_done if produced_reply
+                else self._ack_reaction_error
+            )
+            if ack_emoji:
+                ack_chat = getattr(request, "_wa_ack_chat_jid", None)
+                ack_sender = getattr(request, "_wa_ack_sender_jid", None)
+                ack_msg_id = getattr(request, "_wa_ack_msg_id", None)
+                ack_client = getattr(request, "_wa_typing_client", None)
+                if ack_chat and ack_sender and ack_msg_id and ack_client:
+                    await self._send_reaction(
+                        ack_client, ack_chat, ack_sender, ack_msg_id,
+                        ack_emoji,
+                    )
+
         except asyncio.CancelledError:
             if process_iterator:
                 await process_iterator.aclose()
             raise
         except Exception:
             logger.exception("whatsapp: _stream_with_tracker failed")
-            raise
+            # Flip thinking → error so user knows the request died
+            if self._ack_reaction_error:
+                ack_chat = getattr(request, "_wa_ack_chat_jid", None)
+                ack_sender = getattr(request, "_wa_ack_sender_jid", None)
+                ack_msg_id = getattr(request, "_wa_ack_msg_id", None)
+                ack_client = getattr(request, "_wa_typing_client", None)
+                if ack_chat and ack_sender and ack_msg_id and ack_client:
+                    try:
+                        await self._send_reaction(
+                            ack_client, ack_chat, ack_sender, ack_msg_id,
+                            self._ack_reaction_error,
+                        )
+                    except Exception:
+                        pass
+        finally:
+            if typing_task and not typing_task.done():
+                typing_task.cancel()
 
     # ── Session / routing ─────────────────────────────────────────────
 
