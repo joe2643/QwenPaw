@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Load image or video files into the LLM context for analysis."""
 
+import asyncio
 import base64
 import mimetypes
 import os
@@ -85,7 +86,7 @@ def _validate_media_path(
 
 _DEFAULT_MEDIA_SERVER_URL = "http://localhost:8089"
 _DEFAULT_MEDIA_TUNNEL_DOMAIN = ""
-_DEFAULT_MEDIA_SECRET = "copaw-media-2026"
+_DEFAULT_MEDIA_SECRET = ""
 _DEFAULT_MAX_SIZE_MB = 100
 _DEFAULT_MEDIA_ENABLED = False
 
@@ -168,7 +169,7 @@ async def _get_signed_url(resolved: Path) -> str:
     try:
         import asyncio
         from urllib.parse import quote as _quote
-        url = f"{media_cfg['server_url']}/sign?path={_quote(str(resolved), safe="")}&ttl=3600"
+        url = f"{media_cfg['server_url']}/sign?path={_quote(str(resolved), safe="")}&ttl=86400"
         # MUST use to_thread — media server runs on the same event loop,
         # so blocking urllib would deadlock.
         def _fetch():
@@ -235,7 +236,7 @@ def _extract_keyframes(resolved: Path, max_frames: int = 4) -> list:
         "-of", "csv=p=0", str(resolved),
     ]
     try:
-        duration = float(subprocess.check_output(duration_cmd).decode().strip())
+        duration = float(subprocess.check_output(duration_cmd, timeout=5).decode().strip())
     except Exception:
         duration = 60.0  # assume 1 min if probe fails
 
@@ -262,6 +263,25 @@ def _extract_keyframes(resolved: Path, max_frames: int = 4) -> list:
 
     return frames
 
+
+
+def _cleanup_frame_files(frames: list) -> None:
+    """Remove temporary frame files and their parent dir if empty."""
+    import shutil
+    dirs_to_clean = set()
+    for frame_path, _ in frames:
+        try:
+            p = Path(frame_path)
+            dirs_to_clean.add(p.parent)
+            p.unlink(missing_ok=True)
+        except Exception:
+            pass
+    for d in dirs_to_clean:
+        try:
+            if d.exists() and not any(d.iterdir()):
+                shutil.rmtree(d, ignore_errors=True)
+        except Exception:
+            pass
 
 
 def _model_supports_video() -> bool:
@@ -324,7 +344,7 @@ async def view_image(image_path: str) -> ToolResponse:
             ),
             TextBlock(
                 type="text",
-                text=f"Image loaded: {resolved.name} (path: {resolved})",
+                text=f"Image loaded: {resolved.name}",
             ),
         ],
     )
@@ -354,13 +374,13 @@ async def view_video(video_path: str) -> ToolResponse:
 
     # Check if model supports video — if not, always use keyframes
     if not _model_supports_video():
-        frames = _extract_keyframes(resolved)
+        frames = await asyncio.to_thread(_extract_keyframes, resolved)
         if frames:
             content = [
                 TextBlock(
                     type="text",
                     text=f"Video: {resolved.name} — model does not support video, "
-                    f"extracted {len(frames)} keyframes (path: {resolved})",
+                    f"extracted {len(frames)} keyframes",
                 ),
             ]
             for frame_path, timestamp in frames:
@@ -369,6 +389,8 @@ async def view_video(video_path: str) -> ToolResponse:
                     source=await _resolve_media_source(frame_path, "image"),
                 ))
                 content.append(TextBlock(type="text", text=f"Frame at {timestamp}"))
+            if _get_media_config()["enabled"]:
+                _cleanup_frame_files(frames)
             return ToolResponse(content=content)
         return ToolResponse(content=[
             TextBlock(
@@ -386,19 +408,21 @@ async def view_video(video_path: str) -> ToolResponse:
             "view_media: video %s is %.1fMB (>%dMB), auto-downgrading to keyframes",
             resolved.name, resolved.stat().st_size / 1e6, _VIDEO_SIZE_LIMIT // (1024*1024),
         )
-        frames = _extract_keyframes(resolved)
+        frames = await asyncio.to_thread(_extract_keyframes, resolved)
         if frames:
             content = [
                 TextBlock(
                     type="text",
                     text=f"Video: {resolved.name} — too large for direct API ({resolved.stat().st_size / 1e6:.1f}MB), "
-                    f"extracted {len(frames)} keyframes (path: {resolved})",
+                    f"extracted {len(frames)} keyframes",
                 ),
             ]
             for frame_path, timestamp in frames:
                 frame_source = await _resolve_media_source(frame_path, "image")
                 content.append(ImageBlock(type="image", source=frame_source))
                 content.append(TextBlock(type="text", text=f"Frame at {timestamp}"))
+            if _get_media_config()["enabled"]:
+                _cleanup_frame_files(frames)
             return ToolResponse(content=content)
 
     source = await _resolve_media_source(resolved, "video")
@@ -420,13 +444,18 @@ async def view_video(video_path: str) -> ToolResponse:
                 ),
                 TextBlock(
                     type="text",
-                    text=f"Video loaded: {resolved.name} (path: {resolved})",
+                    text=f"Video loaded: {resolved.name}",
                 ),
             ],
         )
 
     # No signed URL available — extract keyframes instead
-    frames = _extract_keyframes(resolved)
+    import logging as _log6
+    _log6.getLogger(__name__).warning(
+        "view_media: model supports video but media server is off/unreachable "
+        "for %s — falling back to keyframes", resolved.name,
+    )
+    frames = await asyncio.to_thread(_extract_keyframes, resolved)
     if not frames:
         return ToolResponse(
             content=[
@@ -442,7 +471,7 @@ async def view_video(video_path: str) -> ToolResponse:
     content = [
         TextBlock(
             type="text",
-            text=f"Video: {resolved.name} ({len(frames)} keyframes extracted, path: {resolved})",
+            text=f"Video: {resolved.name} ({len(frames)} keyframes extracted)",
         ),
     ]
     for frame_path, timestamp in frames:
@@ -454,4 +483,6 @@ async def view_video(video_path: str) -> ToolResponse:
             type="text",
             text=f"Frame at {timestamp}",
         ))
+    if _get_media_config()["enabled"]:
+        _cleanup_frame_files(frames)
     return ToolResponse(content=content)

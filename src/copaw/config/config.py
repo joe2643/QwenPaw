@@ -482,8 +482,8 @@ class MediaServerConfig(BaseModel):
         description="Public tunnel domain for external access (e.g. https://media.example.com)",
     )
     media_secret: str = Field(
-        default="copaw-media-2026",
-        description="Secret key for signing media URLs",
+        default="",
+        description="Secret key for signing media URLs (auto-generated if empty)",
     )
     allowed_dirs: List[str] = Field(
         default_factory=lambda: ["/tmp"],

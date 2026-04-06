@@ -87,7 +87,7 @@ class MediaServer:
             if not server._verify(raw_path, exp, sig):
                 raise HTTPException(403, "Invalid or expired signature")
             resolved = Path(raw_path).resolve()
-            if not any(str(resolved).startswith(d) for d in server.allowed_dirs):
+            if not any(resolved.is_relative_to(Path(d).resolve()) for d in server.allowed_dirs):
                 raise HTTPException(403, "Path not in allowed directories")
             if not resolved.is_file():
                 raise HTTPException(404, "File not found")
@@ -106,7 +106,7 @@ class MediaServer:
 
     def _sign(self, file_path: str, expires: int) -> str:
         msg = f"{file_path}:{expires}"
-        return hmac.new(self.secret.encode(), msg.encode(), hashlib.sha256).hexdigest()[:16]
+        return hmac.new(self.secret.encode(), msg.encode(), hashlib.sha256).hexdigest()[:32]
 
     def _verify(self, file_path: str, expires: int, sig: str) -> bool:
         if time.time() > expires:
@@ -118,8 +118,9 @@ class MediaServer:
             logger.warning("media-server: fastapi/uvicorn not installed, skipping")
             return
         if not self.secret:
-            logger.warning("media-server: no secret configured, skipping")
-            return
+            import secrets as _secrets
+            self.secret = _secrets.token_hex(32)
+            logger.warning("media-server: no secret configured, generated random secret")
         self._app = self._create_app()
         config = uvicorn.Config(
             self._app, host=self.host, port=self.port,

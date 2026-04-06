@@ -95,7 +95,7 @@ class TestCompactMediaBlocks:
         assert result == 1
         assert not _has_media_block(msgs[1])
         texts = _get_placeholder_texts(msgs[1])
-        assert any("/tmp/big_video.mp4" in t for t in texts)
+        assert any("big_video.mp4" in t for t in texts)
         assert any("removed from context" in t for t in texts)
 
     def test_image_compacted_in_old_messages(self):
@@ -108,7 +108,7 @@ class TestCompactMediaBlocks:
         assert result == 1
         assert not _has_media_block(msgs[0])
         texts = _get_placeholder_texts(msgs[0])
-        assert any("/tmp/screenshot.png" in t for t in texts)
+        assert any("screenshot.png" in t for t in texts)
 
     def test_recent_media_preserved(self):
         msgs = [
@@ -138,7 +138,7 @@ class TestCompactMediaBlocks:
         texts = _get_placeholder_texts(msgs[0])
         assert any("here is the analysis" in t for t in texts)
         assert any("some follow-up text" in t for t in texts)
-        assert any("/tmp/vid.mp4" in t for t in texts)
+        assert any("vid.mp4" in t for t in texts)
 
     def test_multiple_media_blocks_compacted(self):
         msgs = [
@@ -151,12 +151,14 @@ class TestCompactMediaBlocks:
         assert result == 3
         assert _count_media_blocks(msgs) == 0
 
-    def test_placeholder_contains_full_path(self):
+    def test_placeholder_contains_basename(self):
         long_path = "/home/joe/.copaw/workspaces/default/media/downloads/very_long_video_name.mp4"
         msgs = [_make_video_msg("a", long_path), _make_text_msg("user", "recent")]
         MemoryCompactionHook._compact_media_blocks(msgs, recent_n=1)
         texts = _get_placeholder_texts(msgs[0])
-        assert any(long_path in t for t in texts)
+        assert any("very_long_video_name.mp4" in t for t in texts)
+        # Full path should NOT be in placeholder (privacy fix)
+        assert not any(long_path in t for t in texts)
 
     def test_dict_style_video_block(self):
         msg = Msg(

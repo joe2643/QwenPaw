@@ -6,6 +6,7 @@ when the context window approaches its limit, preserving recent messages
 and the system prompt.
 """
 import logging
+import os
 from typing import TYPE_CHECKING, Any
 
 from agentscope.agent import ReActAgent
@@ -95,9 +96,10 @@ class MemoryCompactionHook:
                     source = block.get("source", {})
                     url = source.get("url", "unknown") if isinstance(source, dict) else "unknown"
                     fpath = str(url) if url != "unknown" else "unknown"
+                    fname = os.path.basename(fpath) if fpath != "unknown" else "unknown"
                     placeholder = TextBlock(
                         type="text",
-                        text=f"[{media_type} was viewed: {fpath} — removed from context to save tokens]",
+                        text=f"[{media_type} was viewed: {fname} — removed from context to save tokens]",
                     )
                     new_content.append(placeholder)
                     replaced += 1
