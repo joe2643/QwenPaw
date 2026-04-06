@@ -78,22 +78,38 @@ def _validate_media_path(
 
 
 
-_MAX_MEDIA_SIZE = 30 * 1024 * 1024  # 30MB — base64 expands ~33%, keep under API limits
+# Media server config — override via agent config or env vars
+_MEDIA_SERVER_URL = os.environ.get("COPAW_MEDIA_SERVER", "http://localhost:8089")
+_MEDIA_TUNNEL_DOMAIN = os.environ.get("COPAW_MEDIA_DOMAIN", "https://media.joe2643.work")
+_MAX_MEDIA_SIZE = 100 * 1024 * 1024  # 100MB (media server limit)
 
 
-def _local_to_base64_source(resolved: Path, mime_prefix: str) -> dict:
-    """Convert a local file path to a base64 source dict.
+def _get_signed_url(resolved: Path) -> str:
+    """Get a signed public URL for a local media file via the media server.
 
-    Many LLM APIs reject file:// URLs. Base64 encoding the file
-    content ensures the media is inline and always accessible.
-    Raises ValueError if file exceeds _MAX_MEDIA_SIZE.
+    Falls back to base64 if media server is unavailable.
     """
+    import urllib.request
+    import json as _json
+
     size = resolved.stat().st_size
     if size > _MAX_MEDIA_SIZE:
         raise ValueError(
             f"{resolved.name} is {size / 1e6:.1f}MB, exceeds {_MAX_MEDIA_SIZE / 1e6:.0f}MB limit. "
             f"Compress first: ffmpeg -i {resolved} -vf scale=-2:480 -b:v 1M small.mp4"
         )
+    try:
+        url = f"{_MEDIA_SERVER_URL}/sign?path={resolved}&ttl=3600"
+        resp = urllib.request.urlopen(url, timeout=5)
+        data = _json.loads(resp.read())
+        return data["url"]
+    except Exception:
+        # Fallback to base64 if media server is down
+        return None
+
+
+def _local_to_base64_source(resolved: Path, mime_prefix: str) -> dict:
+    """Fallback: convert local file to base64 source dict."""
     data = resolved.read_bytes()
     b64 = base64.b64encode(data).decode("ascii")
     mime, _ = mimetypes.guess_type(str(resolved))
@@ -101,6 +117,14 @@ def _local_to_base64_source(resolved: Path, mime_prefix: str) -> dict:
         ext = resolved.suffix.lower()
         mime = f"{mime_prefix}/{ext.lstrip('.')}"
     return {"type": "base64", "media_type": mime, "data": b64}
+
+
+def _resolve_media_source(resolved: Path, mime_prefix: str) -> dict:
+    """Get media source — prefer signed URL, fallback to base64."""
+    signed_url = _get_signed_url(resolved)
+    if signed_url:
+        return {"type": "url", "url": signed_url}
+    return _local_to_base64_source(resolved, mime_prefix)
 
 
 async def view_image(image_path: str) -> ToolResponse:
@@ -129,7 +153,7 @@ async def view_image(image_path: str) -> ToolResponse:
         content=[
             ImageBlock(
                 type="image",
-                source=_local_to_base64_source(resolved, "image"),
+                source=_resolve_media_source(resolved, "image"),
             ),
             TextBlock(
                 type="text",
@@ -165,7 +189,7 @@ async def view_video(video_path: str) -> ToolResponse:
         content=[
             VideoBlock(
                 type="video",
-                source=_local_to_base64_source(resolved, "video"),
+                source=_resolve_media_source(resolved, "video"),
             ),
             TextBlock(
                 type="text",
