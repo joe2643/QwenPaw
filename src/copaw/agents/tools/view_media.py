@@ -169,7 +169,8 @@ async def _get_signed_url(resolved: Path) -> str:
     try:
         import asyncio
         from urllib.parse import quote as _quote
-        url = f"{media_cfg['server_url']}/sign?path={_quote(str(resolved), safe="")}&ttl=86400"
+        auth_token = _quote(media_cfg['media_secret'], safe="")
+        url = f"{media_cfg['server_url']}/sign?path={_quote(str(resolved), safe="")}&ttl=86400&auth={auth_token}"
         # MUST use to_thread — media server runs on the same event loop,
         # so blocking urllib would deadlock.
         def _fetch():
@@ -177,6 +178,14 @@ async def _get_signed_url(resolved: Path) -> str:
         raw = await asyncio.to_thread(_fetch)
         data = _json.loads(raw)
         signed = data["url"]
+        # Don't return localhost URLs for remote providers (Finding 2)
+        if "localhost" in signed or "127.0.0.1" in signed:
+            if not media_cfg.get("tunnel_domain"):
+                import logging
+                logging.getLogger(__name__).warning(
+                    "view_media: media server returned localhost URL but no tunnel_domain configured — falling back"
+                )
+                return None
         # If tunnel domain is set, rewrite URL to use public domain
         if media_cfg["tunnel_domain"]:
             from urllib.parse import urlparse, urlunparse

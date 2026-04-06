@@ -10,6 +10,7 @@ import hmac
 import logging
 import mimetypes
 import os
+import secrets
 import time
 from pathlib import Path
 from typing import Optional
@@ -45,6 +46,7 @@ class MediaServer:
         self.tunnel_domain = tunnel_domain
         self._server_task: Optional[asyncio.Task] = None
         self._app: Optional[FastAPI] = None
+        self._token_store: dict[str, tuple[str, int]] = {}  # token -> (raw_path, expires)
 
     def _create_app(self) -> "FastAPI":
         app = FastAPI(title="CoPaw Media", docs_url=None, redoc_url=None)
@@ -58,16 +60,37 @@ class MediaServer:
         async def sign_url(
             path: str = Query(...),
             ttl: int = Query(3600),
+            auth: str = Query(""),
         ):
+            # Auth check — only copaw process should call /sign
+            if not hmac.compare_digest(auth, server.secret):
+                raise HTTPException(403, "Unauthorized")
             resolved = Path(path).resolve()
             if not resolved.is_file():
                 raise HTTPException(404, "File not found")
+            # Same validation as /media: allowed_dirs, extension, size
+            if not any(resolved.is_relative_to(Path(d).resolve()) for d in server.allowed_dirs):
+                raise HTTPException(403, "Path not in allowed directories")
+            media_exts = {
+                ".mp4", ".webm", ".mov", ".avi", ".mkv", ".mpeg",
+                ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
+                ".mp3", ".wav", ".ogg", ".flac", ".m4a",
+            }
+            if resolved.suffix.lower() not in media_exts:
+                raise HTTPException(400, f"Extension {resolved.suffix} not allowed")
+            if resolved.stat().st_size > server.max_size:
+                raise HTTPException(413, "File too large")
+            # Cap TTL at 24h
+            ttl = min(ttl, 86400)
             expires = int(time.time()) + ttl
             raw_path = str(resolved)
             sig = server._sign(raw_path, expires)
             domain = server.tunnel_domain.rstrip("/") if server.tunnel_domain else f"http://{server.host}:{server.port}"
-            import base64 as _b64
-            token = _b64.urlsafe_b64encode(raw_path.encode()).decode()
+            # Opaque token instead of base64-encoded path (Finding 3)
+            token = secrets.token_urlsafe(24)
+            server._token_store[token] = (raw_path, expires)
+            # Periodic cleanup of expired tokens
+            server._cleanup_expired_tokens()
             return {
                 "url": f"{domain}/media?t={token}&exp={expires}&sig={sig}",
                 "expires": expires,
@@ -75,15 +98,14 @@ class MediaServer:
 
         @app.get("/media")
         async def serve_media(
-            t: str = Query(..., description="Base64url-encoded file path"),
+            t: str = Query(..., description="Opaque token for file path"),
             exp: int = Query(...),
             sig: str = Query(...),
         ):
-            import base64 as _b64
-            try:
-                raw_path = _b64.urlsafe_b64decode(t.encode()).decode()
-            except Exception:
-                raise HTTPException(400, "Invalid path token")
+            entry = server._token_store.get(t)
+            if not entry:
+                raise HTTPException(403, "Invalid token")
+            raw_path, stored_exp = entry
             if not server._verify(raw_path, exp, sig):
                 raise HTTPException(403, "Invalid or expired signature")
             resolved = Path(raw_path).resolve()
@@ -103,6 +125,13 @@ class MediaServer:
             return FileResponse(str(resolved), filename=resolved.name)
 
         return app
+
+    def _cleanup_expired_tokens(self) -> None:
+        """Remove expired entries from the token store to prevent memory leak."""
+        now = int(time.time())
+        expired = [k for k, (_, exp) in self._token_store.items() if now > exp]
+        for k in expired:
+            del self._token_store[k]
 
     def _sign(self, file_path: str, expires: int) -> str:
         msg = f"{file_path}:{expires}"
