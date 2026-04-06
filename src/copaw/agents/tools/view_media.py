@@ -166,7 +166,8 @@ def _get_signed_url(resolved: Path) -> str:
         return None
 
     try:
-        url = f"{media_cfg['server_url']}/sign?path={resolved}&ttl=3600"
+        from urllib.parse import quote as _quote
+        url = f"{media_cfg['server_url']}/sign?path={_quote(str(resolved), safe="")}&ttl=3600"
         resp = urllib.request.urlopen(url, timeout=5)
         data = _json.loads(resp.read())
         signed = data["url"]

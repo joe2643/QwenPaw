@@ -63,22 +63,30 @@ class MediaServer:
             if not resolved.is_file():
                 raise HTTPException(404, "File not found")
             expires = int(time.time()) + ttl
-            sig = server._sign(str(resolved), expires)
+            raw_path = str(resolved)
+            sig = server._sign(raw_path, expires)
             domain = server.tunnel_domain.rstrip("/") if server.tunnel_domain else f"http://{server.host}:{server.port}"
+            import base64 as _b64
+            token = _b64.urlsafe_b64encode(raw_path.encode()).decode()
             return {
-                "url": f"{domain}/media?path={resolved}&exp={expires}&sig={sig}",
+                "url": f"{domain}/media?t={token}&exp={expires}&sig={sig}",
                 "expires": expires,
             }
 
         @app.get("/media")
         async def serve_media(
-            path: str = Query(...),
+            t: str = Query(..., description="Base64url-encoded file path"),
             exp: int = Query(...),
             sig: str = Query(...),
         ):
-            if not server._verify(path, exp, sig):
+            import base64 as _b64
+            try:
+                raw_path = _b64.urlsafe_b64decode(t.encode()).decode()
+            except Exception:
+                raise HTTPException(400, "Invalid path token")
+            if not server._verify(raw_path, exp, sig):
                 raise HTTPException(403, "Invalid or expired signature")
-            resolved = Path(path).resolve()
+            resolved = Path(raw_path).resolve()
             if not any(str(resolved).startswith(d) for d in server.allowed_dirs):
                 raise HTTPException(403, "Path not in allowed directories")
             if not resolved.is_file():
