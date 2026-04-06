@@ -78,10 +78,69 @@ def _validate_media_path(
 
 
 
-# Media server config — override via agent config or env vars
-_MEDIA_SERVER_URL = os.environ.get("COPAW_MEDIA_SERVER", "http://localhost:8089")
-_MEDIA_TUNNEL_DOMAIN = os.environ.get("COPAW_MEDIA_DOMAIN", "https://media.joe2643.work")
-_MAX_MEDIA_SIZE = 100 * 1024 * 1024  # 100MB (media server limit)
+# ---------------------------------------------------------------------------
+# Media-server configuration
+# Priority: agent running config > env vars > defaults
+# ---------------------------------------------------------------------------
+
+_DEFAULT_MEDIA_SERVER_URL = "http://localhost:8089"
+_DEFAULT_MEDIA_TUNNEL_DOMAIN = ""
+_DEFAULT_MEDIA_SECRET = "copaw-media-2026"
+_DEFAULT_MAX_SIZE_MB = 100
+_DEFAULT_MEDIA_ENABLED = False
+
+
+def _get_media_config() -> dict:
+    """Load media server config from agent running config, env vars, or defaults."""
+    cfg = {
+        "enabled": _DEFAULT_MEDIA_ENABLED,
+        "server_url": _DEFAULT_MEDIA_SERVER_URL,
+        "tunnel_domain": _DEFAULT_MEDIA_TUNNEL_DOMAIN,
+        "media_secret": _DEFAULT_MEDIA_SECRET,
+        "max_size_mb": _DEFAULT_MAX_SIZE_MB,
+    }
+
+    # Try loading from agent running config first
+    try:
+        from ...config.config import load_agent_config
+        from ...config.utils import load_config
+
+        root_config = load_config()
+        agent_id = root_config.agents.active_agent
+        agent_config = load_agent_config(agent_id)
+        if agent_config.running and agent_config.running.media_server:
+            ms = agent_config.running.media_server
+            cfg["enabled"] = ms.enabled
+            cfg["server_url"] = ms.server_url
+            cfg["tunnel_domain"] = ms.tunnel_domain
+            cfg["media_secret"] = ms.media_secret
+            cfg["max_size_mb"] = ms.max_size_mb
+            return cfg
+    except Exception:
+        pass
+
+    # Fall back to env vars
+    env_server = os.environ.get("COPAW_MEDIA_SERVER")
+    env_domain = os.environ.get("COPAW_MEDIA_DOMAIN")
+    env_secret = os.environ.get("COPAW_MEDIA_SECRET")
+    env_max_mb = os.environ.get("COPAW_MEDIA_MAX_SIZE_MB")
+    env_enabled = os.environ.get("COPAW_MEDIA_ENABLED")
+
+    if env_server:
+        cfg["server_url"] = env_server
+    if env_domain:
+        cfg["tunnel_domain"] = env_domain
+    if env_secret:
+        cfg["media_secret"] = env_secret
+    if env_max_mb:
+        try:
+            cfg["max_size_mb"] = int(env_max_mb)
+        except ValueError:
+            pass
+    if env_enabled is not None:
+        cfg["enabled"] = env_enabled.lower() in ("1", "true", "yes")
+
+    return cfg
 
 
 def _get_signed_url(resolved: Path) -> str:
@@ -92,17 +151,35 @@ def _get_signed_url(resolved: Path) -> str:
     import urllib.request
     import json as _json
 
+    media_cfg = _get_media_config()
+    max_size = media_cfg["max_size_mb"] * 1024 * 1024
+
     size = resolved.stat().st_size
-    if size > _MAX_MEDIA_SIZE:
+    if size > max_size:
         raise ValueError(
-            f"{resolved.name} is {size / 1e6:.1f}MB, exceeds {_MAX_MEDIA_SIZE / 1e6:.0f}MB limit. "
+            f"{resolved.name} is {size / 1e6:.1f}MB, exceeds "
+            f"{media_cfg['max_size_mb']}MB limit. "
             f"Compress first: ffmpeg -i {resolved} -vf scale=-2:480 -b:v 1M small.mp4"
         )
+
+    if not media_cfg["enabled"]:
+        return None
+
     try:
-        url = f"{_MEDIA_SERVER_URL}/sign?path={resolved}&ttl=3600"
+        url = f"{media_cfg['server_url']}/sign?path={resolved}&ttl=3600"
         resp = urllib.request.urlopen(url, timeout=5)
         data = _json.loads(resp.read())
-        return data["url"]
+        signed = data["url"]
+        # If tunnel domain is set, rewrite URL to use public domain
+        if media_cfg["tunnel_domain"]:
+            from urllib.parse import urlparse, urlunparse
+            parsed = urlparse(signed)
+            tunnel = urlparse(media_cfg["tunnel_domain"])
+            signed = urlunparse(parsed._replace(
+                scheme=tunnel.scheme or "https",
+                netloc=tunnel.netloc,
+            ))
+        return signed
     except Exception:
         # Fallback to base64 if media server is down
         return None

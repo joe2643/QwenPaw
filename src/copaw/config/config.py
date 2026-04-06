@@ -465,6 +465,37 @@ class MemorySummaryConfig(BaseModel):
     )
 
 
+
+class MediaServerConfig(BaseModel):
+    """Media server for view_video/view_image signed URL serving."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Whether to enable the media server for signed URL serving",
+    )
+    server_url: str = Field(
+        default="http://localhost:8089",
+        description="Local media server URL",
+    )
+    tunnel_domain: str = Field(
+        default="",
+        description="Public tunnel domain for external access (e.g. https://media.example.com)",
+    )
+    media_secret: str = Field(
+        default="copaw-media-2026",
+        description="Secret key for signing media URLs",
+    )
+    allowed_dirs: List[str] = Field(
+        default_factory=lambda: ["/tmp"],
+        description="Directories allowed for media serving",
+    )
+    max_size_mb: int = Field(
+        default=100,
+        ge=1,
+        description="Maximum file size in MB for media serving",
+    )
+
+
 class AgentsRunningConfig(BaseModel):
     """Agent runtime behavior configuration."""
 
@@ -600,6 +631,11 @@ class AgentsRunningConfig(BaseModel):
             "Memory manager backend type. "
             "Currently only 'remelight' is supported."
         ),
+    )
+
+    media_server: MediaServerConfig = Field(
+        default_factory=MediaServerConfig,
+        description="Media server configuration for signed URL serving",
     )
 
     @property

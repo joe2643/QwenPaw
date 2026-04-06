@@ -1058,7 +1058,19 @@
     "embeddingEnableHint": "Fill in both Base URL and Model Name to enable the embedding feature. API Key is optional.",
     "rebuildMemoryIndexOnStart": "Rebuild Memory Index on Start",
     "rebuildMemoryIndexOnStartTooltip": "Clear and rebuild the memory search index when the agent starts. Disable to skip re-indexing and only watch for new file changes (faster startup, but index may be out of sync).",
-    "toolResultCompactRecentGtOld": "Recent messages threshold must be greater than or equal to the older messages threshold"
+    "toolResultCompactRecentGtOld": "Recent messages threshold must be greater than or equal to the older messages threshold",
+    "mediaServerTitle": "Media Server",
+    "mediaServerEnabled": "Enable media server",
+    "mediaServerUrl": "Server URL",
+    "mediaServerUrlTooltip": "URL of the local media server that signs and serves files",
+    "mediaServerTunnelDomain": "Tunnel Domain (public URL)",
+    "mediaServerTunnelDomainTooltip": "Public domain that tunnels to the local media server for external LLM API access",
+    "mediaServerSecret": "Media Secret",
+    "mediaServerAllowedDirs": "Allowed Directories",
+    "mediaServerAllowedDirsTooltip": "Comma-separated list of directories the media server is allowed to serve files from",
+    "mediaServerMaxSize": "Max File Size (MB)",
+    "mediaServerMaxSizeMin": "Max file size must be at least 1 MB",
+    "mediaServerTooltip": "Serve local media files via signed URLs for LLM API access"
   },
   "tools": {
     "title": "Built-in Tools",

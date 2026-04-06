@@ -9,6 +9,7 @@ import {
   ToolResultCompactCard,
   MemorySummaryCard,
   EmbeddingConfigCard,
+  MediaServerCard,
 } from "./components";
 import { PageHeader } from "@/components/PageHeader";
 import styles from "./index.module.less";
@@ -82,6 +83,8 @@ function AgentConfigPage() {
             <MemorySummaryCard />
 
             <EmbeddingConfigCard />
+
+            <MediaServerCard />
           </Form>
         </div>
       </div>
