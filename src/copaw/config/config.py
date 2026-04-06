@@ -215,6 +215,7 @@ class WhatsAppConfig(BaseChannelConfig):
     ack_reaction_thinking: str = "🤔"
     ack_reaction_done: str = "👀"
     ack_reaction_error: str = "⚠️"
+    reply_to_trigger: bool = True
 
 
 class SignalConfig(BaseChannelConfig):
@@ -232,6 +233,7 @@ class SignalConfig(BaseChannelConfig):
     ack_reaction_thinking: str = "🤔"
     ack_reaction_done: str = "👀"
     ack_reaction_error: str = "⚠️"
+    reply_to_trigger: bool = True
 
 
 class ChannelConfig(BaseModel):

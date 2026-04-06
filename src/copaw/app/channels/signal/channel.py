@@ -526,6 +526,7 @@ class SignalChannel(BaseChannel):
         self._ack_reaction_error = ack_reaction_error or ""
         self._groups: List[str] = kwargs.get("groups") or []
         self._group_allow_from: List[str] = kwargs.get("group_allow_from") or []
+        self._reply_to_trigger: bool = kwargs.get("reply_to_trigger", True)
         self._account_uuid: str = kwargs.get("account_uuid") or ""
         self._media_dir = _MEDIA_DIR
         self._group_history: Dict[str, list] = {}  # group_id -> [{sender, body, ts}]
@@ -577,6 +578,7 @@ class SignalChannel(BaseChannel):
             groups=c.get("groups") or [],
             group_allow_from=c.get("group_allow_from") or [],
             account_uuid=c.get("account_uuid") or c.get("accountUuid") or "",
+            reply_to_trigger=c.get("reply_to_trigger", True),
         )
 
     # ── Lifecycle ─────────────────────────────────────────────────────
@@ -1244,9 +1246,14 @@ class SignalChannel(BaseChannel):
                     })
                 chunk_mentions = remapped or None
             if chunk.strip() or atts:
+                # Reply-to: quote the original inbound message on the first chunk
+                qt = meta.get("quote_timestamp", 0) if self._reply_to_trigger else 0
+                qa = meta.get("quote_author", "") if self._reply_to_trigger else ""
                 await self.daemon.send_message(
                     to_handle, chunk, is_group=is_group, attachments=atts,
                     mentions=chunk_mentions,
+                    quote_timestamp=qt if i == 0 else 0,
+                    quote_author=qa if i == 0 else "",
                 )
 
     async def send_media(
