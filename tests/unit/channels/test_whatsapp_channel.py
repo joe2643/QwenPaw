@@ -1194,3 +1194,125 @@ class TestReplyToTrigger:
 
         # Should not raise — error is caught
         await ch.send("test_chat", "hello", meta={"chat_jid": "test_chat"})
+# Append to test_whatsapp_channel.py
+
+
+# ---------------------------------------------------------------------------
+# Typing loop tests (SendChatPresence panic prevention)
+# ---------------------------------------------------------------------------
+
+class TestTypingLoop:
+    """Tests for _typing_loop — especially that cancelled typing does NOT
+    send presence type 2 (paused) which causes neonize Go panic."""
+
+    @pytest.mark.asyncio
+    async def test_typing_sends_composing_presence(self):
+        """While active, typing loop sends presence type 0 (composing)."""
+        ch = _make_channel()
+        mock_jid = MagicMock()
+        mock_jid.SerializeToString = MagicMock(return_value=b"\x00")
+
+        mock_inner = AsyncMock()
+        ch._client._NewAClient__client = MagicMock()
+        ch._client._NewAClient__client.SendChatPresence = mock_inner
+        ch._client.uuid = "test-uuid"
+
+        task = asyncio.create_task(ch._typing_loop(ch._client, mock_jid, interval=0.1))
+        await asyncio.sleep(0.25)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Should have called SendChatPresence with type 0 (composing)
+        assert mock_inner.await_count >= 2
+        for call in mock_inner.call_args_list:
+            args = call[0]
+            # 4th arg is presence type: 0=composing, 2=paused
+            assert args[3] == 0, f"Expected presence type 0 (composing), got {args[3]}"
+
+    @pytest.mark.asyncio
+    async def test_cancelled_typing_does_not_send_paused(self):
+        """CRITICAL: Cancelling typing loop must NOT send presence type 2.
+        
+        SendChatPresence(type=2) causes neonize Go panic:
+        'index out of range [2] with length 2' -> SIGABRT -> process crash.
+        """
+        ch = _make_channel()
+        mock_jid = MagicMock()
+        mock_jid.SerializeToString = MagicMock(return_value=b"\x00")
+
+        mock_inner = AsyncMock()
+        ch._client._NewAClient__client = MagicMock()
+        ch._client._NewAClient__client.SendChatPresence = mock_inner
+        ch._client.uuid = "test-uuid"
+
+        task = asyncio.create_task(ch._typing_loop(ch._client, mock_jid, interval=0.1))
+        await asyncio.sleep(0.15)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # MUST NOT have any call with presence type 2 (paused)
+        for call in mock_inner.call_args_list:
+            args = call[0]
+            assert args[3] != 2, (
+                "FATAL: SendChatPresence called with type=2 (paused). "
+                "This causes neonize Go panic -> SIGABRT -> process crash!"
+            )
+
+    @pytest.mark.asyncio
+    async def test_typing_loop_handles_send_error_gracefully(self):
+        """If SendChatPresence raises, loop continues (no crash)."""
+        ch = _make_channel()
+        mock_jid = MagicMock()
+        mock_jid.SerializeToString = MagicMock(return_value=b"\x00")
+
+        call_count = 0
+        async def flaky_send(*args):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise Exception("transient error")
+
+        ch._client._NewAClient__client = MagicMock()
+        ch._client._NewAClient__client.SendChatPresence = flaky_send
+        ch._client.uuid = "test-uuid"
+
+        task = asyncio.create_task(ch._typing_loop(ch._client, mock_jid, interval=0.1))
+        await asyncio.sleep(0.35)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Should have retried after error
+        assert call_count >= 2, f"Expected at least 2 calls (1 error + 1 success), got {call_count}"
+
+    @pytest.mark.asyncio
+    async def test_typing_loop_cancellation_is_clean(self):
+        """Cancelling typing loop should not raise or leave dangling tasks."""
+        ch = _make_channel()
+        mock_jid = MagicMock()
+        mock_jid.SerializeToString = MagicMock(return_value=b"\x00")
+
+        ch._client._NewAClient__client = MagicMock()
+        ch._client._NewAClient__client.SendChatPresence = AsyncMock()
+        ch._client.uuid = "test-uuid"
+
+        task = asyncio.create_task(ch._typing_loop(ch._client, mock_jid, interval=0.1))
+        await asyncio.sleep(0.15)
+        task.cancel()
+
+        # Should complete without raising
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert task.done()
+        assert not task.cancelled()  # CancelledError is caught internally
