@@ -213,7 +213,7 @@ def _resolve_media_source(resolved: Path, mime_prefix: str) -> dict:
     return None
 
 
-def _extract_keyframes(resolved: Path, max_frames: int = 6) -> list:
+def _extract_keyframes(resolved: Path, max_frames: int = 4) -> list:
     """Extract keyframes from video using ffmpeg.
     
     Returns list of (ImageBlock, TextBlock) pairs for each frame.
@@ -242,7 +242,7 @@ def _extract_keyframes(resolved: Path, max_frames: int = 6) -> list:
         out_path = Path(tmpdir) / f"frame_{i:02d}.jpg"
         cmd = [
             "ffmpeg", "-ss", f"{ts:.1f}", "-i", str(resolved),
-            "-vframes", "1", "-q:v", "3", "-y", str(out_path),
+            "-vframes", "1", "-vf", "scale=480:-1", "-q:v", "8", "-y", str(out_path),
         ]
         try:
             subprocess.run(cmd, capture_output=True, timeout=10)
@@ -357,7 +357,7 @@ async def view_video(video_path: str) -> ToolResponse:
             for frame_path, timestamp in frames:
                 content.append(ImageBlock(
                     type="image",
-                    source=_local_to_base64_source(frame_path, "image"),
+                    source=_resolve_media_source(frame_path, "image"),
                 ))
                 content.append(TextBlock(type="text", text=f"Frame at {timestamp}"))
             return ToolResponse(content=content)
@@ -387,7 +387,8 @@ async def view_video(video_path: str) -> ToolResponse:
                 ),
             ]
             for frame_path, timestamp in frames:
-                content.append(ImageBlock(type="image", source=_local_to_base64_source(frame_path, "image")))
+                frame_source = _resolve_media_source(frame_path, "image")
+                content.append(ImageBlock(type="image", source=frame_source))
                 content.append(TextBlock(type="text", text=f"Frame at {timestamp}"))
             return ToolResponse(content=content)
 
@@ -429,7 +430,7 @@ async def view_video(video_path: str) -> ToolResponse:
     for frame_path, timestamp in frames:
         content.append(ImageBlock(
             type="image",
-            source=_local_to_base64_source(frame_path, "image"),
+            source=_resolve_media_source(frame_path, "image"),
         ))
         content.append(TextBlock(
             type="text",
