@@ -256,13 +256,19 @@ def _extract_keyframes(resolved: Path, max_frames: int = 6) -> list:
 
 def _model_supports_video() -> bool:
     """Check if the active LLM model supports video input."""
+    import logging
+    _log = logging.getLogger(__name__)
     try:
         from ..prompt import _get_active_model_info
-        model_info, _ = _get_active_model_info()
+        model_info, model_name = _get_active_model_info()
         if model_info is None:
+            _log.warning("view_media: model_info is None, assuming no video support")
             return False
-        return bool(getattr(model_info, "supports_video", False))
-    except Exception:
+        result = bool(getattr(model_info, "supports_video", False))
+        _log.info("view_media: model=%s supports_video=%s", model_name, result)
+        return result
+    except Exception as e:
+        _log.warning("view_media: _model_supports_video failed: %s", e)
         return False
 
 
@@ -360,6 +366,29 @@ async def view_video(video_path: str) -> ToolResponse:
                 text=f"Error: Model does not support video and keyframe extraction failed for {resolved.name}.",
             ),
         ])
+
+    # Auto-downgrade large videos to keyframes even if model supports video.
+    # LLM API servers have buffer limits (~50MB) and will reject large files.
+    _VIDEO_SIZE_LIMIT = 20 * 1024 * 1024  # 20MB
+    if resolved.stat().st_size > _VIDEO_SIZE_LIMIT:
+        import logging
+        logging.getLogger(__name__).info(
+            "view_media: video %s is %.1fMB (>%dMB), auto-downgrading to keyframes",
+            resolved.name, resolved.stat().st_size / 1e6, _VIDEO_SIZE_LIMIT // (1024*1024),
+        )
+        frames = _extract_keyframes(resolved)
+        if frames:
+            content = [
+                TextBlock(
+                    type="text",
+                    text=f"Video: {resolved.name} — too large for direct API ({resolved.stat().st_size / 1e6:.1f}MB), "
+                    f"extracted {len(frames)} keyframes (path: {resolved})",
+                ),
+            ]
+            for frame_path, timestamp in frames:
+                content.append(ImageBlock(type="image", source=_local_to_base64_source(frame_path, "image")))
+                content.append(TextBlock(type="text", text=f"Frame at {timestamp}"))
+            return ToolResponse(content=content)
 
     source = _resolve_media_source(resolved, "video")
     if source is not None:
