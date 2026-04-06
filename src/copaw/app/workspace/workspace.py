@@ -184,7 +184,7 @@ class Workspace:
                 ),
                 start_method="start",
                 stop_method="close",
-                reusable=True,
+                reusable=False,
                 priority=20,
                 concurrent_init=True,
             ),
@@ -206,7 +206,7 @@ class Workspace:
                 name="chat_manager",
                 service_class=None,
                 post_init=create_chat_service,
-                reusable=True,
+                reusable=False,
                 priority=20,
                 concurrent_init=True,
             ),
@@ -235,7 +235,7 @@ class Workspace:
                 stop_method="stop_all",
                 priority=30,
                 concurrent_init=False,
-                reusable=True,
+                reusable=False,
             ),
         )
 

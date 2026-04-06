@@ -1255,6 +1255,10 @@ class WhatsAppChannel(BaseChannel):
                     self._typing_loop(typing_client, typing_jid)
                 )
 
+            _runner_health = getattr(self._process, "__self__", None)
+            if _runner_health:
+                _h = getattr(_runner_health, "_health", "unknown")
+                logger.warning("whatsapp: _process runner id=%s health=%s", id(_runner_health), _h)
             process_iterator = self._process(request)
             async for event in process_iterator:
                 if hasattr(event, "model_dump_json"):

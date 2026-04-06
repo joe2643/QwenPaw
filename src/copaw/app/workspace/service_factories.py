@@ -177,15 +177,31 @@ async def reload_channel_service(ws, cm) -> None:
     process callback on all channels to the new runner.
     """
     from ..channels.utils import make_process_from_runner
+    import logging
+    _logger = logging.getLogger(__name__)
 
     runner = ws._service_manager.services.get("runner")
     if not runner:
+        _logger.warning("channel_manager reload: no runner found, skipping")
         return
+
+    # Verify runner is healthy before swapping
+    health = getattr(runner, "_health", None)
+    _logger.info(
+        "channel_manager reload: runner id=%s health=%s",
+        id(runner), health,
+    )
+    if not health:
+        _logger.error("channel_manager reload: new runner is NOT healthy, skipping swap")
+        return
+
     new_process = make_process_from_runner(runner)
     for ch in cm.channels:
+        old_id = id(getattr(ch, "_process", None))
         ch._process = new_process
+        _logger.debug("channel_manager reload: %s _process %s -> %s", ch.channel, old_id, id(new_process))
     cm.set_workspace(ws)
-    import logging
-    logging.getLogger(__name__).info(
-        "channel_manager reload: updated %d channels to new runner", len(cm.channels)
+    _logger.info(
+        "channel_manager reload: updated %d channels to new runner (id=%s)",
+        len(cm.channels), id(runner),
     )
