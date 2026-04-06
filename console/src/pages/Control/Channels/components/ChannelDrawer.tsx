@@ -173,6 +173,13 @@ export function ChannelDrawer({
   const waPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // WhatsApp linked state
   const [waLinked, setWaLinked] = useState(false);
+  const stopWaPoll = useCallback(() => {
+    if (waPollRef.current) {
+      clearInterval(waPollRef.current);
+      waPollRef.current = null;
+    }
+  }, []);
+
   useEffect(() => {
     if (activeKey === "whatsapp") {
       api.getWhatsappStatus().then((s) => setWaLinked(s.linked)).catch(() => {});
@@ -182,13 +189,6 @@ export function ChannelDrawer({
     };
   }, [activeKey, stopWaPoll]);
 
-
-  const stopWaPoll = useCallback(() => {
-    if (waPollRef.current) {
-      clearInterval(waPollRef.current);
-      waPollRef.current = null;
-    }
-  }, []);
 
   const handleWhatsappPair = useCallback(async () => {
     stopWaPoll();
