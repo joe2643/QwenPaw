@@ -917,12 +917,43 @@ async def get_media_server_config() -> dict:
     summary="Update global media server config",
 )
 async def put_media_server_config(
+    request: Request,
     body: MediaServerConfig = Body(...),
 ) -> dict:
     """Update global media server config and save to config.json."""
     config = load_config()
     config.media_server = body
     save_config(config)
+
+    # Reconcile live MediaServer instance
+    ms = getattr(request.app.state, "media_server", None)
+    body_dict = body.model_dump()
+    parsed_port = body_dict.get("port", 8089)
+
+    if body.enabled and ms is None:
+        # Start new server
+        from ..media_server import MediaServer
+
+        server = MediaServer(
+            port=parsed_port,
+            secret=body_dict.get("media_secret", ""),
+            allowed_dirs=body_dict.get("allowed_dirs", []),
+            max_size=body_dict.get("max_size_mb", 100) * 1024 * 1024,
+            tunnel_domain=body_dict.get("tunnel_domain", ""),
+        )
+        await server.start()
+        request.app.state.media_server = server
+    elif not body.enabled and ms is not None:
+        # Stop running server
+        await ms.stop()
+        request.app.state.media_server = None
+    elif ms is not None:
+        # Update running server config in-place
+        ms.secret = body_dict.get("media_secret") or ms.secret
+        ms.allowed_dirs = body_dict.get("allowed_dirs", ms.allowed_dirs)
+        ms.max_size = body_dict.get("max_size_mb", 100) * 1024 * 1024
+        ms.tunnel_domain = body_dict.get("tunnel_domain", "")
+
     return body.model_dump()
 
 
@@ -932,18 +963,6 @@ async def put_media_server_config(
 )
 async def get_media_server_status(request: Request) -> dict:
     """Check if the global media server is running and healthy."""
-    import urllib.request
-    import json as _json
-
-    config = load_config()
-    ms_cfg = config.media_server
-    if not ms_cfg.enabled:
-        return {"running": False, "reason": "disabled"}
-
-    server_url = ms_cfg.server_url or "http://localhost:8089"
-    try:
-        raw = urllib.request.urlopen(f"{server_url}/health", timeout=3).read()
-        data = _json.loads(raw)
-        return {"running": True, "health": data}
-    except Exception as e:
-        return {"running": False, "reason": str(e)}
+    ms = getattr(request.app.state, "media_server", None)
+    running = ms is not None and ms._server_task and not ms._server_task.done()
+    return {"running": running, "port": ms.port if ms else None}

@@ -975,7 +975,7 @@ class WhatsAppChannel(BaseChannel):
         """Attempt to reconnect the WhatsApp neonize client after disconnect.
 
         Uses a lock to prevent concurrent reconnect attempts. Retries with
-        exponential backoff up to 5 times.
+        exponential backoff indefinitely (capped at 5 minutes).
         """
         if self._reconnect_lock is None:
             self._reconnect_lock = asyncio.Lock()
@@ -986,8 +986,10 @@ class WhatsAppChannel(BaseChannel):
 
         async with self._reconnect_lock:
             backoff = 10
-            for attempt in range(1, 6):
-                logger.info("whatsapp: reconnect attempt %d/5...", attempt)
+            attempt = 0
+            while True:  # infinite retry
+                attempt += 1
+                logger.info("whatsapp: reconnect attempt %d...", attempt)
                 try:
                     # Stop old connection if still lingering
                     if self._connect_task and not self._connect_task.done():
@@ -1002,15 +1004,17 @@ class WhatsAppChannel(BaseChannel):
                     # Wait for ConnectedEv to set self._connected
                     await asyncio.sleep(5)
                     if self._connected:
-                        logger.info("whatsapp: reconnected successfully on attempt %d", attempt)
+                        logger.info("whatsapp: reconnected on attempt %d", attempt)
                         return
                 except Exception as e:
                     logger.error("whatsapp: reconnect attempt %d failed: %s", attempt, e)
 
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 120)
+                backoff = min(backoff * 2, 300)  # cap at 5 minutes
 
-            logger.error("whatsapp: all 5 reconnect attempts failed — channel dead until restart")
+                # Log periodic status
+                if attempt % 10 == 0:
+                    logger.warning("whatsapp: still trying to reconnect (attempt %d, backoff=%ds)", attempt, backoff)
 
     async def send(
         self,
