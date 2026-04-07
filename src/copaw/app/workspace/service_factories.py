@@ -206,6 +206,30 @@ async def reload_channel_service(ws, cm) -> None:
         len(cm.channels), id(runner),
     )
 
+class _MediaServerHandle:
+    """Per-workspace handle to the shared MediaServer singleton.
+
+    The service manager calls ``stop()`` on each workspace's service
+    reference.  This thin proxy translates that into
+    ``server.stop(agent_id=...)`` so the singleton can revoke access
+    for the stopping agent and only shut down the HTTP server when the
+    last reference is released.
+    """
+
+    def __init__(self, server, agent_id: str):
+        self._server = server
+        self._agent_id = agent_id
+
+    async def start(self):
+        await self._server.start()
+
+    async def stop(self):
+        await self._server.stop(agent_id=self._agent_id)
+
+    def __getattr__(self, name):
+        return getattr(self._server, name)
+
+
 async def create_media_server(ws, _):
     """Create embedded media server if enabled in config."""
     config = ws._config
@@ -225,7 +249,7 @@ async def create_media_server(ws, _):
     port = parsed.port or 8089
     host = parsed.hostname or "127.0.0.1"
 
-    return MediaServer.get_or_create(
+    server = MediaServer.get_or_create(
         agent_id=ws.agent_id,
         host=host,
         port=port,
@@ -234,3 +258,4 @@ async def create_media_server(ws, _):
         max_size_mb=ms_cfg.max_size_mb,
         tunnel_domain=ms_cfg.tunnel_domain,
     )
+    return _MediaServerHandle(server, ws.agent_id)

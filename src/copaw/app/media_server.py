@@ -42,16 +42,31 @@ class MediaServer:
 
         Registers per-agent allowed_dirs and secrets. Uses reference
         counting so the server stays alive until the last workspace stops.
+
+        IMPORTANT: Each agent gets a unique secret. If the caller provides
+        a blank secret, we generate one so that ``/sign`` auth can
+        deterministically map (secret -> agent_id).  This prevents two
+        blank-secret agents from collapsing into the same identity.
         """
         agent_id = kwargs.get("agent_id", "default")
+        agent_secret = kwargs.get("secret", "")
+
         if cls._instance is not None:
-            # Register this agent's dirs (scoped, not merged)
+            # Generate unique secret if blank — prevents per-agent isolation collapse
+            if not agent_secret:
+                agent_secret = secrets.token_hex(32)
             cls._instance._agent_dirs[agent_id] = kwargs.get("allowed_dirs", ["/tmp"])
-            _runtime_secrets[agent_id] = kwargs.get("secret", "") or cls._instance.secret
+            _runtime_secrets[agent_id] = agent_secret
             cls._instance._ref_count += 1
             return cls._instance
+
+        # First agent — create instance
+        if not agent_secret:
+            agent_secret = secrets.token_hex(32)
         instance = cls(**kwargs)
+        instance.secret = agent_secret  # override so _sign uses this agent's secret
         instance._agent_dirs[agent_id] = kwargs.get("allowed_dirs", ["/tmp"])
+        _runtime_secrets[agent_id] = agent_secret
         instance._ref_count = 1
         cls._instance = instance
         return instance
@@ -215,7 +230,33 @@ class MediaServer:
         self._server_task = asyncio.create_task(server.serve(), name="media-server")
         logger.info("media-server: started on %s:%s", self.host, self.port)
 
-    async def stop(self):
+    async def stop(self, agent_id: str = ""):
+        """Stop or unregister an agent from the media server.
+
+        If *agent_id* is given, revokes that agent's access (dirs,
+        secret, tokens) and decrements the reference count.  When the
+        last reference is released the underlying HTTP server is shut
+        down.
+
+        If *agent_id* is empty (legacy call-site), we simply decrement
+        and shut down when the count reaches zero.
+        """
+        if agent_id:
+            # Revoke this agent's access
+            self._agent_dirs.pop(agent_id, None)
+            _runtime_secrets.pop(agent_id, None)
+            # Purge tokens signed by this agent
+            to_remove = [
+                t for t, entry in self._token_store.items()
+                if len(entry) >= 3 and entry[2] == agent_id
+            ]
+            for t in to_remove:
+                del self._token_store[t]
+            logger.info(
+                "media-server: agent %s unregistered, ref_count=%d -> %d",
+                agent_id, self._ref_count, self._ref_count - 1,
+            )
+
         self._ref_count -= 1
         if self._ref_count > 0:
             logger.info("media-server: ref_count=%d, keeping alive", self._ref_count)
@@ -228,4 +269,5 @@ class MediaServer:
             except (asyncio.CancelledError, Exception):
                 pass
         MediaServer._instance = None
+        _runtime_secrets.clear()
         logger.info("media-server: stopped (last reference released)")

@@ -141,7 +141,9 @@ def _get_media_config() -> dict:
     if env_enabled is not None:
         cfg["enabled"] = env_enabled.lower() in ("1", "true", "yes")
 
-    # If media_secret is still empty, check runtime secrets from MediaServer
+    # If media_secret is still empty, check runtime secrets from MediaServer.
+    # Use ONLY this agent's secret — never fall back to another agent's
+    # secret, which would break per-agent isolation.
     if not cfg["media_secret"]:
         try:
             from ...app.media_server import _runtime_secrets
@@ -149,9 +151,6 @@ def _get_media_config() -> dict:
             _aid = _get_aid()
             if _aid in _runtime_secrets:
                 cfg["media_secret"] = _runtime_secrets[_aid]
-            elif _runtime_secrets:
-                # Fallback: use any available secret (shared server)
-                cfg["media_secret"] = next(iter(_runtime_secrets.values()))
         except ImportError:
             pass
 

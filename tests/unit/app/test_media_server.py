@@ -323,3 +323,137 @@ class TestRefCountedStop:
         assert srv._ref_count == 1
         await srv.stop()
         assert MediaServer._instance is None
+
+
+# ---------------------------------------------------------------------------
+# Finding 1 fix: blank secrets get unique per-agent values
+# ---------------------------------------------------------------------------
+
+class TestUniqueSecretGeneration:
+
+    def test_blank_secrets_are_unique(self, tmp_path):
+        """Two agents with blank secrets must get DIFFERENT generated secrets."""
+        MediaServer._instance = None
+        srv = MediaServer.get_or_create(
+            port=0, secret="", allowed_dirs=["/tmp"], agent_id="agent-x",
+        )
+        MediaServer.get_or_create(
+            port=0, secret="", allowed_dirs=["/tmp"], agent_id="agent-y",
+        )
+
+        from copaw.app.media_server import _runtime_secrets
+        assert "agent-x" in _runtime_secrets
+        assert "agent-y" in _runtime_secrets
+        # Secrets must differ
+        assert _runtime_secrets["agent-x"] != _runtime_secrets["agent-y"]
+        # Each secret must be non-empty
+        assert len(_runtime_secrets["agent-x"]) > 0
+        assert len(_runtime_secrets["agent-y"]) > 0
+        MediaServer._instance = None
+        _runtime_secrets.clear()
+
+    def test_explicit_secret_preserved(self, tmp_path):
+        """When caller provides a non-blank secret, it must be used as-is."""
+        MediaServer._instance = None
+        from copaw.app.media_server import _runtime_secrets
+        _runtime_secrets.clear()
+
+        srv = MediaServer.get_or_create(
+            port=0, secret="my-explicit-secret", allowed_dirs=["/tmp"],
+            agent_id="agent-e",
+        )
+        assert _runtime_secrets["agent-e"] == "my-explicit-secret"
+        MediaServer._instance = None
+        _runtime_secrets.clear()
+
+    def test_first_agent_blank_secret_overrides_instance(self, tmp_path):
+        """First agent with blank secret: instance.secret must be the generated one."""
+        MediaServer._instance = None
+        from copaw.app.media_server import _runtime_secrets
+        _runtime_secrets.clear()
+
+        srv = MediaServer.get_or_create(
+            port=0, secret="", allowed_dirs=["/tmp"], agent_id="first",
+        )
+        # The generated secret should be in _runtime_secrets
+        generated = _runtime_secrets["first"]
+        assert len(generated) == 64  # token_hex(32) -> 64 hex chars
+        # instance.secret should be the same generated secret
+        assert srv.secret == generated
+        MediaServer._instance = None
+        _runtime_secrets.clear()
+
+
+# ---------------------------------------------------------------------------
+# Finding 2 fix: stop(agent_id) revokes access
+# ---------------------------------------------------------------------------
+
+class TestStopRevokesAccess:
+
+    @pytest.mark.asyncio
+    async def test_stop_with_agent_id_removes_dirs_and_secrets(self, tmp_path):
+        """stop(agent_id=X) must remove X's dirs, secret, and tokens."""
+        MediaServer._instance = None
+        from copaw.app.media_server import _runtime_secrets
+        _runtime_secrets.clear()
+
+        srv = MediaServer.get_or_create(
+            port=0, secret="s1", allowed_dirs=["/tmp/a"], agent_id="a1",
+        )
+        MediaServer.get_or_create(
+            port=0, secret="s2", allowed_dirs=["/tmp/b"], agent_id="a2",
+        )
+        # Plant a token for agent a1
+        srv._token_store["tok-a1"] = ("/tmp/a/file.mp4", 9999999999, "a1")
+        srv._token_store["tok-a2"] = ("/tmp/b/file.mp4", 9999999999, "a2")
+
+        assert srv._ref_count == 2
+        await srv.stop(agent_id="a1")
+
+        # a1's data must be gone
+        assert "a1" not in srv._agent_dirs
+        assert "a1" not in _runtime_secrets
+        assert "tok-a1" not in srv._token_store
+        # a2's data must survive
+        assert "a2" in srv._agent_dirs
+        assert "a2" in _runtime_secrets
+        assert "tok-a2" in srv._token_store
+        assert srv._ref_count == 1
+        # Singleton still alive
+        assert MediaServer._instance is not None
+
+        await srv.stop(agent_id="a2")
+        assert srv._ref_count == 0
+        assert MediaServer._instance is None
+        _runtime_secrets.clear()
+
+    @pytest.mark.asyncio
+    async def test_stop_without_agent_id_still_works(self, tmp_path):
+        """Legacy stop() without agent_id must still decrement and shut down."""
+        MediaServer._instance = None
+        from copaw.app.media_server import _runtime_secrets
+        _runtime_secrets.clear()
+
+        srv = MediaServer.get_or_create(
+            port=0, secret="s", allowed_dirs=["/tmp"], agent_id="only",
+        )
+        assert srv._ref_count == 1
+        await srv.stop()
+        assert srv._ref_count == 0
+        assert MediaServer._instance is None
+        _runtime_secrets.clear()
+
+    @pytest.mark.asyncio
+    async def test_stop_clears_runtime_secrets_on_last_ref(self, tmp_path):
+        """When the last reference is released, _runtime_secrets must be cleared."""
+        MediaServer._instance = None
+        from copaw.app.media_server import _runtime_secrets
+        _runtime_secrets.clear()
+
+        srv = MediaServer.get_or_create(
+            port=0, secret="sec", allowed_dirs=["/tmp"], agent_id="last",
+        )
+        _runtime_secrets["leftover"] = "should-be-cleared"
+        await srv.stop(agent_id="last")
+        assert len(_runtime_secrets) == 0
+        MediaServer._instance = None
