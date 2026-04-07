@@ -40,19 +40,19 @@ class MediaServer:
     def get_or_create(cls, **kwargs) -> "MediaServer":
         """Return existing singleton or create a new instance.
 
-        Merges allowed_dirs and registers agent secrets for new agents
-        joining a shared server.
+        Registers per-agent allowed_dirs and secrets. Uses reference
+        counting so the server stays alive until the last workspace stops.
         """
+        agent_id = kwargs.get("agent_id", "default")
         if cls._instance is not None:
-            # Merge allowed_dirs from new agent
-            for d in kwargs.get("allowed_dirs", []):
-                if d not in cls._instance.allowed_dirs:
-                    cls._instance.allowed_dirs.append(d)
-            # Register agent secret
-            agent_id = kwargs.get("agent_id", "default")
+            # Register this agent's dirs (scoped, not merged)
+            cls._instance._agent_dirs[agent_id] = kwargs.get("allowed_dirs", ["/tmp"])
             _runtime_secrets[agent_id] = kwargs.get("secret", "") or cls._instance.secret
+            cls._instance._ref_count += 1
             return cls._instance
         instance = cls(**kwargs)
+        instance._agent_dirs[agent_id] = kwargs.get("allowed_dirs", ["/tmp"])
+        instance._ref_count = 1
         cls._instance = instance
         return instance
 
@@ -75,7 +75,9 @@ class MediaServer:
         self.tunnel_domain = tunnel_domain
         self._server_task: Optional[asyncio.Task] = None
         self._app: Optional[FastAPI] = None
-        self._token_store: dict[str, tuple[str, int]] = {}  # token -> (raw_path, expires)
+        self._agent_dirs: dict[str, list[str]] = {}  # agent_id -> allowed_dirs
+        self._ref_count = 0  # number of workspaces using this server
+        self._token_store: dict[str, tuple[str, int, str]] = {}  # token -> (raw_path, expires, agent_id)
 
     def _create_app(self) -> "FastAPI":
         app = FastAPI(title="CoPaw Media", docs_url=None, redoc_url=None)
@@ -91,15 +93,23 @@ class MediaServer:
             ttl: int = Query(3600),
             auth: str = Query(""),
         ):
-            # Auth check — only copaw process should call /sign
-            if not hmac.compare_digest(auth, server.secret):
+            # Resolve which agent this secret belongs to
+            caller_agent = None
+            for aid, sec in _runtime_secrets.items():
+                if sec and hmac.compare_digest(auth, sec):
+                    caller_agent = aid
+                    break
+            if caller_agent is None and hmac.compare_digest(auth, server.secret):
+                caller_agent = server.agent_id
+            if caller_agent is None:
                 raise HTTPException(403, "Unauthorized")
             resolved = Path(path).resolve()
             if not resolved.is_file():
                 raise HTTPException(404, "File not found")
-            # Same validation as /media: allowed_dirs, extension, size
-            if not any(resolved.is_relative_to(Path(d).resolve()) for d in server.allowed_dirs):
-                raise HTTPException(403, "Path not in allowed directories")
+            # Check THIS agent's allowed_dirs only
+            agent_dirs = server._agent_dirs.get(caller_agent, [])
+            if not any(resolved.is_relative_to(Path(d).resolve()) for d in agent_dirs):
+                raise HTTPException(403, "Path not in allowed directories for this agent")
             media_exts = {
                 ".mp4", ".webm", ".mov", ".avi", ".mkv", ".mpeg",
                 ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
@@ -117,7 +127,7 @@ class MediaServer:
             domain = server.tunnel_domain.rstrip("/") if server.tunnel_domain else f"http://{server.host}:{server.port}"
             # Opaque token instead of base64-encoded path (Finding 3)
             token = secrets.token_urlsafe(24)
-            server._token_store[token] = (raw_path, expires)
+            server._token_store[token] = (raw_path, expires, caller_agent)
             # Periodic cleanup of expired tokens
             server._cleanup_expired_tokens()
             return {
@@ -134,11 +144,13 @@ class MediaServer:
             entry = server._token_store.get(t)
             if not entry:
                 raise HTTPException(403, "Invalid token")
-            raw_path, stored_exp = entry
+            raw_path, stored_exp, agent_id = entry
             if not server._verify(raw_path, exp, sig):
                 raise HTTPException(403, "Invalid or expired signature")
             resolved = Path(raw_path).resolve()
-            if not any(resolved.is_relative_to(Path(d).resolve()) for d in server.allowed_dirs):
+            # Check agent-scoped dirs from the token
+            agent_dirs = server._agent_dirs.get(agent_id, server.allowed_dirs)
+            if not any(resolved.is_relative_to(Path(d).resolve()) for d in agent_dirs):
                 raise HTTPException(403, "Path not in allowed directories")
             if not resolved.is_file():
                 raise HTTPException(404, "File not found")
@@ -158,7 +170,7 @@ class MediaServer:
     def _cleanup_expired_tokens(self) -> None:
         """Remove expired entries from the token store to prevent memory leak."""
         now = int(time.time())
-        expired = [k for k, (_, exp) in self._token_store.items() if now > exp]
+        expired = [k for k, v in self._token_store.items() if now > v[1]]
         for k in expired:
             del self._token_store[k]
 
@@ -204,10 +216,16 @@ class MediaServer:
         logger.info("media-server: started on %s:%s", self.host, self.port)
 
     async def stop(self):
+        self._ref_count -= 1
+        if self._ref_count > 0:
+            logger.info("media-server: ref_count=%d, keeping alive", self._ref_count)
+            return  # other workspaces still using it
+        # Actually stop -- last reference released
         if self._server_task and not self._server_task.done():
             self._server_task.cancel()
             try:
                 await self._server_task
             except (asyncio.CancelledError, Exception):
                 pass
-            logger.info("media-server: stopped")
+        MediaServer._instance = None
+        logger.info("media-server: stopped (last reference released)")

@@ -131,12 +131,13 @@ class TestOpaqueTokens:
         token = secrets.token_urlsafe(24)
         raw_path = str(tmp_media / "test.png")
         expires = int(time.time()) + 3600
-        server._token_store[token] = (raw_path, expires)
+        server._token_store[token] = (raw_path, expires, "test-agent")
 
         entry = server._token_store.get(token)
         assert entry is not None
         assert entry[0] == raw_path
         assert entry[1] == expires
+        assert entry[2] == "test-agent"
 
     def test_token_is_opaque(self, server):
         """Finding 3: token must not contain decodable path info."""
@@ -153,9 +154,9 @@ class TestOpaqueTokens:
     def test_expired_tokens_cleaned_up(self, server):
         """Finding 3: _cleanup_expired_tokens removes old entries."""
         # Add expired token
-        server._token_store["old_token"] = ("/tmp/old.mp4", int(time.time()) - 100)
+        server._token_store["old_token"] = ("/tmp/old.mp4", int(time.time()) - 100, "agent-a")
         # Add valid token
-        server._token_store["new_token"] = ("/tmp/new.mp4", int(time.time()) + 3600)
+        server._token_store["new_token"] = ("/tmp/new.mp4", int(time.time()) + 3600, "agent-b")
 
         server._cleanup_expired_tokens()
 
@@ -240,3 +241,85 @@ class TestPathValidation:
         finally:
             if link.exists():
                 link.unlink()
+
+# ---------------------------------------------------------------------------
+# Per-agent dir scoping (Codex Finding: cross-agent file access)
+# ---------------------------------------------------------------------------
+
+class TestPerAgentDirScoping:
+
+    def test_agent_dirs_isolated(self, tmp_path):
+        """Each agent's allowed_dirs must be scoped, not merged."""
+        MediaServer._instance = None
+        dir_a = tmp_path / "agent_a_files"
+        dir_a.mkdir()
+        dir_b = tmp_path / "agent_b_files"
+        dir_b.mkdir()
+
+        srv = MediaServer.get_or_create(
+            port=0, secret="sec-a", allowed_dirs=[str(dir_a)],
+            agent_id="agent-a",
+        )
+        MediaServer.get_or_create(
+            port=0, secret="sec-b", allowed_dirs=[str(dir_b)],
+            agent_id="agent-b",
+        )
+
+        assert srv._agent_dirs["agent-a"] == [str(dir_a)]
+        assert srv._agent_dirs["agent-b"] == [str(dir_b)]
+        # agent-a must NOT see agent-b's dirs
+        assert str(dir_b) not in srv._agent_dirs["agent-a"]
+        MediaServer._instance = None
+
+    def test_get_or_create_increments_ref_count(self, tmp_path):
+        """Each get_or_create call must increment _ref_count."""
+        MediaServer._instance = None
+        srv = MediaServer.get_or_create(
+            port=0, secret="s1", allowed_dirs=["/tmp"], agent_id="a1",
+        )
+        assert srv._ref_count == 1
+        MediaServer.get_or_create(
+            port=0, secret="s2", allowed_dirs=["/tmp"], agent_id="a2",
+        )
+        assert srv._ref_count == 2
+        MediaServer._instance = None
+
+
+# ---------------------------------------------------------------------------
+# Reference-counted stop (Codex Finding: singleton killed by any workspace)
+# ---------------------------------------------------------------------------
+
+class TestRefCountedStop:
+
+    @pytest.mark.asyncio
+    async def test_stop_decrements_ref_count(self, tmp_path):
+        """stop() must decrement ref_count and keep server alive if > 0."""
+        MediaServer._instance = None
+        srv = MediaServer.get_or_create(
+            port=0, secret="s1", allowed_dirs=["/tmp"], agent_id="a1",
+        )
+        MediaServer.get_or_create(
+            port=0, secret="s2", allowed_dirs=["/tmp"], agent_id="a2",
+        )
+        assert srv._ref_count == 2
+
+        await srv.stop()
+        assert srv._ref_count == 1
+        # Singleton must still be alive
+        assert MediaServer._instance is not None
+
+        await srv.stop()
+        assert srv._ref_count == 0
+        # Singleton must be cleared
+        assert MediaServer._instance is None
+
+    @pytest.mark.asyncio
+    async def test_stop_last_ref_clears_singleton(self, tmp_path):
+        """Last stop() must set _instance to None."""
+        MediaServer._instance = None
+        srv = MediaServer.get_or_create(
+            port=0, secret="s", allowed_dirs=["/tmp"], agent_id="only",
+        )
+        assert srv._ref_count == 1
+        await srv.stop()
+        assert MediaServer._instance is None
