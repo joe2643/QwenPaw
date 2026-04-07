@@ -21,7 +21,6 @@ from .service_factories import (
     create_channel_service,
     create_agent_config_watcher,
     create_mcp_config_watcher,
-    create_media_server,
 )
 from ..runner import AgentRunner
 from ..runner.task_tracker import TaskTracker
@@ -237,19 +236,6 @@ class Workspace:
                 priority=30,
                 concurrent_init=False,
                 reusable=False,
-            ),
-        )
-
-        # Priority 35: Embedded media server (conditional)
-        sm.register(
-            ServiceDescriptor(
-                name="media_server",
-                service_class=None,
-                post_init=create_media_server,
-                start_method="start",
-                stop_method="stop",
-                priority=35,
-                concurrent_init=False,
             ),
         )
 

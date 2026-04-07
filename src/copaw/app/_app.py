@@ -196,6 +196,28 @@ async def lifespan(
     # Start all configured agents (handled by manager)
     await multi_agent_manager.start_all_configured_agents()
 
+    # --- Global media server (process-level, shared across all agents) ---
+    _media_server = None
+    config = load_config()
+    if config.media_server.enabled:
+        from .media_server import MediaServer
+        from urllib.parse import urlparse
+
+        ms_cfg = config.media_server
+        parsed = urlparse(ms_cfg.server_url or "")
+        _media_server = MediaServer(
+            host=parsed.hostname or "127.0.0.1",
+            port=parsed.port or 8089,
+            secret=ms_cfg.media_secret,
+            allowed_dirs=list(ms_cfg.allowed_dirs),
+            max_size_mb=ms_cfg.max_size_mb,
+            tunnel_domain=ms_cfg.tunnel_domain,
+        )
+        await _media_server.start()
+        logger.info("Global media server started")
+
+    app.state.media_server = _media_server
+
     # --- Model provider manager (non-reloadable, in-memory) ---
     provider_manager = ProviderManager.get_instance()
 
@@ -254,6 +276,15 @@ async def lifespan(
                 )
                 with suppress(OSError, RuntimeError, ValueError):
                     local_model_mgr.force_shutdown_server()
+
+        # Stop global media server
+        _ms = getattr(app.state, "media_server", None)
+        if _ms is not None:
+            logger.info("Stopping global media server...")
+            try:
+                await _ms.stop()
+            except Exception as exc:
+                logger.error("Error stopping media server: %s", exc)
 
         # Stop multi-agent manager (stops all agents and their components)
         multi_agent_mgr = getattr(app.state, "multi_agent_manager", None)

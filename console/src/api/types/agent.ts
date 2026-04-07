@@ -45,15 +45,6 @@ export interface EmbeddingConfig {
   max_batch_size: number;
 }
 
-export interface MediaServerConfig {
-  enabled: boolean;
-  server_url: string;
-  tunnel_domain: string;
-  media_secret: string;
-  allowed_dirs: string[];
-  max_size_mb: number;
-}
-
 export interface AgentsRunningConfig {
   max_iters: number;
   llm_retry_enabled: boolean;
@@ -72,5 +63,4 @@ export interface AgentsRunningConfig {
   memory_summary: MemorySummaryConfig;
   embedding_config: EmbeddingConfig;
   memory_manager_backend: "remelight";
-  media_server: MediaServerConfig;
 }

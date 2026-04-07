@@ -318,3 +318,45 @@ class TestModelCapabilityCheck:
                 types = [b.get("type") for b in result.content if isinstance(b, dict)]
                 assert "video" not in types
                 assert "image" not in types
+
+# ---------------------------------------------------------------------------
+# Finding 1 fix: _get_media_config uses only current agent's secret
+# ---------------------------------------------------------------------------
+
+class TestMediaConfigGlobalSecret:
+
+    def test_uses_runtime_secret_when_config_empty(self):
+        """_get_media_config must use _runtime_secret when config has no secret."""
+        from copaw.agents.tools.view_media import _get_media_config
+        from copaw.app import media_server as ms_mod
+
+        old = ms_mod._runtime_secret
+        ms_mod._runtime_secret = "global-runtime-secret"
+
+        with patch("copaw.config.utils.load_config", side_effect=Exception("no config")):
+            cfg = _get_media_config()
+            assert cfg["media_secret"] == "global-runtime-secret"
+
+        ms_mod._runtime_secret = old
+
+    def test_config_secret_takes_precedence(self):
+        """_get_media_config must prefer config secret over runtime secret."""
+        from copaw.agents.tools.view_media import _get_media_config
+        from copaw.app import media_server as ms_mod
+        from copaw.config.config import MediaServerConfig
+
+        old = ms_mod._runtime_secret
+        ms_mod._runtime_secret = "runtime-secret"
+
+        mock_config = type("MockConfig", (), {
+            "media_server": MediaServerConfig(
+                enabled=True,
+                media_secret="config-secret",
+            ),
+        })()
+
+        with patch("copaw.config.utils.load_config", return_value=mock_config):
+            cfg = _get_media_config()
+            assert cfg["media_secret"] == "config-secret"
+
+        ms_mod._runtime_secret = old

@@ -633,10 +633,6 @@ class AgentsRunningConfig(BaseModel):
         ),
     )
 
-    media_server: MediaServerConfig = Field(
-        default_factory=MediaServerConfig,
-        description="Media server configuration for signed URL serving",
-    )
 
     @property
     def memory_compact_reserve(self) -> int:
@@ -1163,6 +1159,10 @@ class Config(BaseModel):
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     last_dispatch: Optional[LastDispatchConfig] = None
     security: SecurityConfig = Field(default_factory=SecurityConfig)
+    media_server: MediaServerConfig = Field(
+        default_factory=MediaServerConfig,
+        description="Global media server configuration for signed URL serving",
+    )
     show_tool_details: bool = True
     user_timezone: str = Field(
         default_factory=detect_system_timezone,

@@ -1,7 +1,7 @@
 """Embedded media file server for CoPaw.
 
-Runs as a workspace service — starts/stops with the copaw daemon.
-No separate systemd service needed.
+Runs as a process-level service — starts/stops with the copaw daemon.
+Single shared secret, no per-agent complexity.
 """
 
 import asyncio
@@ -25,51 +25,16 @@ try:
 except ImportError:
     _DEPS_AVAILABLE = False
 
-# Runtime-accessible secrets keyed by agent_id so each agent can
-# look up its own secret, and multiple agents share one server process.
-_runtime_secrets: dict[str, str] = {}
+# Single runtime secret (set when server starts, read by _get_media_config)
+_runtime_secret: str = ""
 
 
 
 class MediaServer:
-    """Embedded media file server with signed URL access."""
+    """Embedded media file server with signed URL access.
 
-    _instance: Optional["MediaServer"] = None
-
-    @classmethod
-    def get_or_create(cls, **kwargs) -> "MediaServer":
-        """Return existing singleton or create a new instance.
-
-        Registers per-agent allowed_dirs and secrets. Uses reference
-        counting so the server stays alive until the last workspace stops.
-
-        IMPORTANT: Each agent gets a unique secret. If the caller provides
-        a blank secret, we generate one so that ``/sign`` auth can
-        deterministically map (secret -> agent_id).  This prevents two
-        blank-secret agents from collapsing into the same identity.
-        """
-        agent_id = kwargs.get("agent_id", "default")
-        agent_secret = kwargs.get("secret", "")
-
-        if cls._instance is not None:
-            # Generate unique secret if blank — prevents per-agent isolation collapse
-            if not agent_secret:
-                agent_secret = secrets.token_hex(32)
-            cls._instance._agent_dirs[agent_id] = kwargs.get("allowed_dirs", ["/tmp"])
-            _runtime_secrets[agent_id] = agent_secret
-            cls._instance._ref_count += 1
-            return cls._instance
-
-        # First agent — create instance
-        if not agent_secret:
-            agent_secret = secrets.token_hex(32)
-        instance = cls(**kwargs)
-        instance.secret = agent_secret  # override so _sign uses this agent's secret
-        instance._agent_dirs[agent_id] = kwargs.get("allowed_dirs", ["/tmp"])
-        _runtime_secrets[agent_id] = agent_secret
-        instance._ref_count = 1
-        cls._instance = instance
-        return instance
+    Process-level singleton — created once at app startup, not per-agent.
+    """
 
     def __init__(
         self,
@@ -79,20 +44,16 @@ class MediaServer:
         allowed_dirs: Optional[list] = None,
         max_size_mb: int = 100,
         tunnel_domain: str = "",
-        agent_id: str = "default",
     ):
         self.host = host
         self.port = port
-        self.agent_id = agent_id
         self.secret = secret or os.environ.get("COPAW_MEDIA_SECRET", "")
         self.allowed_dirs = allowed_dirs or ["/tmp"]
         self.max_size = max_size_mb * 1024 * 1024
         self.tunnel_domain = tunnel_domain
         self._server_task: Optional[asyncio.Task] = None
         self._app: Optional[FastAPI] = None
-        self._agent_dirs: dict[str, list[str]] = {}  # agent_id -> allowed_dirs
-        self._ref_count = 0  # number of workspaces using this server
-        self._token_store: dict[str, tuple[str, int, str]] = {}  # token -> (raw_path, expires, agent_id)
+        self._token_store: dict[str, tuple[str, int]] = {}  # token -> (raw_path, expires)
 
     def _create_app(self) -> "FastAPI":
         app = FastAPI(title="CoPaw Media", docs_url=None, redoc_url=None)
@@ -108,23 +69,13 @@ class MediaServer:
             ttl: int = Query(3600),
             auth: str = Query(""),
         ):
-            # Resolve which agent this secret belongs to
-            caller_agent = None
-            for aid, sec in _runtime_secrets.items():
-                if sec and hmac.compare_digest(auth, sec):
-                    caller_agent = aid
-                    break
-            if caller_agent is None and hmac.compare_digest(auth, server.secret):
-                caller_agent = server.agent_id
-            if caller_agent is None:
+            if not hmac.compare_digest(auth, server.secret):
                 raise HTTPException(403, "Unauthorized")
             resolved = Path(path).resolve()
             if not resolved.is_file():
                 raise HTTPException(404, "File not found")
-            # Check THIS agent's allowed_dirs only
-            agent_dirs = server._agent_dirs.get(caller_agent, [])
-            if not any(resolved.is_relative_to(Path(d).resolve()) for d in agent_dirs):
-                raise HTTPException(403, "Path not in allowed directories for this agent")
+            if not any(resolved.is_relative_to(Path(d).resolve()) for d in server.allowed_dirs):
+                raise HTTPException(403, "Path not in allowed directories")
             media_exts = {
                 ".mp4", ".webm", ".mov", ".avi", ".mkv", ".mpeg",
                 ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
@@ -140,10 +91,8 @@ class MediaServer:
             raw_path = str(resolved)
             sig = server._sign(raw_path, expires)
             domain = server.tunnel_domain.rstrip("/") if server.tunnel_domain else f"http://{server.host}:{server.port}"
-            # Opaque token instead of base64-encoded path (Finding 3)
             token = secrets.token_urlsafe(24)
-            server._token_store[token] = (raw_path, expires, caller_agent)
-            # Periodic cleanup of expired tokens
+            server._token_store[token] = (raw_path, expires)
             server._cleanup_expired_tokens()
             return {
                 "url": f"{domain}/media?t={token}&exp={expires}&sig={sig}",
@@ -159,13 +108,11 @@ class MediaServer:
             entry = server._token_store.get(t)
             if not entry:
                 raise HTTPException(403, "Invalid token")
-            raw_path, stored_exp, agent_id = entry
+            raw_path, stored_exp = entry
             if not server._verify(raw_path, exp, sig):
                 raise HTTPException(403, "Invalid or expired signature")
             resolved = Path(raw_path).resolve()
-            # Check agent-scoped dirs from the token
-            agent_dirs = server._agent_dirs.get(agent_id, server.allowed_dirs)
-            if not any(resolved.is_relative_to(Path(d).resolve()) for d in agent_dirs):
+            if not any(resolved.is_relative_to(Path(d).resolve()) for d in server.allowed_dirs):
                 raise HTTPException(403, "Path not in allowed directories")
             if not resolved.is_file():
                 raise HTTPException(404, "File not found")
@@ -199,16 +146,15 @@ class MediaServer:
         return hmac.compare_digest(sig, self._sign(file_path, expires))
 
     async def start(self):
+        global _runtime_secret
         if not _DEPS_AVAILABLE:
             logger.warning("media-server: fastapi/uvicorn not installed, skipping")
             return
         if not self.secret:
-            import secrets as _secrets
-            self.secret = _secrets.token_hex(32)
+            self.secret = secrets.token_hex(32)
             logger.warning("media-server: no secret configured, generated random secret")
-        # Register secret for this agent so _get_media_config() can find it
-        _runtime_secrets[self.agent_id] = self.secret
-        # Check if port is already bound (another agent started the server)
+        _runtime_secret = self.secret
+        # Check if port is already bound
         import socket as _socket
         _probe = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
         try:
@@ -217,7 +163,7 @@ class MediaServer:
         except OSError:
             _probe.close()
             logger.info(
-                "media-server: port %d already in use, skipping (shared with another agent)",
+                "media-server: port %d already in use, skipping",
                 self.port,
             )
             return
@@ -230,44 +176,13 @@ class MediaServer:
         self._server_task = asyncio.create_task(server.serve(), name="media-server")
         logger.info("media-server: started on %s:%s", self.host, self.port)
 
-    async def stop(self, agent_id: str = ""):
-        """Stop or unregister an agent from the media server.
-
-        If *agent_id* is given, revokes that agent's access (dirs,
-        secret, tokens) and decrements the reference count.  When the
-        last reference is released the underlying HTTP server is shut
-        down.
-
-        If *agent_id* is empty (legacy call-site), we simply decrement
-        and shut down when the count reaches zero.
-        """
-        if agent_id:
-            # Revoke this agent's access
-            self._agent_dirs.pop(agent_id, None)
-            _runtime_secrets.pop(agent_id, None)
-            # Purge tokens signed by this agent
-            to_remove = [
-                t for t, entry in self._token_store.items()
-                if len(entry) >= 3 and entry[2] == agent_id
-            ]
-            for t in to_remove:
-                del self._token_store[t]
-            logger.info(
-                "media-server: agent %s unregistered, ref_count=%d -> %d",
-                agent_id, self._ref_count, self._ref_count - 1,
-            )
-
-        self._ref_count -= 1
-        if self._ref_count > 0:
-            logger.info("media-server: ref_count=%d, keeping alive", self._ref_count)
-            return  # other workspaces still using it
-        # Actually stop -- last reference released
+    async def stop(self):
+        global _runtime_secret
         if self._server_task and not self._server_task.done():
             self._server_task.cancel()
             try:
                 await self._server_task
             except (asyncio.CancelledError, Exception):
                 pass
-        MediaServer._instance = None
-        _runtime_secrets.clear()
-        logger.info("media-server: stopped (last reference released)")
+        _runtime_secret = ""
+        logger.info("media-server: stopped")

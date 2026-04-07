@@ -163,6 +163,12 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       label: t("nav.heartbeat"),
     },
     {
+      key: "media-server",
+      icon: <SparkDataLine size={18} />,
+      path: "/media-server",
+      label: t("nav.mediaServer"),
+    },
+    {
       key: "workspace",
       icon: <SparkLocalFileLine size={18} />,
       path: "/workspace",
@@ -267,6 +273,11 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           key: "heartbeat",
           label: collapsed ? null : t("nav.heartbeat"),
           icon: <SparkVoiceChat01Line size={16} />,
+        },
+        {
+          key: "media-server",
+          label: collapsed ? null : t("nav.mediaServer"),
+          icon: <SparkDataLine size={16} />,
         },
       ],
     },

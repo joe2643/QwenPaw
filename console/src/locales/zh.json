@@ -46,7 +46,8 @@
     "environments": "环境变量",
     "security": "安全",
     "tokenUsage": "Token 消耗",
-    "voiceTranscription": "语音转写"
+    "voiceTranscription": "语音转写",
+    "mediaServer": "媒體伺服器"
   },
   "workspace": {
     "title": "文件",
@@ -1031,19 +1032,7 @@
     "embeddingEnableHint": "同时填写 Base URL 和模型名称后即可启用向量模型功能，API Key 按需填写",
     "rebuildMemoryIndexOnStart": "启动时重建记忆索引",
     "rebuildMemoryIndexOnStartTooltip": "智能体启动时清空并重建记忆搜索索引。关闭后跳过重新索引，仅监听新文件变化（启动更快，但索引可能与文件不同步）",
-    "toolResultCompactRecentGtOld": "最新消息阈值必须大于或等于早期消息阈值",
-    "mediaServerTitle": "媒體伺服器",
-    "mediaServerEnabled": "啟用媒體伺服器",
-    "mediaServerUrl": "伺服器地址",
-    "mediaServerUrlTooltip": "本地媒體伺服器的 URL，用於簽名和提供文件",
-    "mediaServerTunnelDomain": "隧道域名 (公開 URL)",
-    "mediaServerTunnelDomainTooltip": "指向本地媒體伺服器的公開域名，供外部 LLM API 訪問",
-    "mediaServerSecret": "媒體密鑰",
-    "mediaServerAllowedDirs": "允許的目錄",
-    "mediaServerAllowedDirsTooltip": "以逗號分隔的允許媒體伺服器提供文件的目錄列表",
-    "mediaServerMaxSize": "最大文件大小 (MB)",
-    "mediaServerMaxSizeMin": "最大文件大小至少為 1 MB",
-    "mediaServerTooltip": "通過簽名 URL 為 LLM API 提供本地媒體文件訪問"
+    "toolResultCompactRecentGtOld": "最新消息阈值必须大于或等于早期消息阈值"
   },
   "tools": {
     "title": "内置工具",
@@ -1376,5 +1365,23 @@
   "whatsappGroupAllowlist": "群组白名单",
   "whatsappGroupAllowlistTooltip": "WhatsApp 群组 JID",
   "whatsappGroupAllowFrom": "群组允许发送者",
-  "whatsappGroupAllowFromTooltip": "允许在群组中触发机器人的用户。[\"*\"] = 所有人。"
+  "whatsappGroupAllowFromTooltip": "允许在群组中触发机器人的用户。[\"*\"] = 所有人。",
+  "mediaServer": {
+    "description": "通過簽名 URL 為 LLM API 提供本地媒體文件訪問",
+    "enabled": "啟用媒體伺服器",
+    "serverUrl": "伺服器地址",
+    "serverUrlTooltip": "本地媒體伺服器的 URL，用於簽名和提供文件",
+    "tunnelDomain": "隧道域名 (公開 URL)",
+    "tunnelDomainTooltip": "指向本地媒體伺服器的公開域名，供外部 LLM API 訪問",
+    "secret": "媒體密鑰",
+    "allowedDirs": "允許的目錄",
+    "allowedDirsTooltip": "以逗號分隔的允許媒體伺服器提供文件的目錄列表",
+    "maxSize": "最大文件大小 (MB)",
+    "maxSizeMin": "最大文件大小至少為 1 MB",
+    "loadFailed": "讀取媒體伺服器配置失敗",
+    "saveSuccess": "媒體伺服器配置已保存",
+    "saveFailed": "保存媒體伺服器配置失敗",
+    "statusRunning": "運行中",
+    "statusStopped": "已停止"
+  }
 }

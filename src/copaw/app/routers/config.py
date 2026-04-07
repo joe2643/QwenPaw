@@ -18,6 +18,7 @@ from ...config import (
 )
 from ..channels.registry import BUILTIN_CHANNEL_KEYS
 from ...config.config import (
+    MediaServerConfig,
     AgentsLLMRoutingConfig,
     ConsoleConfig,
     DingTalkConfig,
@@ -896,3 +897,53 @@ async def get_whatsapp_status(request: Request) -> dict:
         return {"linked": False, "phone": None}
     except Exception as e:
         return {"linked": False, "error": str(e)}
+
+
+# ── Global Media Server ────────────────────────────────────────
+
+
+@router.get(
+    "/media-server",
+    summary="Get global media server config",
+)
+async def get_media_server_config() -> dict:
+    """Return global media server configuration."""
+    config = load_config()
+    return config.media_server.model_dump()
+
+
+@router.put(
+    "/media-server",
+    summary="Update global media server config",
+)
+async def put_media_server_config(
+    body: MediaServerConfig = Body(...),
+) -> dict:
+    """Update global media server config and save to config.json."""
+    config = load_config()
+    config.media_server = body
+    save_config(config)
+    return body.model_dump()
+
+
+@router.get(
+    "/media-server/status",
+    summary="Get media server running status",
+)
+async def get_media_server_status(request: Request) -> dict:
+    """Check if the global media server is running and healthy."""
+    import urllib.request
+    import json as _json
+
+    config = load_config()
+    ms_cfg = config.media_server
+    if not ms_cfg.enabled:
+        return {"running": False, "reason": "disabled"}
+
+    server_url = ms_cfg.server_url or "http://localhost:8089"
+    try:
+        raw = urllib.request.urlopen(f"{server_url}/health", timeout=3).read()
+        data = _json.loads(raw)
+        return {"running": True, "health": data}
+    except Exception as e:
+        return {"running": False, "reason": str(e)}

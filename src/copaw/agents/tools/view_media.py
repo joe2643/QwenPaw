@@ -92,7 +92,7 @@ _DEFAULT_MEDIA_ENABLED = False
 
 
 def _get_media_config() -> dict:
-    """Load media server config from agent running config, env vars, or defaults."""
+    """Load media server config from global config, env vars, or defaults."""
     cfg = {
         "enabled": _DEFAULT_MEDIA_ENABLED,
         "server_url": _DEFAULT_MEDIA_SERVER_URL,
@@ -101,21 +101,21 @@ def _get_media_config() -> dict:
         "max_size_mb": _DEFAULT_MAX_SIZE_MB,
     }
 
-    # Try loading from agent running config first
+    # Try loading from global (root) config
     try:
-        from ...config.config import load_agent_config
-        from ...app.agent_context import get_current_agent_id
+        from ...config.utils import load_config
 
-        agent_id = get_current_agent_id()
-        agent_config = load_agent_config(agent_id)
-        if agent_config.running and agent_config.running.media_server:
-            ms = agent_config.running.media_server
-            cfg["enabled"] = ms.enabled
+        root = load_config()
+        ms = root.media_server
+        if ms.enabled:
+            cfg["enabled"] = True
+        if ms.server_url:
             cfg["server_url"] = ms.server_url
+        if ms.tunnel_domain:
             cfg["tunnel_domain"] = ms.tunnel_domain
-            # Don't use empty string values from config -- fall through to env/runtime
-            if ms.media_secret:
-                cfg["media_secret"] = ms.media_secret
+        if ms.media_secret:
+            cfg["media_secret"] = ms.media_secret
+        if ms.max_size_mb:
             cfg["max_size_mb"] = ms.max_size_mb
     except Exception:
         pass
@@ -141,16 +141,12 @@ def _get_media_config() -> dict:
     if env_enabled is not None:
         cfg["enabled"] = env_enabled.lower() in ("1", "true", "yes")
 
-    # If media_secret is still empty, check runtime secrets from MediaServer.
-    # Use ONLY this agent's secret — never fall back to another agent's
-    # secret, which would break per-agent isolation.
+    # If media_secret is still empty, check the runtime secret from MediaServer.
     if not cfg["media_secret"]:
         try:
-            from ...app.media_server import _runtime_secrets
-            from ...app.agent_context import get_current_agent_id as _get_aid
-            _aid = _get_aid()
-            if _aid in _runtime_secrets:
-                cfg["media_secret"] = _runtime_secrets[_aid]
+            from ...app.media_server import _runtime_secret
+            if _runtime_secret:
+                cfg["media_secret"] = _runtime_secret
         except ImportError:
             pass
 
