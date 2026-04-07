@@ -104,34 +104,34 @@ def _get_media_config() -> dict:
     # Try loading from agent running config first
     try:
         from ...config.config import load_agent_config
-        from ...config.utils import load_config
+        from ...app.agent_context import get_current_agent_id
 
-        root_config = load_config()
-        agent_id = root_config.agents.active_agent
+        agent_id = get_current_agent_id()
         agent_config = load_agent_config(agent_id)
         if agent_config.running and agent_config.running.media_server:
             ms = agent_config.running.media_server
             cfg["enabled"] = ms.enabled
             cfg["server_url"] = ms.server_url
             cfg["tunnel_domain"] = ms.tunnel_domain
-            cfg["media_secret"] = ms.media_secret
+            # Don't use empty string values from config -- fall through to env/runtime
+            if ms.media_secret:
+                cfg["media_secret"] = ms.media_secret
             cfg["max_size_mb"] = ms.max_size_mb
-            return cfg
     except Exception:
         pass
 
-    # Fall back to env vars
+    # Fall back to env vars for any values still at defaults
     env_server = os.environ.get("COPAW_MEDIA_SERVER")
     env_domain = os.environ.get("COPAW_MEDIA_DOMAIN")
     env_secret = os.environ.get("COPAW_MEDIA_SECRET")
     env_max_mb = os.environ.get("COPAW_MEDIA_MAX_SIZE_MB")
     env_enabled = os.environ.get("COPAW_MEDIA_ENABLED")
 
-    if env_server:
+    if env_server and not cfg["server_url"]:
         cfg["server_url"] = env_server
-    if env_domain:
+    if env_domain and not cfg["tunnel_domain"]:
         cfg["tunnel_domain"] = env_domain
-    if env_secret:
+    if env_secret and not cfg["media_secret"]:
         cfg["media_secret"] = env_secret
     if env_max_mb:
         try:
@@ -140,6 +140,15 @@ def _get_media_config() -> dict:
             pass
     if env_enabled is not None:
         cfg["enabled"] = env_enabled.lower() in ("1", "true", "yes")
+
+    # If media_secret is still empty, check runtime secret from MediaServer
+    if not cfg["media_secret"]:
+        try:
+            from ...app.media_server import _runtime_secret
+            if _runtime_secret:
+                cfg["media_secret"] = _runtime_secret
+        except ImportError:
+            pass
 
     return cfg
 
@@ -199,8 +208,8 @@ async def _get_signed_url(resolved: Path) -> str:
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning(
-            "view_media: _get_signed_url failed: %s (server_url=%s, path=%s)",
-            e, media_cfg["server_url"], str(resolved)[:100],
+            "view_media: _get_signed_url failed: %s (server_url=%s, file=%s)",
+            e, media_cfg["server_url"], resolved.name,
         )
         return None
 
@@ -439,10 +448,10 @@ async def view_video(video_path: str) -> ToolResponse:
         import logging as _log
         _logger = _log.getLogger(__name__)
         _logger.info(
-            "view_media: VIDEO BLOCK SENT TO LLM — source.type=%s url=%s path=%s size=%s",
+            "view_media: VIDEO BLOCK SENT TO LLM — source.type=%s url=%s file=%s size=%s",
             source.get("type", "?"),
             str(source.get("url", ""))[:200],
-            str(resolved),
+            resolved.name,
             resolved.stat().st_size,
         )
         return ToolResponse(

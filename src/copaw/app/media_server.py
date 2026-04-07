@@ -25,6 +25,11 @@ try:
 except ImportError:
     _DEPS_AVAILABLE = False
 
+# Runtime-accessible secret so _get_media_config() can read the
+# randomly generated secret without going through agent config.
+_runtime_secret: str = ""
+
+
 
 class MediaServer:
     """Embedded media file server with signed URL access."""
@@ -150,6 +155,9 @@ class MediaServer:
             import secrets as _secrets
             self.secret = _secrets.token_hex(32)
             logger.warning("media-server: no secret configured, generated random secret")
+        # Persist effective secret so _get_media_config() can read it
+        global _runtime_secret
+        _runtime_secret = self.secret
         self._app = self._create_app()
         config = uvicorn.Config(
             self._app, host=self.host, port=self.port,
