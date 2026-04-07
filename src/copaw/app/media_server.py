@@ -34,6 +34,28 @@ _runtime_secrets: dict[str, str] = {}
 class MediaServer:
     """Embedded media file server with signed URL access."""
 
+    _instance: Optional["MediaServer"] = None
+
+    @classmethod
+    def get_or_create(cls, **kwargs) -> "MediaServer":
+        """Return existing singleton or create a new instance.
+
+        Merges allowed_dirs and registers agent secrets for new agents
+        joining a shared server.
+        """
+        if cls._instance is not None:
+            # Merge allowed_dirs from new agent
+            for d in kwargs.get("allowed_dirs", []):
+                if d not in cls._instance.allowed_dirs:
+                    cls._instance.allowed_dirs.append(d)
+            # Register agent secret
+            agent_id = kwargs.get("agent_id", "default")
+            _runtime_secrets[agent_id] = kwargs.get("secret", "") or cls._instance.secret
+            return cls._instance
+        instance = cls(**kwargs)
+        cls._instance = instance
+        return instance
+
     def __init__(
         self,
         host: str = "127.0.0.1",

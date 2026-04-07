@@ -216,12 +216,21 @@ async def create_media_server(ws, _):
     if ms_cfg is None or not getattr(ms_cfg, "enabled", False):
         return None
 
+    from urllib.parse import urlparse
     from ..media_server import MediaServer
-    return MediaServer(
-        port=8089,
+
+    # Parse host/port from server_url config instead of hardcoding
+    server_url = getattr(ms_cfg, "server_url", "") or ""
+    parsed = urlparse(server_url)
+    port = parsed.port or 8089
+    host = parsed.hostname or "127.0.0.1"
+
+    return MediaServer.get_or_create(
+        agent_id=ws.agent_id,
+        host=host,
+        port=port,
         secret=ms_cfg.media_secret,
         allowed_dirs=list(ms_cfg.allowed_dirs),
         max_size_mb=ms_cfg.max_size_mb,
         tunnel_domain=ms_cfg.tunnel_domain,
-        agent_id=ws.agent_id,
     )
