@@ -223,4 +223,5 @@ async def create_media_server(ws, _):
         allowed_dirs=list(ms_cfg.allowed_dirs),
         max_size_mb=ms_cfg.max_size_mb,
         tunnel_domain=ms_cfg.tunnel_domain,
+        agent_id=ws.agent_id,
     )

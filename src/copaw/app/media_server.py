@@ -25,9 +25,9 @@ try:
 except ImportError:
     _DEPS_AVAILABLE = False
 
-# Runtime-accessible secret so _get_media_config() can read the
-# randomly generated secret without going through agent config.
-_runtime_secret: str = ""
+# Runtime-accessible secrets keyed by agent_id so each agent can
+# look up its own secret, and multiple agents share one server process.
+_runtime_secrets: dict[str, str] = {}
 
 
 
@@ -42,9 +42,11 @@ class MediaServer:
         allowed_dirs: Optional[list] = None,
         max_size_mb: int = 100,
         tunnel_domain: str = "",
+        agent_id: str = "default",
     ):
         self.host = host
         self.port = port
+        self.agent_id = agent_id
         self.secret = secret or os.environ.get("COPAW_MEDIA_SECRET", "")
         self.allowed_dirs = allowed_dirs or ["/tmp"]
         self.max_size = max_size_mb * 1024 * 1024
@@ -155,9 +157,21 @@ class MediaServer:
             import secrets as _secrets
             self.secret = _secrets.token_hex(32)
             logger.warning("media-server: no secret configured, generated random secret")
-        # Persist effective secret so _get_media_config() can read it
-        global _runtime_secret
-        _runtime_secret = self.secret
+        # Register secret for this agent so _get_media_config() can find it
+        _runtime_secrets[self.agent_id] = self.secret
+        # Check if port is already bound (another agent started the server)
+        import socket as _socket
+        _probe = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        try:
+            _probe.bind((self.host, self.port))
+            _probe.close()
+        except OSError:
+            _probe.close()
+            logger.info(
+                "media-server: port %d already in use, skipping (shared with another agent)",
+                self.port,
+            )
+            return
         self._app = self._create_app()
         config = uvicorn.Config(
             self._app, host=self.host, port=self.port,

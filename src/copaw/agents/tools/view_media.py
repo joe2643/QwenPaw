@@ -141,12 +141,17 @@ def _get_media_config() -> dict:
     if env_enabled is not None:
         cfg["enabled"] = env_enabled.lower() in ("1", "true", "yes")
 
-    # If media_secret is still empty, check runtime secret from MediaServer
+    # If media_secret is still empty, check runtime secrets from MediaServer
     if not cfg["media_secret"]:
         try:
-            from ...app.media_server import _runtime_secret
-            if _runtime_secret:
-                cfg["media_secret"] = _runtime_secret
+            from ...app.media_server import _runtime_secrets
+            from ...app.agent_context import get_current_agent_id as _get_aid
+            _aid = _get_aid()
+            if _aid in _runtime_secrets:
+                cfg["media_secret"] = _runtime_secrets[_aid]
+            elif _runtime_secrets:
+                # Fallback: use any available secret (shared server)
+                cfg["media_secret"] = next(iter(_runtime_secrets.values()))
         except ImportError:
             pass
 
@@ -283,24 +288,6 @@ def _extract_keyframes(resolved: Path, max_frames: int = 4) -> list:
 
 
 
-def _cleanup_frame_files(frames: list) -> None:
-    """Remove temporary frame files and their parent dir if empty."""
-    import shutil
-    dirs_to_clean = set()
-    for frame_path, _ in frames:
-        try:
-            p = Path(frame_path)
-            dirs_to_clean.add(p.parent)
-            p.unlink(missing_ok=True)
-        except Exception:
-            pass
-    for d in dirs_to_clean:
-        try:
-            if d.exists() and not any(d.iterdir()):
-                shutil.rmtree(d, ignore_errors=True)
-        except Exception:
-            pass
-
 
 def _model_supports_video() -> bool:
     """Check if the active LLM model supports video input."""
@@ -407,8 +394,6 @@ async def view_video(video_path: str) -> ToolResponse:
                     source=await _resolve_media_source(frame_path, "image"),
                 ))
                 content.append(TextBlock(type="text", text=f"Frame at {timestamp}"))
-            if _get_media_config()["enabled"]:
-                _cleanup_frame_files(frames)
             return ToolResponse(content=content)
         return ToolResponse(content=[
             TextBlock(
@@ -439,8 +424,6 @@ async def view_video(video_path: str) -> ToolResponse:
                 frame_source = await _resolve_media_source(frame_path, "image")
                 content.append(ImageBlock(type="image", source=frame_source))
                 content.append(TextBlock(type="text", text=f"Frame at {timestamp}"))
-            if _get_media_config()["enabled"]:
-                _cleanup_frame_files(frames)
             return ToolResponse(content=content)
 
     source = await _resolve_media_source(resolved, "video")
@@ -501,6 +484,4 @@ async def view_video(video_path: str) -> ToolResponse:
             type="text",
             text=f"Frame at {timestamp}",
         ))
-    if _get_media_config()["enabled"]:
-        _cleanup_frame_files(frames)
     return ToolResponse(content=content)
