@@ -486,7 +486,7 @@ class MediaServerConfig(BaseModel):
         description="Secret key for signing media URLs (auto-generated if empty)",
     )
     allowed_dirs: List[str] = Field(
-        default_factory=lambda: ["/tmp"],
+        default_factory=lambda: ["/tmp", "~/.copaw/media"],
         description="Directories allowed for media serving",
     )
     max_size_mb: int = Field(

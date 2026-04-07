@@ -19,7 +19,6 @@ import json
 import logging
 import os
 import time
-import tempfile
 from pathlib import Path
 from typing import Any, Optional, Dict, List, Union
 
@@ -34,6 +33,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
 )
 
 from ....config.config import BaseChannelConfig as SignalConfig
+from ..media_utils import resolve_media_url
 from ..base import (
     BaseChannel,
     OnReplySent,
@@ -178,7 +178,8 @@ def _parse_mentions(text):
 logger = logging.getLogger(__name__)
 
 SIGNAL_MAX_TEXT_LENGTH = 4000
-_MEDIA_DIR = Path(tempfile.gettempdir()) / "copaw_signal_media"
+from ....constant import WORKING_DIR
+_MEDIA_DIR = WORKING_DIR / "media" / "signal"
 
 
 class SignalDaemon:
@@ -720,14 +721,15 @@ class SignalChannel(BaseChannel):
                             logger.debug("signal: detected %s for %s (was octet-stream)", ct, p)
                     except Exception:
                         pass
+                media_url = await resolve_media_url(str(p))
                 if ct.startswith("image/"):
-                    content_parts.append(ImageContent(type=ContentType.IMAGE, image_url=p))
+                    content_parts.append(ImageContent(type=ContentType.IMAGE, image_url=media_url))
                 elif ct.startswith("video/"):
-                    content_parts.append(VideoContent(type=ContentType.VIDEO, video_url=p))
+                    content_parts.append(VideoContent(type=ContentType.VIDEO, video_url=media_url))
                 elif ct.startswith("audio/"):
-                    content_parts.append(AudioContent(type=ContentType.AUDIO, data=p))
+                    content_parts.append(AudioContent(type=ContentType.AUDIO, data=media_url))
                 else:
-                    content_parts.append(FileContent(type=ContentType.FILE, file_url=p))
+                    content_parts.append(FileContent(type=ContentType.FILE, file_url=media_url))
 
             if not content_parts:
                 return
@@ -1145,17 +1147,18 @@ class SignalChannel(BaseChannel):
                                 att_ct = detected
                         except Exception:
                             pass
+                    att_media_url = await resolve_media_url(str(local))
                     if att_ct.startswith("image/"):
-                        parts.append(ImageContent(type=ContentType.IMAGE, image_url=str(local)))
+                        parts.append(ImageContent(type=ContentType.IMAGE, image_url=att_media_url))
                         media_labels.append("image")
                     elif att_ct.startswith("video/"):
-                        parts.append(VideoContent(type=ContentType.VIDEO, video_url=str(local)))
+                        parts.append(VideoContent(type=ContentType.VIDEO, video_url=att_media_url))
                         media_labels.append("video")
                     elif att_ct.startswith("audio/"):
-                        parts.append(AudioContent(type=ContentType.AUDIO, data=str(local)))
+                        parts.append(AudioContent(type=ContentType.AUDIO, data=att_media_url))
                         media_labels.append("audio")
                     else:
-                        parts.append(FileContent(type=ContentType.FILE, file_url=str(local)))
+                        parts.append(FileContent(type=ContentType.FILE, file_url=att_media_url))
                         media_labels.append(f"file: {att_fname}" if att_fname else "file")
                     continue
             # No downloadable attachment — describe it as text

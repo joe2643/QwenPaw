@@ -16,7 +16,6 @@ import asyncio
 import logging
 import os
 import re
-import tempfile
 from pathlib import Path
 from typing import Any, Optional, Dict, List, Union
 
@@ -31,6 +30,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
 )
 
 from ....config.config import WhatsAppConfig
+from ..media_utils import resolve_media_url
 from ..base import (
     BaseChannel,
     OnReplySent,
@@ -41,7 +41,8 @@ from ..base import (
 logger = logging.getLogger(__name__)
 
 WHATSAPP_MAX_TEXT_LENGTH = 4096
-_MEDIA_DIR = Path(tempfile.gettempdir()) / "copaw_whatsapp_media"
+from ....constant import WORKING_DIR
+_MEDIA_DIR = WORKING_DIR / "media" / "whatsapp"
 
 try:
     from neonize.aioze.client import NewAClient
@@ -353,7 +354,8 @@ class WhatsAppChannel(BaseChannel):
                 self._media_dir.mkdir(parents=True, exist_ok=True)
                 path = self._media_dir / f"wa_img_{msg_id}.jpg"
                 await client.download_any(msg, path=str(path))
-                content_parts.append(ImageContent(type=ContentType.IMAGE, image_url=str(path)))
+                media_url = await resolve_media_url(str(path))
+                content_parts.append(ImageContent(type=ContentType.IMAGE, image_url=media_url))
             except Exception as e:
                 logger.warning("whatsapp: image download failed: %s", e)
 
@@ -364,7 +366,8 @@ class WhatsAppChannel(BaseChannel):
                 ext = "ogg" if msg.audioMessage.ptt else "m4a"
                 path = self._media_dir / f"wa_audio_{msg_id}.{ext}"
                 await client.download_any(msg, path=str(path))
-                content_parts.append(AudioContent(type=ContentType.AUDIO, data=str(path)))
+                media_url = await resolve_media_url(str(path))
+                content_parts.append(AudioContent(type=ContentType.AUDIO, data=media_url))
             except Exception as e:
                 logger.warning("whatsapp: audio download failed: %s", e)
 
@@ -377,7 +380,8 @@ class WhatsAppChannel(BaseChannel):
                 fname = Path(raw_fname).name or f"wa_doc_{msg_id}"
                 path = self._media_dir / fname
                 await client.download_any(msg, path=str(path))
-                content_parts.append(FileContent(type=ContentType.FILE, file_url=str(path)))
+                media_url = await resolve_media_url(str(path))
+                content_parts.append(FileContent(type=ContentType.FILE, file_url=media_url))
             except Exception as e:
                 logger.warning("whatsapp: document download failed: %s", e)
 
@@ -470,7 +474,7 @@ class WhatsAppChannel(BaseChannel):
                     )
                     return [
                         TextContent(type=ContentType.TEXT, text=block),
-                        ImageContent(type=ContentType.IMAGE, image_url=str(path)),
+                        ImageContent(type=ContentType.IMAGE, image_url=await resolve_media_url(str(path))),
                     ]
             except Exception:
                 pass  # Download failed — describe instead
