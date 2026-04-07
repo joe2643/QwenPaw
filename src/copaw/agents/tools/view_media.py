@@ -399,7 +399,8 @@ async def view_video(video_path: str) -> ToolResponse:
 
     # Auto-downgrade large videos to keyframes even if model supports video.
     # LLM API servers have buffer limits (~50MB) and will reject large files.
-    _VIDEO_SIZE_LIMIT = 20 * 1024 * 1024  # 20MB
+    _cfg = _get_media_config()
+    _VIDEO_SIZE_LIMIT = _cfg["max_size_mb"] * 1024 * 1024
     if resolved.stat().st_size > _VIDEO_SIZE_LIMIT:
         import logging
         logging.getLogger(__name__).info(
