@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from typing import Any, List, Optional
 
-from fastapi import APIRouter, Body, HTTPException, Path, Request
+from fastapi import Body,  APIRouter, Body, HTTPException, Path, Request
 from pydantic import BaseModel
 
 from ..utils import schedule_agent_reload
@@ -966,3 +966,28 @@ async def get_media_server_status(request: Request) -> dict:
     ms = getattr(request.app.state, "media_server", None)
     running = ms is not None and ms._server_task and not ms._server_task.done()
     return {"running": running, "port": ms.port if ms else None}
+
+
+# -- MemPalace Config --
+
+@router.get("/config/mempalace", tags=["config"])
+async def get_mempalace_config(request: Request):
+    agent = get_agent_for_request(request)
+    cfg = getattr(agent.config, "mempalace", None)
+    if cfg is None:
+        return {"enabled": False}
+    return cfg.model_dump()
+
+
+@router.put("/config/mempalace", tags=["config"])
+async def update_mempalace_config(request: Request, body: dict = Body(...)):
+    agent = get_agent_for_request(request)
+    from copaw.config.config import MemPalaceHooksConfig
+    try:
+        new_cfg = MemPalaceHooksConfig(**body)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    agent.config.mempalace = new_cfg
+    save_agent_config(agent.agent_id, agent.config)
+    schedule_agent_reload(request, agent.agent_id)
+    return new_cfg.model_dump()

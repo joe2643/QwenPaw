@@ -443,65 +443,46 @@ class CoPawAgent(ToolGuardMixin, ReActAgent):
             )
             logger.debug("Registered memory compaction hook")
 
-        # MemPalace hooks — pre_reasoning for precompact, post_reasoning for interval
-        try:
-            from .hooks.mempalace_diary import MemPalacePreCompactHook, MemPalaceIntervalHook
-
-            # pre_reasoning: emergency save before context compaction
-            precompact_hook = MemPalacePreCompactHook(compact_threshold=0.75)
-            self.register_instance_hook(
-                hook_type="pre_reasoning",
-                hook_name="mempalace_precompact_hook",
-                hook=precompact_hook.__call__,
-            )
-
-            # post_reasoning: interval save every N user messages (with cleanup)
-            interval_hook = MemPalaceIntervalHook(
-                working_dir=working_dir,
-                write_interval=15,
-            )
-            self.register_instance_hook(
-                hook_type="post_reasoning",
-                hook_name="mempalace_interval_hook",
-                hook=interval_hook.__call__,
-            )
-            # pre_reply: safety-net save before /new or /clear clears memory
-            from .hooks.mempalace_diary import MemPalacePreReplyHook
-            prereply_hook = MemPalacePreReplyHook(working_dir=working_dir)
-            self.register_instance_hook(
-                hook_type="pre_reply",
-                hook_name="mempalace_prereply_hook",
-                hook=prereply_hook.__call__,
-            )
-            logger.debug("Registered mempalace pre+post+prereply hooks")
-        except ImportError as e:
-            logger.warning(f"MemPalace hooks not available: {e}")
+        # MemPalace hooks — config-driven registration
+        mp_cfg = getattr(self._agent_config, "mempalace", None)
+        if mp_cfg and mp_cfg.enabled:
+            try:
+                from .hooks.mempalace_diary import (
+                    MemPalacePreCompactHook, MemPalaceIntervalHook, MemPalacePreReplyHook,
+                )
+                registered = []
+                if mp_cfg.precompact_save.enabled:
+                    hook = MemPalacePreCompactHook(compact_threshold=mp_cfg.precompact_save.threshold)
+                    self.register_instance_hook(hook_type="pre_reasoning", hook_name="mempalace_precompact", hook=hook.__call__)
+                    registered.append("precompact")
+                if mp_cfg.interval_save.enabled:
+                    hook = MemPalaceIntervalHook(working_dir=working_dir, write_interval=mp_cfg.interval_save.write_interval)
+                    self.register_instance_hook(hook_type="post_reasoning", hook_name="mempalace_interval", hook=hook.__call__)
+                    registered.append("interval")
+                if mp_cfg.pre_reply_save:
+                    hook = MemPalacePreReplyHook(working_dir=working_dir)
+                    self.register_instance_hook(hook_type="pre_reply", hook_name="mempalace_prereply", hook=hook.__call__)
+                    registered.append("pre_reply")
+                logger.info("MemPalace hooks registered: %s", ", ".join(registered))
+            except ImportError as e:
+                logger.warning("MemPalace hooks not available: %s", e)
+        else:
+            logger.debug("MemPalace hooks disabled")
 
         # Session WAL — write-ahead log for crash recovery
-        try:
-            from .hooks.tool_wal import (
-                SessionWAL, ToolWALPreActingHook, ToolWALPostActingHook, ReasoningWALHook,
-            )
-            wal = SessionWAL(working_dir=working_dir)
-
-            self.register_instance_hook(
-                hook_type="pre_acting",
-                hook_name="wal_pre_acting",
-                hook=ToolWALPreActingHook(wal).__call__,
-            )
-            self.register_instance_hook(
-                hook_type="post_acting",
-                hook_name="wal_post_acting",
-                hook=ToolWALPostActingHook(wal).__call__,
-            )
-            self.register_instance_hook(
-                hook_type="post_reasoning",
-                hook_name="wal_post_reasoning",
-                hook=ReasoningWALHook(wal).__call__,
-            )
-            logger.debug("Registered session WAL hooks (pre/post_acting + post_reasoning)")
-        except ImportError as e:
-            logger.warning(f"Session WAL hooks not available: {e}")
+        wal_enabled = mp_cfg.session_wal if (mp_cfg and mp_cfg.enabled) else False
+        if wal_enabled:
+            try:
+                from .hooks.tool_wal import (
+                    SessionWAL, ToolWALPreActingHook, ToolWALPostActingHook, ReasoningWALHook,
+                )
+                wal = SessionWAL(working_dir=working_dir)
+                self.register_instance_hook(hook_type="pre_acting", hook_name="wal_pre_acting", hook=ToolWALPreActingHook(wal).__call__)
+                self.register_instance_hook(hook_type="post_acting", hook_name="wal_post_acting", hook=ToolWALPostActingHook(wal).__call__)
+                self.register_instance_hook(hook_type="post_reasoning", hook_name="wal_post_reasoning", hook=ReasoningWALHook(wal).__call__)
+                logger.info("Session WAL hooks registered")
+            except ImportError as e:
+                logger.warning(f"Session WAL hooks not available: {e}")
 
     def rebuild_sys_prompt(self) -> None:
         """Rebuild and replace the system prompt.

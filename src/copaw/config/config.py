@@ -694,6 +694,27 @@ class AgentProfileRef(BaseModel):
     )
 
 
+
+# -- MemPalace integration config --
+
+class MemPalaceIntervalSaveConfig(BaseModel):
+    enabled: bool = True
+    write_interval: int = 15
+
+class MemPalacePreCompactSaveConfig(BaseModel):
+    enabled: bool = True
+    threshold: float = 0.75
+
+class MemPalaceHooksConfig(BaseModel):
+    """MemPalace integration configuration (per-agent)."""
+    enabled: bool = False
+    interval_save: MemPalaceIntervalSaveConfig = MemPalaceIntervalSaveConfig()
+    precompact_save: MemPalacePreCompactSaveConfig = MemPalacePreCompactSaveConfig()
+    pre_reply_save: bool = True
+    bg_save_on_new: bool = True
+    session_wal: bool = True
+
+
 class AgentProfileConfig(BaseModel):
     """Complete Agent Profile configuration (stored in workspace/agent.json).
 
@@ -1158,7 +1179,8 @@ class Config(BaseModel):
     last_api: LastApiConfig = LastApiConfig()
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     last_dispatch: Optional[LastDispatchConfig] = None
-    security: SecurityConfig = Field(default_factory=SecurityConfig)
+    security: SecurityConfig
+    mempalace: MemPalaceHooksConfig = Field(default_factory=MemPalaceHooksConfig)
     media_server: MediaServerConfig = Field(
         default_factory=MediaServerConfig,
         description="Global media server configuration for signed URL serving",
