@@ -303,14 +303,15 @@ async def _write_diary(messages: list, source: str = "hook", note: str = "") -> 
         entry = f"{now.strftime('%Y-%m-%d')}|session.{source}|{user_count}msgs|auto|*neutral*|★★★"
         if note:
             entry += f"|{note}"
-        agent_name = source.replace("_command", "").replace("hook", "auto")
-        wing = f"wing_{agent_name}"
-        entry_id = f"diary_{wing}_{now.strftime('%Y%m%d_%H%M%S')}_{hashlib.md5(entry[:50].encode()).hexdigest()[:8]}"
+        agent_name = "copaw"
+        wing = "agents"
+        room = "copaw"
+        entry_id = f"diary_{wing}_{room}_{now.strftime('%Y%m%d_%H%M%S')}_{hashlib.md5(entry[:50].encode()).hexdigest()[:8]}"
         col.add(
             ids=[entry_id], documents=[entry],
             metadatas=[{
-                "wing": wing, "room": "diary", "hall": "hall_diary",
-                "topic": "auto", "type": "diary_entry",
+                "wing": wing, "room": room, "hall": "hall_diary",
+                "topic": source, "type": "diary_entry",
                 "agent": agent_name, "filed_at": now.isoformat(),
                 "date": now.strftime("%Y-%m-%d"), "added_by": f"bgsave_{source}",
             }],
