@@ -231,7 +231,18 @@ async def _bg_save_from_messages(messages: list, source: str = "hook") -> bool:
             hall = item.get("hall", "hall_facts")
             if not content or len(content) < 10:
                 continue
-            entry_id = f"drawer_{wing}_{room}_{now.strftime('%Y%m%d_%H%M%S')}_{hashlib.md5(content[:50].encode()).hexdigest()[:8]}"
+            # Duplicate check (match MCP server's tool_add_drawer behavior)
+            try:
+                dup_results = col.query(query_texts=[content], n_results=1, include=["distances"])
+                if dup_results["ids"] and dup_results["ids"][0]:
+                    similarity = round(1 - dup_results["distances"][0][0], 3)
+                    if similarity >= 0.9:
+                        _mp_log(f"BgSave({source}): skipping duplicate (similarity={similarity})")
+                        continue
+            except Exception:
+                pass  # If dup check fails, proceed with write
+
+            entry_id = f"drawer_{wing}_{room}_{hashlib.md5((content[:100] + now.isoformat()).encode()).hexdigest()[:16]}"
             col.add(
                 ids=[entry_id],
                 documents=[content],
@@ -292,16 +303,19 @@ async def _write_diary(messages: list, source: str = "hook", note: str = "") -> 
         entry = f"{now.strftime('%Y-%m-%d')}|session.{source}|{user_count}msgs|auto|*neutral*|★★★"
         if note:
             entry += f"|{note}"
-        entry_id = f"diary_agents_auto_{now.strftime('%Y%m%d_%H%M%S')}_{hashlib.md5(entry.encode()).hexdigest()[:8]}"
+        agent_name = source.replace("_command", "").replace("hook", "auto")
+        wing = f"wing_{agent_name}"
+        entry_id = f"diary_{wing}_{now.strftime('%Y%m%d_%H%M%S')}_{hashlib.md5(entry[:50].encode()).hexdigest()[:8]}"
         col.add(
             ids=[entry_id], documents=[entry],
             metadatas=[{
-                "wing": "agents", "room": "vesper", "hall": "hall_diary",
-                "type": "diary_entry", "filed_at": now.isoformat(),
+                "wing": wing, "room": "diary", "hall": "hall_diary",
+                "topic": "auto", "type": "diary_entry",
+                "agent": agent_name, "filed_at": now.isoformat(),
                 "date": now.strftime("%Y-%m-%d"), "added_by": f"bgsave_{source}",
             }],
         )
-        _mp_log(f"Diary({source}): {entry_id}")
+        _mp_log(f"Diary({source}): {entry_id} -> {wing}/diary")
     except Exception as e:
         _mp_log(f"Diary({source}): FAILED {e}", "ERROR")
 
