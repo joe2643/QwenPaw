@@ -972,22 +972,28 @@ async def get_media_server_status(request: Request) -> dict:
 
 @router.get("/mempalace", tags=["config"])
 async def get_mempalace_config(request: Request):
-    agent = get_agent_for_request(request)
-    cfg = getattr(agent.config, "mempalace", None)
-    if cfg is None:
+    from ..agent_context import get_current_agent_id
+    from copaw.config.config import load_agent_config, MemPalaceHooksConfig
+    agent_id = get_current_agent_id() or "default"
+    try:
+        cfg = load_agent_config(agent_id)
+        mp = getattr(cfg, "mempalace", None)
+        return mp.model_dump() if mp else {"enabled": False}
+    except Exception:
         return {"enabled": False}
-    return cfg.model_dump()
 
 
 @router.put("/mempalace", tags=["config"])
 async def update_mempalace_config(request: Request, body: dict = Body(...)):
-    agent = get_agent_for_request(request)
-    from copaw.config.config import MemPalaceHooksConfig
+    from ..agent_context import get_current_agent_id
+    from copaw.config.config import load_agent_config, save_agent_config, MemPalaceHooksConfig
+    agent_id = get_current_agent_id() or "default"
     try:
         new_cfg = MemPalaceHooksConfig(**body)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-    agent.config.mempalace = new_cfg
-    save_agent_config(agent.agent_id, agent.config)
-    schedule_agent_reload(request, agent.agent_id)
+    cfg = load_agent_config(agent_id)
+    cfg.mempalace = new_cfg
+    save_agent_config(agent_id, cfg)
+    schedule_agent_reload(request, agent_id)
     return new_cfg.model_dump()
