@@ -15,6 +15,7 @@ import {
   Statistic,
   Popconfirm,
   Typography,
+  theme,
 } from "antd";
 import {
   ReloadOutlined,
@@ -57,6 +58,7 @@ function OverviewTab({
   kgStats: any;
   onRefresh: () => void;
 }) {
+  const { token } = theme.useToken();
 
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
@@ -148,24 +150,30 @@ function StructureTab({
     },
     {
       title: "Hall",
-      dataIndex: "hall",
       key: "hall",
       width: 160,
-      render: (hall: string) => <Tag color={hallColor(hall)}>{hall || "none"}</Tag>,
+      render: (_: any, record: any) => {
+        const hall = record.hall || record.metadata?.hall;
+        return hall ? <Tag color={hallColor(hall)}>{hall}</Tag> : <Text type="secondary">—</Text>;
+      },
     },
     {
       title: "Content",
-      dataIndex: "content",
+      dataIndex: "content_preview",
       key: "content",
       ellipsis: true,
-      render: (text: string) => <Text style={{ fontSize: 12 }}>{(text || "").substring(0, 120)}</Text>,
+      render: (text: string, record: any) => (
+        <Text style={{ fontSize: 12 }}>{(text || record.content || "").substring(0, 120)}</Text>
+      ),
     },
     {
       title: "Date",
-      dataIndex: "filed_at",
       key: "filed_at",
       width: 100,
-      render: (ts: string) => ts ? ts.substring(0, 10) : "-",
+      render: (_: any, record: any) => {
+        const ts = record.filed_at || record.metadata?.filed_at || record.metadata?.date;
+        return ts ? ts.substring(0, 10) : "—";
+      },
     },
     {
       title: "",
@@ -377,6 +385,7 @@ function HooksTab({
 // ── Main Page ────────────────────────────────────────────────────────────
 
 function MemPalacePage() {
+  const { token } = theme.useToken();
   const {
     status, wings, drawers, drawerTotal, config, hookLog,
     kgStats, kgEntities, kgTriples, kgEntityTotal, kgTripleTotal,
@@ -395,7 +404,7 @@ function MemPalacePage() {
         items={[{ title: "Settings" }, { title: "MemPalace" }]}
         extra={<Button icon={<ReloadOutlined />} onClick={handleRefreshAll}>Refresh</Button>}
       />
-      <div style={{ padding: 20 }}>
+      <div style={{ padding: 20, color: token.colorText }}>
         <Tabs defaultActiveKey="overview">
           <TabPane tab="Overview" key="overview">
             <OverviewTab status={status} config={config} kgStats={kgStats} onRefresh={handleRefreshAll} onConfigChange={updateConfig} />
