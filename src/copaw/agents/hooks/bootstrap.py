@@ -59,6 +59,38 @@ class BootstrapHook:
                 self.working_dir / ".bootstrap_completed"
             )
 
+            # MemPalace wake-up context — inject L0+L1 on session start
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["python3", "-m", "mempalace", "wake-up"],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    # Extract just the context (skip the header line)
+                    lines = result.stdout.strip().split("\n")
+                    wakeup = "\n".join(l for l in lines if not l.startswith("Wake-up text") and not l.startswith("==="))
+                    if wakeup.strip() and len(wakeup) > 50:
+                        agent.sys_prompt = agent.sys_prompt + "\n\n## MemPalace Context\n" + wakeup.strip()
+                        logger.debug("MemPalace wake-up context injected (%d chars)", len(wakeup))
+            except Exception as e:
+                logger.debug("MemPalace wake-up skipped: %s", e)
+
+            # Check WAL for crash recovery (runs every session, not just first)
+            try:
+                from .tool_wal import SessionWAL
+                crash_report = SessionWAL.get_crash_report(self.working_dir)
+                if crash_report:
+                    logger.warning(f"WAL crash detected: {crash_report[:200]}")
+                    messages = await agent.memory.get_memory()
+                    for msg in messages:
+                        if getattr(msg, 'role', None) == 'user':
+                            from ..prompt import prepend_to_message_content
+                            prepend_to_message_content(msg, crash_report)
+                            break
+            except Exception as e:
+                logger.debug(f"WAL crash check skipped: {e}")
+
             # Check if bootstrap has already been triggered before
             if bootstrap_completed_flag.exists():
                 return None
