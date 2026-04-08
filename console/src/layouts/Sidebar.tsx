@@ -312,11 +312,6 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           icon: <SparkMcpMcpLine size={16} />,
         },
         {
-          key: "mempalace",
-          label: collapsed ? null : t("nav.mempalace", "MemPalace"),
-          icon: <SparkDataLine size={16} />,
-        },
-        {
           key: "agent-config",
           label: collapsed ? null : t("nav.agentConfig"),
           icon: <SparkModifyLine size={16} />,
@@ -351,6 +346,11 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           key: "security",
           label: collapsed ? null : t("nav.security"),
           icon: <SparkBrowseLine size={16} />,
+        },
+        {
+          key: "mempalace",
+          label: collapsed ? null : t("nav.mempalace", "MemPalace"),
+          icon: <SparkDataLine size={16} />,
         },
         {
           key: "token-usage",

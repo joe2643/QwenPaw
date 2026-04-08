@@ -26,6 +26,7 @@ import {
 } from "@ant-design/icons";
 import type { DataNode } from "antd/es/tree";
 import { PageHeader } from "@/components/PageHeader";
+import { useTheme } from "@/contexts/ThemeContext";
 import { useMemPalace } from "./useMemPalace";
 
 const { Text } = Typography;
@@ -159,6 +160,7 @@ function StructureTab({
   onDeleteDrawer: (id: string) => void;
   onRefreshWings: () => void;
 }) {
+  const { isDark } = useTheme();
   const [selectedRoom, setSelectedRoom] = useState<{ wing: string; room: string } | null>(null);
   const [page, setPage] = useState(1);
 
@@ -248,7 +250,7 @@ function StructureTab({
         size="small"
         title="Wings & Rooms"
         extra={<Button size="small" icon={<ReloadOutlined />} onClick={onRefreshWings} />}
-        style={{ width: 280, flexShrink: 0 }}
+        style={{ width: 280, flexShrink: 0, background: isDark ? "#1f1f1f" : undefined }}
       >
         {treeData.length === 0 ? (
           <Empty description="No wings found" />
@@ -463,7 +465,12 @@ function HooksTab({
         value={hookLog || "(no logs)"}
         readOnly
         autoSize={{ minRows: 16, maxRows: 30 }}
-        style={{ fontFamily: "monospace", fontSize: 12 }}
+        style={{
+          fontFamily: "monospace",
+          fontSize: 12,
+          backgroundColor: isDark ? "#141414" : "#fafafa",
+          color: isDark ? "rgba(255,255,255,0.85)" : "rgba(0,0,0,0.88)",
+        }}
       />
     </Card>
   );

@@ -16,7 +16,7 @@ import SkillPoolPage from "../../pages/Agent/SkillPool";
 import ToolsPage from "../../pages/Agent/Tools";
 import WorkspacePage from "../../pages/Agent/Workspace";
 import MCPPage from "../../pages/Agent/MCP";
-import MemPalacePage from "../../pages/Agent/MemPalace";
+import MemPalacePage from "../../pages/Settings/MemPalace";
 import ModelsPage from "../../pages/Settings/Models";
 import EnvironmentsPage from "../../pages/Settings/Environments";
 import SecurityPage from "../../pages/Settings/Security";
