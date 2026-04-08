@@ -58,7 +58,6 @@ function OverviewTab({
   kgStats: any;
   onRefresh: () => void;
 }) {
-  const { token } = theme.useToken();
 
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
