@@ -8,16 +8,13 @@ export const mempalaceApi = {
   getWings: () => request<any[]>("/mempalace/wings"),
 
   /** List drawers in a specific wing/room */
-  getDrawers: (wing: string, room: string, offset?: number, limit?: number) =>
-    request<any>(`/mempalace/wings/${encodeURIComponent(wing)}/rooms/${encodeURIComponent(room)}`, {
-      method: "GET",
-      headers: new Headers(
-        Object.entries({
-          ...(offset != null ? { "X-Offset": String(offset) } : {}),
-          ...(limit != null ? { "X-Limit": String(limit) } : {}),
-        }).reduce((h, [k, v]) => { h.set(k, v); return h; }, new Headers()),
-      ),
-    }),
+  getDrawers: (wing: string, room: string, offset?: number, limit?: number) => {
+    const params = new URLSearchParams();
+    if (offset != null) params.set("offset", String(offset));
+    if (limit != null) params.set("limit", String(limit));
+    const qs = params.toString();
+    return request<any>(`/mempalace/wings/${encodeURIComponent(wing)}/rooms/${encodeURIComponent(room)}${qs ? `?${qs}` : ""}`);
+  },
 
   /** Get a single drawer by ID */
   getDrawer: (id: string) => request<any>(`/mempalace/drawer/${encodeURIComponent(id)}`),
