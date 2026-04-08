@@ -245,6 +245,14 @@ function HooksTab({ hookLog, onLoadLog }: { hookLog: string; onLoadLog: (n?: num
 
 // ── Main ─────────────────────────────────────────────────────────────────
 
+function DarkModeOverride() {
+  const { isDark } = useTheme();
+  if (!isDark) return null;
+  return (
+    <style dangerouslySetInnerHTML={{ __html: ".mempalace-dark .copaw-card { background: #1f1f1f !important; border-color: #303030 !important; } .mempalace-dark .copaw-card-head { border-color: #303030 !important; } .mempalace-dark .copaw-card-head-title { color: rgba(255,255,255,0.85) !important; } .mempalace-dark .copaw-tree { background: transparent !important; color: rgba(255,255,255,0.85) !important; } .mempalace-dark .copaw-tree-node-content-wrapper { color: rgba(255,255,255,0.85) !important; } .mempalace-dark .copaw-tree-switcher { color: rgba(255,255,255,0.45) !important; } .mempalace-dark .copaw-tree-node-selected { background: rgba(255,255,255,0.08) !important; } .mempalace-dark .copaw-table-thead > tr > th { background: rgba(255,255,255,0.04) !important; color: rgba(255,255,255,0.65) !important; } .mempalace-dark .copaw-table-tbody > tr > td { color: rgba(255,255,255,0.85) !important; } .mempalace-dark .copaw-table-tbody > tr:hover > td { background: rgba(255,255,255,0.04) !important; } .mempalace-dark .copaw-empty-description { color: rgba(255,255,255,0.35) !important; } .mempalace-dark .copaw-statistic-title { color: rgba(255,255,255,0.65) !important; } .mempalace-dark .copaw-statistic-content { color: rgba(255,255,255,0.85) !important; } .mempalace-dark .copaw-tabs-tab { color: rgba(255,255,255,0.65) !important; } .mempalace-dark .copaw-tabs-tab-active { color: rgba(255,255,255,0.95) !important; } .mempalace-dark .copaw-pagination-item a { color: rgba(255,255,255,0.65) !important; } .mempalace-dark .copaw-pagination-item-active a { color: #fff !important; } .mempalace-dark .copaw-descriptions-item-label { color: rgba(255,255,255,0.65) !important; } .mempalace-dark .copaw-descriptions-item-content { color: rgba(255,255,255,0.85) !important; } .mempalace-dark .copaw-tag { border-color: rgba(255,255,255,0.15) !important; }" }} />
+  );
+}
+
 export default function MemPalacePage() {
   const ds = useDarkStyles();
   const {
@@ -257,7 +265,8 @@ export default function MemPalacePage() {
   const refresh = () => { loadStatus(); loadWings(); loadConfig(); loadKgStats(); };
 
   return (
-    <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+    <div className={ds.isDark ? "mempalace-dark" : ""} style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+      <DarkModeOverride />
       <PageHeader items={[{ title: "Settings" }, { title: "MemPalace" }]}
         extra={<Button icon={<ReloadOutlined />} onClick={refresh}>Refresh</Button>} />
       <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
