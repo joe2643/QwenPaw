@@ -164,7 +164,23 @@ async def _bg_save_from_messages(messages: list, source: str = "hook") -> bool:
         return False
 
     # Call LLM
-    prompt = EXTRACT_PROMPT.format(content=convo)
+    # Fetch existing rooms so LLM classifies accurately
+    _rooms_hint = "openclaw, copaw, mempalace, joe, infra, ai, tools, vesper"
+    try:
+        from collections import defaultdict as _dd
+        _c2 = get_collection(palace_path=MempalaceConfig().palace_path)
+        _m2 = _c2.get(include=["metadatas"])
+        _wr = _dd(set)
+        for _mm in (_m2.get("metadatas") or []):
+            _ww, _rr = (_mm or {}).get("wing", ""), (_mm or {}).get("room", "")
+            if _ww and _rr: _wr[_ww].add(_rr)
+        _rooms_hint = ", ".join(w + ": " + "/".join(sorted(rs)) for w, rs in sorted(_wr.items()))
+    except Exception:
+        pass
+    prompt = EXTRACT_PROMPT.format(content=convo).replace(
+        "openclaw, copaw, mempalace, tianyuan, joe, contacts, infra, ai, tools, cooking, vesper, claude",
+        _rooms_hint,
+    )
     try:
         _mp_log(f"BgSave({source}): calling LLM, {len(convo)} chars")
         response_text = await model.call_async([
