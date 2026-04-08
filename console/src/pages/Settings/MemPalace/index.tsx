@@ -15,6 +15,8 @@ import {
   Statistic,
   Popconfirm,
   Typography,
+  Descriptions,
+  Divider,
 } from "antd";
 import {
   ReloadOutlined,
@@ -23,13 +25,14 @@ import {
   ApartmentOutlined,
   NodeIndexOutlined,
   FileTextOutlined,
+  SettingOutlined,
 } from "@ant-design/icons";
 import type { DataNode } from "antd/es/tree";
 import { PageHeader } from "@/components/PageHeader";
 import { useTheme } from "@/contexts/ThemeContext";
 import { useMemPalace } from "./useMemPalace";
 
-const { Text } = Typography;
+const { Text, Title } = Typography;
 const { TabPane } = Tabs;
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -61,83 +64,96 @@ function OverviewTab({
   onRefresh: () => void;
   onConfigChange: (data: any) => void;
 }) {
-  return (
-    <div>
-      <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-        {/* Stats row */}
-        <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-          <Card size="small" style={{ flex: 1, minWidth: 180 }}>
-            <Statistic
-              title="Total Drawers"
-              value={status?.total_drawers ?? "-"}
-              prefix={<DatabaseOutlined />}
-            />
-          </Card>
-          <Card size="small" style={{ flex: 1, minWidth: 180 }}>
-            <Statistic
-              title="Wings"
-              value={status?.wing_count ?? "-"}
-              prefix={<ApartmentOutlined />}
-            />
-          </Card>
-          <Card size="small" style={{ flex: 1, minWidth: 180 }}>
-            <Statistic
-              title="KG Entities"
-              value={kgStats?.entity_count ?? status?.kg_entities ?? "-"}
-              prefix={<NodeIndexOutlined />}
-            />
-          </Card>
-          <Card size="small" style={{ flex: 1, minWidth: 180 }}>
-            <Statistic
-              title="KG Triples"
-              value={kgStats?.triple_count ?? status?.kg_triples ?? "-"}
-              prefix={<FileTextOutlined />}
-            />
-          </Card>
-        </div>
+  const { isDark } = useTheme();
 
-        {/* Config */}
-        {config && (
-          <Card title="Configuration" size="small" extra={<Button size="small" icon={<ReloadOutlined />} onClick={onRefresh}>Refresh</Button>}>
-            <Space direction="vertical" size="small" style={{ width: "100%" }}>
-              {typeof config.enabled !== "undefined" && (
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <Text>MemPalace Enabled</Text>
-                  <Switch
-                    checked={config.enabled}
-                    onChange={(checked) => onConfigChange({ ...config, enabled: checked })}
-                  />
-                </div>
+  return (
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      {/* Stats row */}
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+        <Card size="small" style={{ flex: 1, minWidth: 180 }}>
+          <Statistic title="Total Drawers" value={status?.total_drawers ?? "-"} prefix={<DatabaseOutlined />} />
+        </Card>
+        <Card size="small" style={{ flex: 1, minWidth: 180 }}>
+          <Statistic title="Wings" value={status?.wings ? Object.keys(status.wings).length : "-"} prefix={<ApartmentOutlined />} />
+        </Card>
+        <Card size="small" style={{ flex: 1, minWidth: 180 }}>
+          <Statistic title="KG Entities" value={kgStats?.entity_count ?? status?.kg?.entity_count ?? "-"} prefix={<NodeIndexOutlined />} />
+        </Card>
+        <Card size="small" style={{ flex: 1, minWidth: 180 }}>
+          <Statistic title="KG Triples" value={kgStats?.triple_count ?? status?.kg?.triple_count ?? "-"} prefix={<FileTextOutlined />} />
+        </Card>
+      </div>
+
+      {/* Hook Config */}
+      {config && (
+        <Card
+          title={<><SettingOutlined style={{ marginRight: 8 }} />Hook Configuration</>}
+          size="small"
+          extra={<Button size="small" icon={<ReloadOutlined />} onClick={onRefresh}>Refresh</Button>}
+        >
+          <Descriptions column={2} size="small" bordered>
+            <Descriptions.Item label="MemPalace Enabled">
+              <Switch
+                size="small"
+                checked={config.enabled ?? false}
+                onChange={(v) => onConfigChange({ ...config, enabled: v })}
+              />
+            </Descriptions.Item>
+            <Descriptions.Item label="Session WAL">
+              <Switch
+                size="small"
+                checked={config.session_wal ?? false}
+                onChange={(v) => onConfigChange({ ...config, session_wal: v })}
+              />
+            </Descriptions.Item>
+            <Descriptions.Item label="Interval Save">
+              <Switch
+                size="small"
+                checked={config.interval_save?.enabled ?? false}
+                onChange={(v) => onConfigChange({
+                  ...config,
+                  interval_save: { ...config.interval_save, enabled: v },
+                })}
+              />
+              {config.interval_save?.enabled && (
+                <Text type="secondary" style={{ marginLeft: 8 }}>
+                  every {config.interval_save?.write_interval ?? 15} msgs
+                </Text>
               )}
-              {typeof config.kg_enabled !== "undefined" && (
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <Text>Knowledge Graph</Text>
-                  <Switch
-                    checked={config.kg_enabled}
-                    onChange={(checked) => onConfigChange({ ...config, kg_enabled: checked })}
-                  />
-                </div>
+            </Descriptions.Item>
+            <Descriptions.Item label="PreCompact Save">
+              <Switch
+                size="small"
+                checked={config.precompact_save?.enabled ?? false}
+                onChange={(v) => onConfigChange({
+                  ...config,
+                  precompact_save: { ...config.precompact_save, enabled: v },
+                })}
+              />
+              {config.precompact_save?.enabled && (
+                <Text type="secondary" style={{ marginLeft: 8 }}>
+                  at {Math.round((config.precompact_save?.threshold ?? 0.75) * 100)}% context
+                </Text>
               )}
-              {typeof config.hooks_enabled !== "undefined" && (
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <Text>Hooks</Text>
-                  <Switch
-                    checked={config.hooks_enabled}
-                    onChange={(checked) => onConfigChange({ ...config, hooks_enabled: checked })}
-                  />
-                </div>
-              )}
-              {config.palace_path && (
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <Text>Palace Path</Text>
-                  <Text type="secondary" copyable>{config.palace_path}</Text>
-                </div>
-              )}
-            </Space>
-          </Card>
-        )}
-      </Space>
-    </div>
+            </Descriptions.Item>
+            <Descriptions.Item label="Pre-Reply Save (/new)">
+              <Switch
+                size="small"
+                checked={config.pre_reply_save ?? false}
+                onChange={(v) => onConfigChange({ ...config, pre_reply_save: v })}
+              />
+            </Descriptions.Item>
+            <Descriptions.Item label="BgSave on /new">
+              <Switch
+                size="small"
+                checked={config.bg_save_on_new ?? false}
+                onChange={(v) => onConfigChange({ ...config, bg_save_on_new: v })}
+              />
+            </Descriptions.Item>
+          </Descriptions>
+        </Card>
+      )}
+    </Space>
   );
 }
 
@@ -169,14 +185,17 @@ function StructureTab({
     title: (
       <span>
         <ApartmentOutlined style={{ marginRight: 6 }} />
-        {wing.name}
+        <Text strong>{wing.name}</Text>
+        <Text type="secondary" style={{ marginLeft: 4 }}>
+          ({(wing.rooms || []).reduce((s: number, r: any) => s + (r.drawer_count ?? r.count ?? 0), 0)})
+        </Text>
       </span>
     ),
     children: (wing.rooms || []).map((room: any) => ({
       key: `room:${wing.name}/${room.name}`,
       title: (
         <span>
-          {room.name} <Tag size="small">{room.drawer_count ?? "?"}</Tag>
+          {room.name} <Tag>{room.drawer_count ?? room.count ?? "?"}</Tag>
         </span>
       ),
       isLeaf: true,
@@ -201,40 +220,39 @@ function StructureTab({
       key: "id",
       width: 220,
       ellipsis: true,
+      render: (id: string) => <Text copyable={{ text: id }} style={{ fontSize: 11 }}>{id}</Text>,
     },
     {
       title: "Hall",
       dataIndex: "hall",
       key: "hall",
       width: 160,
-      render: (hall: string) => <Tag color={hallColor(hall)}>{hall}</Tag>,
+      render: (hall: string) => <Tag color={hallColor(hall)}>{hall || "none"}</Tag>,
     },
     {
-      title: "Summary",
-      dataIndex: "summary",
-      key: "summary",
+      title: "Content",
+      dataIndex: "content",
+      key: "content",
       ellipsis: true,
-      render: (text: string, record: any) => text || record.content?.substring(0, 100) || "-",
+      render: (text: string) => <Text style={{ fontSize: 12 }}>{(text || "").substring(0, 120)}</Text>,
     },
     {
-      title: "Created",
-      dataIndex: "created_at",
-      key: "created_at",
-      width: 180,
-      render: (ts: string) => (ts ? new Date(ts).toLocaleString() : "-"),
+      title: "Date",
+      dataIndex: "filed_at",
+      key: "filed_at",
+      width: 100,
+      render: (ts: string) => ts ? ts.substring(0, 10) : "-",
     },
     {
-      title: "Actions",
+      title: "",
       key: "actions",
-      width: 80,
+      width: 50,
       render: (_: any, record: any) => (
         <Popconfirm
-          title="Delete this drawer?"
+          title="Delete?"
           onConfirm={() => {
             onDeleteDrawer(record.id);
-            if (selectedRoom) {
-              setTimeout(() => onSelectRoom(selectedRoom.wing, selectedRoom.room), 300);
-            }
+            if (selectedRoom) setTimeout(() => onSelectRoom(selectedRoom.wing, selectedRoom.room), 300);
           }}
         >
           <Button type="text" danger size="small" icon={<DeleteOutlined />} />
@@ -245,39 +263,31 @@ function StructureTab({
 
   return (
     <div style={{ display: "flex", gap: 16, minHeight: 400 }}>
-      {/* Left: tree */}
       <Card
         size="small"
         title="Wings & Rooms"
         extra={<Button size="small" icon={<ReloadOutlined />} onClick={onRefreshWings} />}
-        style={{ width: 280, flexShrink: 0, background: isDark ? "#1f1f1f" : undefined }}
+        style={{
+          width: 280,
+          flexShrink: 0,
+          background: isDark ? "#1f1f1f" : undefined,
+        }}
       >
         {treeData.length === 0 ? (
           <Empty description="No wings found" />
         ) : (
-          <Tree
-            treeData={treeData}
-            defaultExpandAll
-            onSelect={handleSelect}
+          <Tree treeData={treeData} defaultExpandAll onSelect={handleSelect}
             selectedKeys={selectedRoom ? [`room:${selectedRoom.wing}/${selectedRoom.room}`] : []}
           />
         )}
       </Card>
 
-      {/* Right: drawer table */}
       <div style={{ flex: 1 }}>
         {selectedRoom ? (
           <Card
             size="small"
-            title={
-              <span>
-                <Tag color="blue">{selectedRoom.wing}</Tag>
-                <Tag color="green">{selectedRoom.room}</Tag>
-                <Text type="secondary" style={{ marginLeft: 8 }}>
-                  {drawerTotal} drawer{drawerTotal !== 1 ? "s" : ""}
-                </Text>
-              </span>
-            }
+            title={<><Tag color="blue">{selectedRoom.wing}</Tag><Tag color="green">{selectedRoom.room}</Tag>
+              <Text type="secondary" style={{ marginLeft: 8 }}>{drawerTotal} drawer{drawerTotal !== 1 ? "s" : ""}</Text></>}
           >
             <Table
               dataSource={drawers}
@@ -286,21 +296,14 @@ function StructureTab({
               loading={loading}
               size="small"
               pagination={{
-                current: page,
-                pageSize: 50,
-                total: drawerTotal,
-                onChange: (p) => {
-                  setPage(p);
-                  onSelectRoom(selectedRoom.wing, selectedRoom.room);
-                },
+                current: page, pageSize: 50, total: drawerTotal,
+                onChange: (p) => { setPage(p); onSelectRoom(selectedRoom.wing, selectedRoom.room); },
                 showTotal: (total) => `Total ${total}`,
               }}
             />
           </Card>
         ) : (
-          <Card size="small">
-            <Empty description="Select a room to view drawers" />
-          </Card>
+          <Card size="small"><Empty description="Select a room to view drawers" /></Card>
         )}
       </div>
     </div>
@@ -310,20 +313,10 @@ function StructureTab({
 // ── Knowledge Graph Tab ──────────────────────────────────────────────────
 
 function KnowledgeGraphTab({
-  kgEntities,
-  kgTriples,
-  kgEntityTotal,
-  kgTripleTotal,
-  kgStats,
-  onLoadEntities,
-  onLoadTriples,
-  onLoadKgStats,
+  kgEntities, kgTriples, kgEntityTotal, kgTripleTotal, kgStats,
+  onLoadEntities, onLoadTriples, onLoadKgStats,
 }: {
-  kgEntities: any[];
-  kgTriples: any[];
-  kgEntityTotal: number;
-  kgTripleTotal: number;
-  kgStats: any;
+  kgEntities: any[]; kgTriples: any[]; kgEntityTotal: number; kgTripleTotal: number; kgStats: any;
   onLoadEntities: (offset?: number, limit?: number) => void;
   onLoadTriples: (offset?: number, limit?: number) => void;
   onLoadKgStats: () => void;
@@ -331,23 +324,7 @@ function KnowledgeGraphTab({
   const [entityPage, setEntityPage] = useState(1);
   const [triplePage, setTriplePage] = useState(1);
 
-  useEffect(() => {
-    onLoadEntities(0, 50);
-    onLoadTriples(0, 50);
-  }, []);
-
-  const entityColumns = [
-    { title: "Name", dataIndex: "name", key: "name", ellipsis: true },
-    { title: "Type", dataIndex: "type", key: "type", width: 140, render: (t: string) => <Tag>{t || "unknown"}</Tag> },
-    { title: "Properties", dataIndex: "properties", key: "properties", ellipsis: true, render: (p: any) => (p ? JSON.stringify(p).substring(0, 100) : "-") },
-  ];
-
-  const tripleColumns = [
-    { title: "Subject", dataIndex: "subject", key: "subject", ellipsis: true },
-    { title: "Predicate", dataIndex: "predicate", key: "predicate", width: 180, render: (p: string) => <Tag color="purple">{p}</Tag> },
-    { title: "Object", dataIndex: "object", key: "object", ellipsis: true },
-    { title: "Source", dataIndex: "source", key: "source", width: 140, ellipsis: true },
-  ];
+  useEffect(() => { onLoadEntities(0, 50); onLoadTriples(0, 50); }, []);
 
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
@@ -359,61 +336,46 @@ function KnowledgeGraphTab({
           <Card size="small" style={{ flex: 1, minWidth: 160 }}>
             <Statistic title="Triples" value={kgStats.triple_count ?? "-"} />
           </Card>
-          <Card size="small" style={{ flex: 1, minWidth: 160 }}>
-            <Statistic title="Communities" value={kgStats.community_count ?? "-"} />
-          </Card>
         </div>
       )}
 
-      <Card
-        title="Entities"
-        size="small"
-        extra={
-          <Button size="small" icon={<ReloadOutlined />} onClick={() => { onLoadEntities(0, 50); onLoadKgStats(); }}>
-            Refresh
-          </Button>
-        }
+      <Card title="Entities" size="small"
+        extra={<Button size="small" icon={<ReloadOutlined />} onClick={() => { onLoadEntities(0, 50); onLoadKgStats(); }}>Refresh</Button>}
       >
         <Table
           dataSource={kgEntities}
-          columns={entityColumns}
+          columns={[
+            { title: "Name", dataIndex: "name", key: "name", ellipsis: true },
+            { title: "Type", dataIndex: "type", key: "type", width: 120, render: (t: string) => <Tag>{t || "auto"}</Tag> },
+            { title: "Properties", dataIndex: "properties", key: "properties", ellipsis: true, render: (p: any) => p ? JSON.stringify(p).substring(0, 80) : "-" },
+          ]}
           rowKey={(r) => r.id ?? r.name ?? JSON.stringify(r)}
           size="small"
           pagination={{
-            current: entityPage,
-            pageSize: 50,
-            total: kgEntityTotal,
-            onChange: (p) => {
-              setEntityPage(p);
-              onLoadEntities((p - 1) * 50, 50);
-            },
+            current: entityPage, pageSize: 50, total: kgEntityTotal,
+            onChange: (p) => { setEntityPage(p); onLoadEntities((p - 1) * 50, 50); },
             showTotal: (total) => `Total ${total}`,
           }}
         />
       </Card>
 
-      <Card
-        title="Triples"
-        size="small"
-        extra={
-          <Button size="small" icon={<ReloadOutlined />} onClick={() => onLoadTriples(0, 50)}>
-            Refresh
-          </Button>
-        }
+      <Card title="Triples" size="small"
+        extra={<Button size="small" icon={<ReloadOutlined />} onClick={() => onLoadTriples(0, 50)}>Refresh</Button>}
       >
         <Table
           dataSource={kgTriples}
-          columns={tripleColumns}
+          columns={[
+            { title: "Subject", dataIndex: "subject", key: "subject", ellipsis: true },
+            { title: "Predicate", dataIndex: "predicate", key: "predicate", width: 160, render: (p: string) => <Tag color="purple">{p}</Tag> },
+            { title: "Object", dataIndex: "object", key: "object", ellipsis: true },
+            { title: "Valid From", dataIndex: "valid_from", key: "valid_from", width: 100 },
+            { title: "Source", dataIndex: "source_closet", key: "source", width: 120, ellipsis: true },
+          ]}
           rowKey={(r) => r.id ?? `${r.subject}-${r.predicate}-${r.object}`}
           size="small"
           pagination={{
-            current: triplePage,
-            pageSize: 50,
-            total: kgTripleTotal,
-            onChange: (p) => {
-              setTriplePage(p);
-              onLoadTriples((p - 1) * 50, 50);
-            },
+            current: triplePage, pageSize: 50, total: kgTripleTotal,
+            onChange: (p) => { setTriplePage(p); onLoadTriples((p - 1) * 50, 50); },
             showTotal: (total) => `Total ${total}`,
           }}
         />
@@ -431,21 +393,19 @@ function HooksTab({
   hookLog: string;
   onLoadLog: (lines?: number) => void;
 }) {
+  const { isDark } = useTheme();
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(false);
 
-  useEffect(() => {
-    onLoadLog(200);
-  }, []);
+  useEffect(() => { onLoadLog(200); }, []);
 
   useEffect(() => {
-    if (autoRefresh) {
-      intervalRef.current = setInterval(() => onLoadLog(200), 5000);
-    }
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
+    if (autoRefresh) intervalRef.current = setInterval(() => onLoadLog(200), 5000);
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
   }, [autoRefresh, onLoadLog]);
+
+  // Parse log lines for colored display
+  const logLines = (hookLog || "").split("\n").filter(Boolean);
 
   return (
     <Card
@@ -455,23 +415,37 @@ function HooksTab({
         <Space>
           <Text type="secondary">Auto-refresh</Text>
           <Switch size="small" checked={autoRefresh} onChange={setAutoRefresh} />
-          <Button size="small" icon={<ReloadOutlined />} onClick={() => onLoadLog(200)}>
-            Refresh
-          </Button>
+          <Button size="small" icon={<ReloadOutlined />} onClick={() => onLoadLog(200)}>Refresh</Button>
         </Space>
       }
     >
-      <Input.TextArea
-        value={hookLog || "(no logs)"}
-        readOnly
-        autoSize={{ minRows: 16, maxRows: 30 }}
+      <div
         style={{
           fontFamily: "monospace",
           fontSize: 12,
+          lineHeight: 1.6,
+          padding: 12,
+          borderRadius: 6,
+          maxHeight: 500,
+          overflowY: "auto",
           backgroundColor: isDark ? "#141414" : "#fafafa",
           color: isDark ? "rgba(255,255,255,0.85)" : "rgba(0,0,0,0.88)",
+          border: isDark ? "1px solid #303030" : "1px solid #e8e8e8",
         }}
-      />
+      >
+        {logLines.length === 0 ? (
+          <Text type="secondary">(no logs)</Text>
+        ) : (
+          logLines.map((line, i) => {
+            let color = isDark ? "rgba(255,255,255,0.65)" : "rgba(0,0,0,0.65)";
+            if (line.includes("ERROR") || line.includes("FAILED")) color = "#ff4d4f";
+            else if (line.includes("BgSave") || line.includes("Diary")) color = isDark ? "#52c41a" : "#389e0d";
+            else if (line.includes("Interval") || line.includes("PreCompact")) color = isDark ? "#1890ff" : "#096dd9";
+            else if (line.includes("PreReply")) color = isDark ? "#faad14" : "#d48806";
+            return <div key={i} style={{ color, whiteSpace: "pre-wrap" }}>{line}</div>;
+          })
+        )}
+      </div>
     </Card>
   );
 }
@@ -480,81 +454,36 @@ function HooksTab({
 
 function MemPalacePage() {
   const {
-    status,
-    wings,
-    drawers,
-    drawerTotal,
-    config,
-    hookLog,
-    kgStats,
-    kgEntities,
-    kgTriples,
-    kgEntityTotal,
-    kgTripleTotal,
+    status, wings, drawers, drawerTotal, config, hookLog,
+    kgStats, kgEntities, kgTriples, kgEntityTotal, kgTripleTotal,
     loading,
-    loadStatus,
-    loadWings,
-    loadDrawers,
-    loadConfig,
-    updateConfig,
-    loadHookLog,
-    loadKgStats,
-    loadKgEntities,
-    loadKgTriples,
-    deleteDrawer,
+    loadStatus, loadWings, loadDrawers, loadConfig, updateConfig,
+    loadHookLog, loadKgStats, loadKgEntities, loadKgTriples, deleteDrawer,
   } = useMemPalace();
 
   const handleRefreshAll = () => {
-    loadStatus();
-    loadWings();
-    loadConfig();
-    loadKgStats();
+    loadStatus(); loadWings(); loadConfig(); loadKgStats();
   };
 
   return (
     <div>
       <PageHeader
-        items={[{ title: "Agent" }, { title: "MemPalace" }]}
-        extra={
-          <Button icon={<ReloadOutlined />} onClick={handleRefreshAll}>
-            Refresh
-          </Button>
-        }
+        items={[{ title: "Settings" }, { title: "MemPalace" }]}
+        extra={<Button icon={<ReloadOutlined />} onClick={handleRefreshAll}>Refresh</Button>}
       />
-
       <div style={{ padding: 20 }}>
         <Tabs defaultActiveKey="overview">
           <TabPane tab="Overview" key="overview">
-            <OverviewTab
-              status={status}
-              config={config}
-              kgStats={kgStats}
-              onRefresh={handleRefreshAll}
-              onConfigChange={updateConfig}
-            />
+            <OverviewTab status={status} config={config} kgStats={kgStats} onRefresh={handleRefreshAll} onConfigChange={updateConfig} />
           </TabPane>
           <TabPane tab="Structure" key="structure">
-            <StructureTab
-              wings={wings}
-              drawers={drawers}
-              drawerTotal={drawerTotal}
-              loading={loading}
-              onSelectRoom={loadDrawers}
-              onDeleteDrawer={deleteDrawer}
-              onRefreshWings={loadWings}
-            />
+            <StructureTab wings={wings} drawers={drawers} drawerTotal={drawerTotal} loading={loading}
+              onSelectRoom={loadDrawers} onDeleteDrawer={deleteDrawer} onRefreshWings={loadWings} />
           </TabPane>
           <TabPane tab="Knowledge Graph" key="kg">
-            <KnowledgeGraphTab
-              kgEntities={kgEntities}
-              kgTriples={kgTriples}
-              kgEntityTotal={kgEntityTotal}
-              kgTripleTotal={kgTripleTotal}
-              kgStats={kgStats}
-              onLoadEntities={loadKgEntities}
-              onLoadTriples={loadKgTriples}
-              onLoadKgStats={loadKgStats}
-            />
+            <KnowledgeGraphTab kgEntities={kgEntities} kgTriples={kgTriples}
+              kgEntityTotal={kgEntityTotal} kgTripleTotal={kgTripleTotal} kgStats={kgStats}
+              onLoadEntities={loadKgEntities} onLoadTriples={loadKgTriples} onLoadKgStats={loadKgStats} />
           </TabPane>
           <TabPane tab="Hooks" key="hooks">
             <HooksTab hookLog={hookLog} onLoadLog={loadHookLog} />
