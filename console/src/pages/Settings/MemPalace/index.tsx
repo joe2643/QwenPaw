@@ -15,8 +15,6 @@ import {
   Statistic,
   Popconfirm,
   Typography,
-  Descriptions,
-  Divider,
 } from "antd";
 import {
   ReloadOutlined,
@@ -25,7 +23,6 @@ import {
   ApartmentOutlined,
   NodeIndexOutlined,
   FileTextOutlined,
-  SettingOutlined,
 } from "@ant-design/icons";
 import type { DataNode } from "antd/es/tree";
 import { PageHeader } from "@/components/PageHeader";
@@ -53,18 +50,13 @@ function hallColor(hall: string): string {
 
 function OverviewTab({
   status,
-  config,
   kgStats,
   onRefresh,
-  onConfigChange,
 }: {
   status: any;
-  config: any;
   kgStats: any;
   onRefresh: () => void;
-  onConfigChange: (data: any) => void;
 }) {
-  const { isDark } = useTheme();
 
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
@@ -84,75 +76,7 @@ function OverviewTab({
         </Card>
       </div>
 
-      {/* Hook Config */}
-      {config && (
-        <Card
-          title={<><SettingOutlined style={{ marginRight: 8 }} />Hook Configuration</>}
-          size="small"
-          extra={<Button size="small" icon={<ReloadOutlined />} onClick={onRefresh}>Refresh</Button>}
-        >
-          <Descriptions column={2} size="small" bordered>
-            <Descriptions.Item label="MemPalace Enabled">
-              <Switch
-                size="small"
-                checked={config.enabled ?? false}
-                onChange={(v) => onConfigChange({ ...config, enabled: v })}
-              />
-            </Descriptions.Item>
-            <Descriptions.Item label="Session WAL">
-              <Switch
-                size="small"
-                checked={config.session_wal ?? false}
-                onChange={(v) => onConfigChange({ ...config, session_wal: v })}
-              />
-            </Descriptions.Item>
-            <Descriptions.Item label="Interval Save">
-              <Switch
-                size="small"
-                checked={config.interval_save?.enabled ?? false}
-                onChange={(v) => onConfigChange({
-                  ...config,
-                  interval_save: { ...config.interval_save, enabled: v },
-                })}
-              />
-              {config.interval_save?.enabled && (
-                <Text type="secondary" style={{ marginLeft: 8 }}>
-                  every {config.interval_save?.write_interval ?? 15} msgs
-                </Text>
-              )}
-            </Descriptions.Item>
-            <Descriptions.Item label="PreCompact Save">
-              <Switch
-                size="small"
-                checked={config.precompact_save?.enabled ?? false}
-                onChange={(v) => onConfigChange({
-                  ...config,
-                  precompact_save: { ...config.precompact_save, enabled: v },
-                })}
-              />
-              {config.precompact_save?.enabled && (
-                <Text type="secondary" style={{ marginLeft: 8 }}>
-                  at {Math.round((config.precompact_save?.threshold ?? 0.75) * 100)}% context
-                </Text>
-              )}
-            </Descriptions.Item>
-            <Descriptions.Item label="Pre-Reply Save (/new)">
-              <Switch
-                size="small"
-                checked={config.pre_reply_save ?? false}
-                onChange={(v) => onConfigChange({ ...config, pre_reply_save: v })}
-              />
-            </Descriptions.Item>
-            <Descriptions.Item label="BgSave on /new">
-              <Switch
-                size="small"
-                checked={config.bg_save_on_new ?? false}
-                onChange={(v) => onConfigChange({ ...config, bg_save_on_new: v })}
-              />
-            </Descriptions.Item>
-          </Descriptions>
-        </Card>
-      )}
+
     </Space>
   );
 }

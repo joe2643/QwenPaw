@@ -39,7 +39,7 @@ export function useMemPalace() {
   const loadWings = useCallback(async () => {
     try {
       const data = await mempalaceApi.getWings();
-      setWings(Array.isArray(data) ? data : []);
+      setWings(Array.isArray(data?.wings) ? data.wings : Array.isArray(data) ? data : []);
     } catch (err) {
       console.error("Failed to load wings:", err);
       message.error("Failed to load MemPalace wings");
@@ -92,7 +92,7 @@ export function useMemPalace() {
   const loadHookLog = useCallback(async (lines = 200) => {
     try {
       const data = await mempalaceApi.getHookLog(lines);
-      setHookLog(typeof data === "string" ? data : data?.log ?? JSON.stringify(data, null, 2));
+      setHookLog(typeof data === "string" ? data : data?.log ?? data?.lines?.join?.("\n") ?? JSON.stringify(data, null, 2));
     } catch (err) {
       console.error("Failed to load hook log:", err);
     }
