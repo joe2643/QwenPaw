@@ -42,6 +42,7 @@ const pathToKey: Record<string, string> = {
   "/models": "models",
   "/environments": "environments",
   "/agent-config": "agent-config",
+  "/mempalace": "mempalace",
   "/security": "security",
   "/token-usage": "token-usage",
   "/voice-transcription": "voice-transcription",
