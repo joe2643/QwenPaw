@@ -16,6 +16,7 @@ import SkillPoolPage from "../../pages/Agent/SkillPool";
 import ToolsPage from "../../pages/Agent/Tools";
 import WorkspacePage from "../../pages/Agent/Workspace";
 import MCPPage from "../../pages/Agent/MCP";
+import MemPalacePage from "../../pages/Agent/MemPalace";
 import ModelsPage from "../../pages/Settings/Models";
 import EnvironmentsPage from "../../pages/Settings/Environments";
 import SecurityPage from "../../pages/Settings/Security";
@@ -71,6 +72,7 @@ export default function MainLayout() {
               <Route path="/skill-pool" element={<SkillPoolPage />} />
               <Route path="/tools" element={<ToolsPage />} />
               <Route path="/mcp" element={<MCPPage />} />
+              <Route path="/mempalace" element={<MemPalacePage />} />
               <Route path="/workspace" element={<WorkspacePage />} />
               <Route path="/agents" element={<AgentsPage />} />
               <Route path="/models" element={<ModelsPage />} />

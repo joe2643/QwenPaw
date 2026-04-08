@@ -17,6 +17,7 @@ import { agentsApi } from "./modules/agents";
 import { workspaceApi } from "./modules/workspace";
 import { localModelApi } from "./modules/localModel";
 import { mcpApi } from "./modules/mcp";
+import { mempalaceApi } from "./modules/mempalace";
 import { tokenUsageApi } from "./modules/tokenUsage";
 import { toolsApi } from "./modules/tools";
 import { securityApi } from "./modules/security";
@@ -63,6 +64,9 @@ export const api = {
 
   // MCP Clients
   ...mcpApi,
+
+  // MemPalace
+  ...mempalaceApi,
 
   // Token Usage
   ...tokenUsageApi,
