@@ -138,7 +138,7 @@ function StructureTab({
       <Card size="small" title={<span style={ds.text}>Wings & Rooms</span>}
         extra={<Button size="small" icon={<ReloadOutlined />} onClick={onRefreshWings} />}
         style={{ width: 280, flexShrink: 0, ...ds.cardDark }}>
-        {treeData.length === 0 ? <Empty description="No wings" /> :
+        {treeData.length === 0 ? <Empty description={<span style={ds.textSecondary}>No wings</span>} /> :
           <Tree treeData={treeData} defaultExpandAll onSelect={handleSelect}
             selectedKeys={selectedRoom ? [`room:${selectedRoom.wing}/${selectedRoom.room}`] : []} />}
       </Card>
@@ -148,10 +148,11 @@ function StructureTab({
             title={<span style={ds.text}><Tag color="blue">{selectedRoom.wing}</Tag><Tag color="green">{selectedRoom.room}</Tag>
               <span style={ds.textSecondary}>{drawerTotal} drawer{drawerTotal !== 1 ? "s" : ""}</span></span>}>
             <Table dataSource={drawers} columns={columns} rowKey="id" loading={loading} size="small"
+              style={ds.isDark ? { color: "rgba(255,255,255,0.85)" } : {}}
               pagination={{ current: page, pageSize: 50, total: drawerTotal, showTotal: (t) => `Total ${t}`,
                 onChange: (p) => { setPage(p); onSelectRoom(selectedRoom.wing, selectedRoom.room, (p-1)*50, 50); } }} />
           </Card>
-        ) : <Card size="small" style={ds.card}><Empty description="Select a room" /></Card>}
+        ) : <Card size="small" style={ds.card}><Empty description={<span style={ds.textSecondary}>Select a room</span>} /></Card>}
       </div>
     </div>
   );
