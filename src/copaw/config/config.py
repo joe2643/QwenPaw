@@ -774,6 +774,10 @@ class AgentProfileConfig(BaseModel):
         default=None,
         description="Security configuration for this agent",
     )
+    mempalace: MemPalaceHooksConfig = Field(
+        default_factory=MemPalaceHooksConfig,
+        description="MemPalace integration configuration",
+    )
 
 
 class AgentsConfig(BaseModel):
