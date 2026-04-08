@@ -15,7 +15,6 @@ import {
   Statistic,
   Popconfirm,
   Typography,
-  theme,
 } from "antd";
 import {
   ReloadOutlined,
@@ -29,6 +28,7 @@ import type { DataNode } from "antd/es/tree";
 import { PageHeader } from "@/components/PageHeader";
 import { useTheme } from "@/contexts/ThemeContext";
 import { useMemPalace } from "./useMemPalace";
+import styles from "./index.module.less";
 
 const { Text, Title } = Typography;
 const { TabPane } = Tabs;
@@ -63,17 +63,17 @@ function OverviewTab({
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       {/* Stats row */}
-      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-        <Card size="small" style={{ flex: 1, minWidth: 180 }}>
+      <div className={styles.statsRow}>
+        <Card size="small" className={styles.statCard}>
           <Statistic title="Total Drawers" value={status?.total_drawers ?? "-"} prefix={<DatabaseOutlined />} />
         </Card>
-        <Card size="small" style={{ flex: 1, minWidth: 180 }}>
+        <Card size="small" className={styles.statCard}>
           <Statistic title="Wings" value={status?.wings ? Object.keys(status.wings).length : "-"} prefix={<ApartmentOutlined />} />
         </Card>
-        <Card size="small" style={{ flex: 1, minWidth: 180 }}>
+        <Card size="small" className={styles.statCard}>
           <Statistic title="KG Entities" value={kgStats?.entity_count ?? status?.kg?.entity_count ?? "-"} prefix={<NodeIndexOutlined />} />
         </Card>
-        <Card size="small" style={{ flex: 1, minWidth: 180 }}>
+        <Card size="small" className={styles.statCard}>
           <Statistic title="KG Triples" value={kgStats?.triple_count ?? status?.kg?.triple_count ?? "-"} prefix={<FileTextOutlined />} />
         </Card>
       </div>
@@ -98,7 +98,7 @@ function StructureTab({
   drawers: any[];
   drawerTotal: number;
   loading: boolean;
-  onSelectRoom: (wing: string, room: string) => void;
+  onSelectRoom: (wing: string, room: string, offset?: number, limit?: number) => void;
   onDeleteDrawer: (id: string) => void;
   onRefreshWings: () => void;
 }) {
@@ -135,7 +135,7 @@ function StructureTab({
       const [wing, room] = path.split("/");
       setSelectedRoom({ wing, room });
       setPage(1);
-      onSelectRoom(wing, room);
+      onSelectRoom(wing, room, 0, 50);
     }
   };
 
@@ -194,16 +194,12 @@ function StructureTab({
   ];
 
   return (
-    <div style={{ display: "flex", gap: 16, minHeight: 400 }}>
+    <div className={styles.structureLayout}>
       <Card
         size="small"
         title="Wings & Rooms"
         extra={<Button size="small" icon={<ReloadOutlined />} onClick={onRefreshWings} />}
-        style={{
-          width: 280,
-          flexShrink: 0,
-          background: isDark ? "#1f1f1f" : undefined,
-        }}
+        className={styles.treePanel}
       >
         {treeData.length === 0 ? (
           <Empty description="No wings found" />
@@ -214,7 +210,7 @@ function StructureTab({
         )}
       </Card>
 
-      <div style={{ flex: 1 }}>
+      <div className={styles.drawerPanel}>
         {selectedRoom ? (
           <Card
             size="small"
@@ -229,7 +225,7 @@ function StructureTab({
               size="small"
               pagination={{
                 current: page, pageSize: 50, total: drawerTotal,
-                onChange: (p) => { setPage(p); onSelectRoom(selectedRoom.wing, selectedRoom.room); },
+                onChange: (p) => { setPage(p); onSelectRoom(selectedRoom.wing, selectedRoom.room, (p - 1) * 50, 50); },
                 showTotal: (total) => `Total ${total}`,
               }}
             />
@@ -261,11 +257,11 @@ function KnowledgeGraphTab({
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       {kgStats && (
-        <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-          <Card size="small" style={{ flex: 1, minWidth: 160 }}>
+        <div className={styles.statsRow}>
+          <Card size="small" className={styles.statCard}>
             <Statistic title="Entities" value={kgStats.entity_count ?? "-"} />
           </Card>
-          <Card size="small" style={{ flex: 1, minWidth: 160 }}>
+          <Card size="small" className={styles.statCard}>
             <Statistic title="Triples" value={kgStats.triple_count ?? "-"} />
           </Card>
         </div>
@@ -325,7 +321,6 @@ function HooksTab({
   hookLog: string;
   onLoadLog: (lines?: number) => void;
 }) {
-  const { isDark } = useTheme();
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(false);
 
@@ -351,30 +346,17 @@ function HooksTab({
         </Space>
       }
     >
-      <div
-        style={{
-          fontFamily: "monospace",
-          fontSize: 12,
-          lineHeight: 1.6,
-          padding: 12,
-          borderRadius: 6,
-          maxHeight: 500,
-          overflowY: "auto",
-          backgroundColor: isDark ? "#141414" : "#fafafa",
-          color: isDark ? "rgba(255,255,255,0.85)" : "rgba(0,0,0,0.88)",
-          border: isDark ? "1px solid #303030" : "1px solid #e8e8e8",
-        }}
-      >
+      <div className={styles.hookLogContainer}>
         {logLines.length === 0 ? (
           <Text type="secondary">(no logs)</Text>
         ) : (
           logLines.map((line, i) => {
-            let color = isDark ? "rgba(255,255,255,0.65)" : "rgba(0,0,0,0.65)";
-            if (line.includes("ERROR") || line.includes("FAILED")) color = "#ff4d4f";
-            else if (line.includes("BgSave") || line.includes("Diary")) color = isDark ? "#52c41a" : "#389e0d";
-            else if (line.includes("Interval") || line.includes("PreCompact")) color = isDark ? "#1890ff" : "#096dd9";
-            else if (line.includes("PreReply")) color = isDark ? "#faad14" : "#d48806";
-            return <div key={i} style={{ color, whiteSpace: "pre-wrap" }}>{line}</div>;
+            let cls = styles.logLineDefault;
+            if (line.includes("ERROR") || line.includes("FAILED")) cls = styles.logLineError;
+            else if (line.includes("BgSave") || line.includes("Diary")) cls = styles.logLineSave;
+            else if (line.includes("Interval") || line.includes("PreCompact")) cls = styles.logLineInterval;
+            else if (line.includes("PreReply")) cls = styles.logLinePreReply;
+            return <div key={i} className={cls} style={{ whiteSpace: "pre-wrap" }}>{line}</div>;
           })
         )}
       </div>
@@ -385,7 +367,6 @@ function HooksTab({
 // ── Main Page ────────────────────────────────────────────────────────────
 
 function MemPalacePage() {
-  const { token } = theme.useToken();
   const {
     status, wings, drawers, drawerTotal, config, hookLog,
     kgStats, kgEntities, kgTriples, kgEntityTotal, kgTripleTotal,
@@ -399,12 +380,12 @@ function MemPalacePage() {
   };
 
   return (
-    <div>
+    <div className={styles.mempalacePage}>
       <PageHeader
         items={[{ title: "Settings" }, { title: "MemPalace" }]}
         extra={<Button icon={<ReloadOutlined />} onClick={handleRefreshAll}>Refresh</Button>}
       />
-      <div style={{ padding: 20, color: token.colorText }}>
+      <div className={styles.content}>
         <Tabs defaultActiveKey="overview">
           <TabPane tab="Overview" key="overview">
             <OverviewTab status={status} config={config} kgStats={kgStats} onRefresh={handleRefreshAll} onConfigChange={updateConfig} />
