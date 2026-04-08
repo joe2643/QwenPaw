@@ -225,7 +225,7 @@ class Workspace:
             ),
         )
 
-        # Priority 30: Channel manager
+        # Priority 30: Channel manager (reusable to preserve neonize WebSocket on reload)
         sm.register(
             ServiceDescriptor(
                 name="channel_manager",
@@ -235,7 +235,7 @@ class Workspace:
                 stop_method="stop_all",
                 priority=30,
                 concurrent_init=False,
-                reusable=False,
+                reusable=True,
             ),
         )
 
