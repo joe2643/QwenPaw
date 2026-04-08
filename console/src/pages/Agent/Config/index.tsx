@@ -9,6 +9,7 @@ import {
   ToolResultCompactCard,
   MemorySummaryCard,
   EmbeddingConfigCard,
+  MemPalaceCard,
 } from "./components";
 import { PageHeader } from "@/components/PageHeader";
 import styles from "./index.module.less";
@@ -82,6 +83,9 @@ function AgentConfigPage() {
             <MemorySummaryCard />
 
             <EmbeddingConfigCard />
+
+            {/* MemPalace hooks — manages own state via API */}
+            <MemPalaceCard />
 
           </Form>
         </div>
