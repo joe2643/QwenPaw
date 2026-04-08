@@ -970,7 +970,7 @@ async def get_media_server_status(request: Request) -> dict:
 
 # -- MemPalace Config --
 
-@router.get("/config/mempalace", tags=["config"])
+@router.get("/mempalace", tags=["config"])
 async def get_mempalace_config(request: Request):
     agent = get_agent_for_request(request)
     cfg = getattr(agent.config, "mempalace", None)
@@ -979,7 +979,7 @@ async def get_mempalace_config(request: Request):
     return cfg.model_dump()
 
 
-@router.put("/config/mempalace", tags=["config"])
+@router.put("/mempalace", tags=["config"])
 async def update_mempalace_config(request: Request, body: dict = Body(...)):
     agent = get_agent_for_request(request)
     from copaw.config.config import MemPalaceHooksConfig
