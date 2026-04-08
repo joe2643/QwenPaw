@@ -1179,7 +1179,7 @@ class Config(BaseModel):
     last_api: LastApiConfig = LastApiConfig()
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     last_dispatch: Optional[LastDispatchConfig] = None
-    security: SecurityConfig
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
     mempalace: MemPalaceHooksConfig = Field(default_factory=MemPalaceHooksConfig)
     media_server: MediaServerConfig = Field(
         default_factory=MediaServerConfig,
