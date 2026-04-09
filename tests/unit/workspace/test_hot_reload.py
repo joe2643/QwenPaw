@@ -205,32 +205,60 @@ class TestHotReloadChannelState:
     """Regression tests for the Runner-not-started bug after hot-reload.
     
     When channel_manager is reusable=True and a model change triggers
-    hot-reload, the channels' _process gets updated but
-    UnifiedQueueManager/TaskTracker consumer closures retain stale
-    runner refs. These tests verify the current behavior.
+    hot-reload, the create_channel_service() post_init now properly
+    reuses the existing ChannelManager instance (instead of creating a
+    new one that's never started). reload_channel_service() then swaps
+    all channels' _process to the new runner.
     """
 
-    def test_reusable_is_false_by_default(self):
-        """channel_manager must NOT be reusable — this prevents Runner-not-started."""
+    def test_reusable_is_true_by_design(self):
+        """channel_manager MUST be reusable=True to preserve neonize WebSocket.
+        
+        The Runner-not-started bug was caused by create_channel_service
+        always creating a NEW ChannelManager during reload, which was
+        never started (start_all skipped for reused services). Fix:
+        create_channel_service now returns the existing_cm when provided.
+        """
         from copaw.app.workspace.workspace import Workspace
         import inspect
         source = inspect.getsource(Workspace._register_services)
-        # Find the channel_manager descriptor
         lines = source.split('\n')
         in_channel_manager = False
+        found = False
         for line in lines:
             if 'name="channel_manager"' in line:
                 in_channel_manager = True
             if in_channel_manager and 'reusable=' in line:
-                assert 'reusable=False' in line, (
-                    "CRITICAL: channel_manager must be reusable=False! "
-                    "reusable=True causes Runner-not-started errors after "
-                    "model changes because UnifiedQueueManager consumer "
-                    "closures retain stale runner refs."
+                assert 'reusable=True' in line, (
+                    "CRITICAL: channel_manager must be reusable=True! "
+                    "reusable=False kills the neonize WebSocket on reload, "
+                    "causing permanent channel disconnect."
                 )
+                found = True
                 break
-        else:
-            pytest.fail("Could not find channel_manager reusable setting")
+        assert found, "Could not find channel_manager reusable setting"
+
+    def test_create_channel_service_reuses_existing(self):
+        """create_channel_service must return existing_cm when provided."""
+        import asyncio
+        from copaw.app.workspace.service_factories import create_channel_service
+        from unittest.mock import MagicMock
+
+        mock_cm = MagicMock()
+        mock_runner = MagicMock()
+
+        ws = MagicMock()
+        ws._config.channels = {"whatsapp": {"enabled": True}}
+        ws._service_manager.services = {"runner": mock_runner}
+        ws.workspace_dir = MagicMock()
+        ws.agent_id = "test"
+
+        result = asyncio.get_event_loop().run_until_complete(
+            create_channel_service(ws, mock_cm)
+        )
+        assert result is mock_cm, (
+            "create_channel_service must return existing_cm, not create a new one"
+        )
 
     def test_old_runner_health_false_after_stop(self):
         """When old workspace stops, its runner._health should be False."""
