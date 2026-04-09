@@ -13,6 +13,7 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 import os
 import re
@@ -663,7 +664,18 @@ class WhatsAppChannel(BaseChannel):
                     media_to_add = []
                     for h in history[-10:]:
                         ts = h.get("ts", "")
-                        ts_prefix = f"[{ts}] " if ts else ""
+                        ts_prefix = ""
+                        if ts:
+                            try:
+                                # Check if timestamp is in milliseconds (length > 10)
+                                ts_val = int(ts)
+                                if ts_val > 1e12:
+                                    ts_val = ts_val / 1000
+                                dt = datetime.datetime.fromtimestamp(ts_val, tz=datetime.timezone(datetime.timedelta(hours=8)))
+                                ts_formatted = dt.strftime("%Y年%-m月%-d日 %H:%M:%S (HKT)")
+                                ts_prefix = f"[{ts_formatted}] "
+                            except Exception:
+                                ts_prefix = f"[{ts}] "
                         line = f"  {ts_prefix}{h['sender']}: {h['body']}"
                         media_paths = h.get("media") or []
                         if media_paths:

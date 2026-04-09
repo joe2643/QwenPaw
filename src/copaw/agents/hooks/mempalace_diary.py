@@ -13,7 +13,7 @@ import asyncio
 import hashlib
 import json
 import logging
-import sqlite3
+from ._mcp_client import mcp_call
 from typing import Any
 from pathlib import Path
 from datetime import datetime
@@ -213,118 +213,72 @@ async def _bg_save_from_messages(messages: list, source: str = "hook") -> bool:
         await _write_diary(messages, source)
         return False
 
-    # Write knowledge items to ChromaDB
-    items = result.get("items", [])
-    triples = result.get("triples", [])
-
-    from mempalace.chroma_helper import get_collection
-    from mempalace.config import MempalaceConfig
-    cfg = MempalaceConfig()
-    col = get_collection(palace_path=cfg.palace_path)
+    # Write via HTTP MCP (includes duplicate check, proper metadata)
+    items = result.get('items', [])
+    triples = result.get('triples', [])
     now = datetime.now()
     saved = 0
 
     for item in items[:5]:
         try:
-            content = item.get("content", "")
-            wing = item.get("wing", "knowledge")
-            room = item.get("room", "general")
-            hall = item.get("hall", "hall_facts")
-            if not content or len(content) < 10:
+            item_content = item.get('content', '')
+            wing = item.get('wing', 'wing_general')
+            room = item.get('room', 'general')
+            if not item_content or len(item_content) < 10:
                 continue
-            # Duplicate check (match MCP server's tool_add_drawer behavior)
-            try:
-                dup_results = col.query(query_texts=[content], n_results=1, include=["distances"])
-                if dup_results["ids"] and dup_results["ids"][0]:
-                    similarity = round(1 - dup_results["distances"][0][0], 3)
-                    if similarity >= 0.9:
-                        _mp_log(f"BgSave({source}): skipping duplicate (similarity={similarity})")
-                        continue
-            except Exception:
-                pass  # If dup check fails, proceed with write
-
-            entry_id = f"drawer_{wing}_{room}_{hashlib.md5((content[:100] + now.isoformat()).encode()).hexdigest()[:16]}"
-            col.add(
-                ids=[entry_id],
-                documents=[content],
-                metadatas=[{
-                    "wing": wing, "room": room, "hall": hall,
-                    "type": "knowledge", "filed_at": now.isoformat(),
-                    "date": now.strftime("%Y-%m-%d"), "added_by": f"bgsave_{source}",
-                }],
-            )
-            saved += 1
+            if not wing.startswith('wing_'):
+                wing = f'wing_{wing}'
+            res = mcp_call('mempalace_add_drawer', {
+                'wing': wing, 'room': room, 'content': item_content,
+                'added_by': f'bgsave_{source}',
+            })
+            if res.get('success'):
+                saved += 1
+            elif res.get('reason') == 'duplicate':
+                _mp_log(f'BgSave({source}): skipping duplicate')
+            elif 'error' in res:
+                _mp_log(f'BgSave({source}): MCP error: {res["error"]}')
         except Exception as e:
-            _mp_log(f"BgSave({source}): write failed: {e}")
+            _mp_log(f'BgSave({source}): write failed: {e}')
 
-    # Write KG triples
     kg_added = 0
-    if triples:
+    for triple in (triples or [])[:5]:
         try:
-            db = sqlite3.connect(str(Path.home() / ".mempalace" / "knowledge_graph.sqlite3"))
-            cur = db.cursor()
-            for triple in triples[:5]:
-                if isinstance(triple, list) and len(triple) >= 3:
-                    subj, pred, obj = str(triple[0]).strip(), str(triple[1]).strip(), str(triple[2]).strip()
-                    if subj and pred and obj and len(subj) > 1:
-                        cur.execute("SELECT id FROM triples WHERE subject=? AND predicate=? AND object=?", (subj, pred, obj))
-                        if not cur.fetchone():
-                            cur.execute(
-                                "INSERT INTO triples (subject, predicate, object, valid_from, confidence, source_closet, extracted_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                (subj, pred, obj, now.strftime("%Y-%m-%d"), 0.8, f"bgsave_{source}", now.isoformat()),
-                            )
-                            kg_added += 1
-                            for entity in [subj, obj]:
-                                cur.execute("INSERT OR IGNORE INTO entities (name, type, created_at) VALUES (?, ?, ?)",
-                                           (entity, "auto", now.isoformat()))
-            if kg_added:
-                db.commit()
-            db.close()
+            if isinstance(triple, list) and len(triple) >= 3:
+                subj, pred, obj = str(triple[0]).strip(), str(triple[1]).strip(), str(triple[2]).strip()
+                if subj and pred and obj and len(subj) > 1:
+                    res = mcp_call('mempalace_kg_add', {
+                        'subject': subj, 'predicate': pred, 'object': obj,
+                        'valid_from': now.strftime('%Y-%m-%d'),
+                    })
+                    if res.get('success'):
+                        kg_added += 1
         except Exception as e:
-            _mp_log(f"BgSave({source}): KG write failed: {e}")
+            _mp_log(f'BgSave({source}): KG failed: {e}')
 
-    _mp_log(f"BgSave({source}): {saved} items + {kg_added} triples saved")
+    _mp_log(f'BgSave({source}): {saved} items + {kg_added} triples (via MCP)')
 
-    # Also write diary
-    await _write_diary(messages, source, note=f"extracted:{saved}items+{kg_added}triples")
+    await _write_diary(messages, source, note=f'extracted:{saved}items+{kg_added}triples')
     return saved > 0
 
 
 async def _write_diary(messages: list, source: str = "hook", note: str = "") -> None:
-    """Write a quick diary entry (no LLM needed)."""
-    import sys
-    sys.path.insert(0, str(Path.home() / ".local" / "lib" / "python3.13" / "site-packages"))
+    """Write diary entry via MCP."""
     try:
-        from mempalace.chroma_helper import get_collection
-        from mempalace.config import MempalaceConfig
-        cfg = MempalaceConfig()
-        col = get_collection(palace_path=cfg.palace_path)
         now = datetime.now()
         user_count = _count_user_messages(messages)
-        entry = f"{now.strftime('%Y-%m-%d')}|session.{source}|{user_count}msgs|auto|*neutral*|★★★"
+        entry = f"{now.strftime('%Y-%m-%d')}|session.{source}|{user_count}msgs|auto|*neutral*|\u2605\u2605\u2605"
         if note:
             entry += f"|{note}"
-        agent_name = "copaw"
-        wing = "wing_copaw"
-        room = "diary"
-        entry_id = f"diary_{wing}_{room}_{now.strftime('%Y%m%d_%H%M%S')}_{hashlib.md5(entry[:50].encode()).hexdigest()[:8]}"
-        col.add(
-            ids=[entry_id], documents=[entry],
-            metadatas=[{
-                "wing": wing, "room": room, "hall": "hall_diary",
-                "topic": source, "type": "diary_entry",
-                "agent": agent_name, "filed_at": now.isoformat(),
-                "date": now.strftime("%Y-%m-%d"), "added_by": f"bgsave_{source}",
-            }],
-        )
-        _mp_log(f"Diary({source}): {entry_id} -> {wing}/diary")
+        res = mcp_call("mempalace_diary_write", {
+            "agent_name": "copaw", "entry": entry, "topic": source,
+        })
+        if res.get("success"):
+            _mp_log(f"Diary({source}): {res.get('entry_id', '?')} (via MCP)")
+        else:
+            _mp_log(f"Diary({source}): MCP error: {res.get('error', '?')}", "ERROR")
     except Exception as e:
         _mp_log(f"Diary({source}): FAILED {e}", "ERROR")
-
-
-# =====================================================================
-# HOOKS
-# =====================================================================
 
 
 class MemPalacePreCompactHook:
