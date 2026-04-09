@@ -235,7 +235,7 @@ class Workspace:
                 stop_method="stop_all",
                 priority=30,
                 concurrent_init=False,
-                reusable=True,
+                reusable=False,
             ),
         )
 
