@@ -59,46 +59,99 @@ class BootstrapHook:
                 self.working_dir / ".bootstrap_completed"
             )
 
-            # MemPalace wake-up context — inject L0+L1 on first user message
-            # We prepend to the first user message instead of setting sys_prompt
-            # because sys_prompt is a read-only @property in agentscope ReActAgent.
+            # MemPalace wake-up context — inject L0+L1 into SYSTEM PROMPT
+            # System prompt survives memory compaction; user messages do not.
+            # We monkey-patch _build_sys_prompt so future rebuild_sys_prompt
+            # calls also preserve the wake-up. We also detect compaction events
+            # via memory.get_compressed_summary() markers and refresh wake-up
+            # so the prompt reflects the latest palace state after compaction.
             try:
                 import subprocess
-                result = subprocess.run(
-                    ["python3", "-m", "mempalace", "wake-up"],
-                    capture_output=True, text=True, timeout=15,
+
+                def _fetch_wakeup_block():
+                    try:
+                        result = subprocess.run(
+                            ["python3", "-m", "mempalace", "wake-up"],
+                            capture_output=True, text=True, timeout=15,
+                        )
+                        if result.returncode != 0 or not result.stdout.strip():
+                            return None
+                        lines = result.stdout.strip().split("\n")
+                        wakeup = "\n".join(
+                            l for l in lines
+                            if not l.startswith("Wake-up text") and not l.startswith("===")
+                        ).strip()
+                        if not wakeup or len(wakeup) <= 50:
+                            return None
+                        return "\n\n## MemPalace Wake-up Context\n" + wakeup
+                    except Exception as _e:
+                        logger.warning("MemPalace wake-up fetch failed: %s", _e)
+                        return None
+
+                def _log_wakeup(reason: str, length: int):
+                    try:
+                        from datetime import datetime
+                        log_path = Path.home() / ".mempalace" / "hook.log"
+                        with open(log_path, "a") as f:
+                            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            f.write(f"{ts} | INFO | Bootstrap: wake-up {reason} ({length} chars)\n")
+                    except Exception:
+                        pass
+
+                # Detect compaction via summary marker
+                current_summary = ""
+                try:
+                    if hasattr(agent.memory, "get_compressed_summary"):
+                        current_summary = agent.memory.get_compressed_summary() or ""
+                except Exception:
+                    pass
+                summary_marker = hash(current_summary) if current_summary else 0
+
+                first_time = not getattr(agent, "_mempalace_wakeup_patched", False)
+                last_marker = getattr(agent, "_mempalace_summary_marker", None)
+                summary_changed = (
+                    not first_time
+                    and last_marker is not None
+                    and summary_marker != last_marker
                 )
-                if result.returncode == 0 and result.stdout.strip():
-                    lines = result.stdout.strip().split("\n")
-                    wakeup = "\n".join(
-                        l for l in lines
-                        if not l.startswith("Wake-up text") and not l.startswith("===")
-                    ).strip()
-                    if wakeup and len(wakeup) > 50:
-                        # Inject into the first user message in memory (like WAL crash report)
-                        messages = await agent.memory.get_memory()
-                        for msg in messages:
-                            if getattr(msg, "role", None) == "user":
-                                from ..utils.message_processing import prepend_to_message_content
-                                wakeup_block = "## MemPalace Wake-up Context\n" + wakeup
-                                prepend_to_message_content(msg, wakeup_block)
-                                logger.info("MemPalace wake-up injected (%d chars)", len(wakeup))
-                                # Log to mempalace hook.log too for visibility
-                                try:
-                                    from datetime import datetime
-                                    log_path = Path.home() / ".mempalace" / "hook.log"
-                                    with open(log_path, "a") as f:
-                                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                        f.write(f"{ts} | INFO | Bootstrap: wake-up injected ({len(wakeup)} chars)\n")
-                                except Exception:
-                                    pass
-                                break
+
+                if first_time or summary_changed:
+                    wakeup_block = _fetch_wakeup_block()
+                    if wakeup_block:
+                        # Build a closure that holds the LATEST wakeup block.
+                        # We mutate a list cell so future refreshes can update it
+                        # without re-monkey-patching.
+                        if first_time:
+                            wakeup_cell = [wakeup_block]
+                            agent._mempalace_wakeup_cell = wakeup_cell
+                            original_build = agent._build_sys_prompt
+
+                            def _patched_build_sys_prompt(_orig=original_build, _cell=wakeup_cell):
+                                base = _orig()
+                                # Strip any previous wake-up block before appending fresh one
+                                marker = "\n\n## MemPalace Wake-up Context\n"
+                                if marker in base:
+                                    base = base.split(marker, 1)[0]
+                                return base + _cell[0]
+
+                            agent._build_sys_prompt = _patched_build_sys_prompt
+                            agent._mempalace_wakeup_patched = True
                         else:
-                            logger.debug("MemPalace wake-up: no user message yet to prepend to")
+                            # Already patched — just refresh the cell
+                            agent._mempalace_wakeup_cell[0] = wakeup_block
+
+                        agent.rebuild_sys_prompt()
+                        agent._mempalace_summary_marker = summary_marker
+
+                        reason = "injected into sys_prompt" if first_time else "refreshed after compaction"
+                        logger.info("MemPalace wake-up %s (%d chars)", reason, len(wakeup_block))
+                        _log_wakeup(reason, len(wakeup_block))
+                    elif first_time:
+                        logger.warning("MemPalace wake-up: fetch returned nothing")
                 else:
-                    logger.warning("MemPalace wake-up returned non-zero: %s", result.stderr[:200])
-            except subprocess.TimeoutExpired:
-                logger.warning("MemPalace wake-up timed out (>15s)")
+                    # Steady state — keep tracking the marker
+                    if first_time is False and last_marker is None:
+                        agent._mempalace_summary_marker = summary_marker
             except Exception as e:
                 logger.warning("MemPalace wake-up skipped: %s", e)
 
