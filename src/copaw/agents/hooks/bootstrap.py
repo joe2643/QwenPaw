@@ -59,22 +59,48 @@ class BootstrapHook:
                 self.working_dir / ".bootstrap_completed"
             )
 
-            # MemPalace wake-up context — inject L0+L1 on session start
+            # MemPalace wake-up context — inject L0+L1 on first user message
+            # We prepend to the first user message instead of setting sys_prompt
+            # because sys_prompt is a read-only @property in agentscope ReActAgent.
             try:
                 import subprocess
                 result = subprocess.run(
                     ["python3", "-m", "mempalace", "wake-up"],
-                    capture_output=True, text=True, timeout=5
+                    capture_output=True, text=True, timeout=15,
                 )
                 if result.returncode == 0 and result.stdout.strip():
-                    # Extract just the context (skip the header line)
                     lines = result.stdout.strip().split("\n")
-                    wakeup = "\n".join(l for l in lines if not l.startswith("Wake-up text") and not l.startswith("==="))
-                    if wakeup.strip() and len(wakeup) > 50:
-                        agent.sys_prompt = agent.sys_prompt + "\n\n## MemPalace Context\n" + wakeup.strip()
-                        logger.debug("MemPalace wake-up context injected (%d chars)", len(wakeup))
+                    wakeup = "\n".join(
+                        l for l in lines
+                        if not l.startswith("Wake-up text") and not l.startswith("===")
+                    ).strip()
+                    if wakeup and len(wakeup) > 50:
+                        # Inject into the first user message in memory (like WAL crash report)
+                        messages = await agent.memory.get_memory()
+                        for msg in messages:
+                            if getattr(msg, "role", None) == "user":
+                                from ..utils.message_processing import prepend_to_message_content
+                                wakeup_block = "## MemPalace Wake-up Context\n" + wakeup
+                                prepend_to_message_content(msg, wakeup_block)
+                                logger.info("MemPalace wake-up injected (%d chars)", len(wakeup))
+                                # Log to mempalace hook.log too for visibility
+                                try:
+                                    from datetime import datetime
+                                    log_path = Path.home() / ".mempalace" / "hook.log"
+                                    with open(log_path, "a") as f:
+                                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                        f.write(f"{ts} | INFO | Bootstrap: wake-up injected ({len(wakeup)} chars)\n")
+                                except Exception:
+                                    pass
+                                break
+                        else:
+                            logger.debug("MemPalace wake-up: no user message yet to prepend to")
+                else:
+                    logger.warning("MemPalace wake-up returned non-zero: %s", result.stderr[:200])
+            except subprocess.TimeoutExpired:
+                logger.warning("MemPalace wake-up timed out (>15s)")
             except Exception as e:
-                logger.debug("MemPalace wake-up skipped: %s", e)
+                logger.warning("MemPalace wake-up skipped: %s", e)
 
             # Check WAL for crash recovery (runs every session, not just first)
             try:
