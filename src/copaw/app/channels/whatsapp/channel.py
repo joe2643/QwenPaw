@@ -1170,7 +1170,9 @@ class WhatsAppChannel(BaseChannel):
             elif t == ContentType.AUDIO:
                 await self._client.send_audio(jid, file_path, ptt=True)
             else:  # FILE
-                await self._client.send_document(jid, file_path)
+                # Extract filename from path to fix the "Untitled" issue on WhatsApp
+                filename = os.path.basename(file_path)
+                await self._client.send_document(jid, file_path, filename=filename)
             logger.info(
                 "whatsapp: sent media to %s (type=%s, size=%d bytes)",
                 to_handle, t, os.path.getsize(file_path),
