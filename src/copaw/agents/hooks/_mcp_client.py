@@ -37,7 +37,7 @@ def mcp_call(tool_name, params=None):
             "jsonrpc": "2.0", "id": "call", "method": "tools/call",
             "params": {"name": tool_name, "arguments": params or {}},
         }, timeout=30)
-        for line in resp.text.split("\n"):
+        for line in resp.content.decode("utf-8").split("\n"):
             if line.startswith("data: "):
                 data = json.loads(line[6:])
                 if "result" in data:
