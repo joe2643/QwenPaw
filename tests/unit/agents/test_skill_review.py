@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """Unit/smoke tests for copaw.skill_review."""
 import json
+import subprocess
 import tempfile
+import unittest.mock
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -231,6 +233,157 @@ class TestRunOnceMocked:
             proposals = run_once("test", tmp_path, dry_run=True)
 
         assert proposals == []
+
+
+# ---------------------------------------------------------------------------
+# _send_notification
+# ---------------------------------------------------------------------------
+
+class TestSendNotification:
+    """Test _send_notification without network calls."""
+
+    def _expected_cmd(self, agent: str = "default") -> list:
+        from copaw.skill_review.review import (
+            NOTIFICATION_CHANNEL,
+            NOTIFICATION_TARGET_SESSION,
+            NOTIFICATION_TARGET_USER,
+        )
+        return [
+            "copaw", "channels", "send",
+            "--agent-id", agent,
+            "--channel", NOTIFICATION_CHANNEL,
+            "--target-user", NOTIFICATION_TARGET_USER,
+            "--target-session", NOTIFICATION_TARGET_SESSION,
+            "--text", unittest.mock.ANY,  # checked separately
+        ]
+
+    def test_success_returns_true(self):
+        from copaw.skill_review.review import _send_notification
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        with patch("subprocess.run", return_value=mock_result) as mock_sub:
+            result = _send_notification("my_skill", "A test skill", "default")
+        assert result is True
+        mock_sub.assert_called_once()
+        call_args = mock_sub.call_args
+        cmd = call_args[0][0]
+        assert cmd[:2] == ["copaw", "channels"]
+        assert "--agent-id" in cmd
+        assert "my_skill" in call_args[0][0][-1]  # skill name in --text
+        assert call_args.kwargs["timeout"] == 30
+
+    def test_nonzero_exit_returns_false(self):
+        from copaw.skill_review.review import _send_notification
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stderr = "connection refused"
+        with patch("subprocess.run", return_value=mock_result):
+            result = _send_notification("bad_skill", "desc", "default")
+        assert result is False
+
+    def test_timeout_returns_false(self):
+        from copaw.skill_review.review import _send_notification
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="copaw", timeout=30)):
+            result = _send_notification("slow_skill", "desc", "default")
+        assert result is False
+
+    def test_exception_returns_false_does_not_raise(self):
+        from copaw.skill_review.review import _send_notification
+        with patch("subprocess.run", side_effect=FileNotFoundError("copaw not found")):
+            result = _send_notification("any_skill", "desc", "default")
+        assert result is False
+
+    def test_text_contains_skill_name_and_description(self):
+        from copaw.skill_review.review import _send_notification
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        with patch("subprocess.run", return_value=mock_result) as mock_sub:
+            _send_notification("hk_cinema", "Book HK cinema tickets", "default")
+        cmd = mock_sub.call_args[0][0]
+        text_idx = cmd.index("--text") + 1
+        text = cmd[text_idx]
+        assert "hk_cinema" in text
+        assert "Book HK cinema tickets" in text
+        assert "default" in text  # agent name in enable hint
+
+
+# ---------------------------------------------------------------------------
+# run_once — notification integration
+# ---------------------------------------------------------------------------
+
+class TestRunOnceNotification:
+    """Verify notification is called/suppressed correctly in run_once."""
+
+    def _make_llm_response(self, name: str = "notif_skill") -> str:
+        return json.dumps({
+            "propose": True,
+            "name": name,
+            "description": "Notification test skill",
+            "skill_md": "## Purpose\nTest.\n## Steps\n1. Done.",
+        })
+
+    def test_dry_run_does_not_fire_notification(self, tmp_path):
+        from copaw.skill_review.review import run_once
+        _write_wal(tmp_path)
+        with (
+            patch("copaw.skill_review.review._load_api_config", return_value=("k", "https://x")),
+            patch("copaw.skill_review.review._call_llm", return_value=self._make_llm_response()),
+            patch("copaw.skill_review.review._get_existing_skills", return_value="(none)"),
+            patch("copaw.skill_review.review._send_notification") as mock_notif,
+        ):
+            run_once("test", tmp_path, dry_run=True)
+        mock_notif.assert_not_called()
+
+    def test_notification_false_does_not_fire(self, tmp_path):
+        from copaw.skill_review.review import run_once
+        _write_wal(tmp_path)
+        mock_svc = MagicMock()
+        mock_svc.create_skill.return_value = "notif_skill"
+        with (
+            patch("copaw.skill_review.review._load_api_config", return_value=("k", "https://x")),
+            patch("copaw.skill_review.review._call_llm", return_value=self._make_llm_response()),
+            patch("copaw.skill_review.review._get_existing_skills", return_value="(none)"),
+            patch("copaw.agents.skills_manager.SkillService", return_value=mock_svc),
+            patch("copaw.skill_review.review._send_notification") as mock_notif,
+        ):
+            run_once("test", tmp_path, dry_run=False, notification=False)
+        mock_notif.assert_not_called()
+
+    def test_normal_path_fires_notification_once(self, tmp_path):
+        from copaw.skill_review.review import run_once
+        _write_wal(tmp_path)
+        mock_svc = MagicMock()
+        mock_svc.create_skill.return_value = "notif_skill"
+        with (
+            patch("copaw.skill_review.review._load_api_config", return_value=("k", "https://x")),
+            patch("copaw.skill_review.review._call_llm", return_value=self._make_llm_response()),
+            patch("copaw.skill_review.review._get_existing_skills", return_value="(none)"),
+            patch("copaw.agents.skills_manager.SkillService", return_value=mock_svc),
+            patch("copaw.skill_review.review._send_notification") as mock_notif,
+        ):
+            proposals = run_once("test", tmp_path, dry_run=False, notification=True)
+        assert len(proposals) == 1
+        mock_notif.assert_called_once_with(
+            skill_name="notif_skill",
+            description="Notification test skill",
+            agent="test",
+        )
+
+    def test_notification_not_fired_when_skill_already_exists(self, tmp_path):
+        """create_skill returns None when skill exists — no notification."""
+        from copaw.skill_review.review import run_once
+        _write_wal(tmp_path)
+        mock_svc = MagicMock()
+        mock_svc.create_skill.return_value = None  # already exists
+        with (
+            patch("copaw.skill_review.review._load_api_config", return_value=("k", "https://x")),
+            patch("copaw.skill_review.review._call_llm", return_value=self._make_llm_response()),
+            patch("copaw.skill_review.review._get_existing_skills", return_value="(none)"),
+            patch("copaw.agents.skills_manager.SkillService", return_value=mock_svc),
+            patch("copaw.skill_review.review._send_notification") as mock_notif,
+        ):
+            run_once("test", tmp_path, dry_run=False, notification=True)
+        mock_notif.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
