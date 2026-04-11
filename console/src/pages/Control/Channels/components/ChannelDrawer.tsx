@@ -1105,6 +1105,11 @@ export function ChannelDrawer({
               <Switch defaultChecked />
             </Form.Item>
             <Form.Item name="filter_thinking" label={t("channels.signalFilterThinking")} valuePropName="checked" tooltip={t("channels.signalFilterThinkingTooltip")}>
+              <Switch />
+            </Form.Item>
+          </>
+        );
+
       case "onebot":
         return (
           <>
