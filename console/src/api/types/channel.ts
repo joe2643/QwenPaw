@@ -137,6 +137,8 @@ export interface WeixinConfig extends BaseChannelConfig {
   bot_token_file?: string;
   base_url?: string;
   media_dir?: string;
+}
+
 export interface OneBotConfig extends BaseChannelConfig {
   ws_host: string;
   ws_port: number;
@@ -180,5 +182,5 @@ export type SingleChannelConfig =
   | XiaoYiConfig
   | WhatsAppConfig
   | SignalConfig
-  | WeixinConfig;
+  | WeixinConfig
   | OneBotConfig;
