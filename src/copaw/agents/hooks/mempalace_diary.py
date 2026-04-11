@@ -87,14 +87,14 @@ def _get_direct_model():
             def __init__(self, key, base):
                 self.key = key
                 self.base = base
-                self.model = "qwen3.5-plus"
+                self.model = "qwen3.6-plus"
 
             def call_sync(self, messages):
                 resp = requests.post(
                     f"{self.base}/chat/completions",
                     headers={"Authorization": f"Bearer {self.key}", "Content-Type": "application/json"},
                     json={"model": self.model, "messages": messages, "temperature": 0.1, "enable_thinking": False},
-                    timeout=60,
+                    timeout=90,
                 )
                 data = resp.json()
                 return data.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -157,9 +157,9 @@ async def _bg_save_from_messages(messages: list, source: str = "hook") -> bool:
         text = _extract_text(raw).strip()
         if not text or len(text) < 20 or text.startswith("{") or text.startswith("[{"):
             continue
-        parts.append(f"[{role}] {text[:200]}")
+        parts.append(f"[{role}] {text[:800]}")
 
-    convo = "\n".join(parts[-15:])[:3000]
+    convo = "\n".join(parts[-30:])[:16000]
     if not convo.strip():
         _mp_log(f"BgSave({source}): empty conversation")
         return False
@@ -320,10 +320,11 @@ class MemPalaceIntervalHook:
     """post_reasoning: BgSave every N user messages (background task)."""
 
     def __init__(self, working_dir: Path, write_interval: int = 15,
-                 state_file: str = ".mempalace_hook_state.json"):
+                 session_id: str = "default"):
         self.working_dir = working_dir
         self.write_interval = write_interval
-        self.state_file = working_dir / state_file
+        # Keyed by session_id to prevent cross-session counter contamination
+        self.state_file = working_dir / f".mempalace_hook_state_{session_id}.json"
         self._load_state()
 
     def _load_state(self):
@@ -378,9 +379,9 @@ class MemPalaceIntervalHook:
 class MemPalacePreReplyHook:
     """pre_reply: safety diary before /new or /clear."""
 
-    def __init__(self, working_dir: Path, state_file: str = ".mempalace_hook_state.json"):
+    def __init__(self, working_dir: Path, session_id: str = "default"):
         self.working_dir = working_dir
-        self.state_file = working_dir / state_file
+        self.state_file = working_dir / f".mempalace_hook_state_{session_id}.json"
 
     def _get_last_write_count(self) -> int:
         try:

@@ -451,16 +451,17 @@ class CoPawAgent(ToolGuardMixin, ReActAgent):
                     MemPalacePreCompactHook, MemPalaceIntervalHook, MemPalacePreReplyHook,
                 )
                 registered = []
+                _session_id = self._request_context.get("session_id", "default")
                 if mp_cfg.precompact_save.enabled:
                     hook = MemPalacePreCompactHook(compact_threshold=mp_cfg.precompact_save.threshold)
                     self.register_instance_hook(hook_type="pre_reasoning", hook_name="mempalace_precompact", hook=hook.__call__)
                     registered.append("precompact")
                 if mp_cfg.interval_save.enabled:
-                    hook = MemPalaceIntervalHook(working_dir=working_dir, write_interval=mp_cfg.interval_save.write_interval)
+                    hook = MemPalaceIntervalHook(working_dir=working_dir, write_interval=mp_cfg.interval_save.write_interval, session_id=_session_id)
                     self.register_instance_hook(hook_type="post_reasoning", hook_name="mempalace_interval", hook=hook.__call__)
                     registered.append("interval")
                 if mp_cfg.pre_reply_save:
-                    hook = MemPalacePreReplyHook(working_dir=working_dir)
+                    hook = MemPalacePreReplyHook(working_dir=working_dir, session_id=_session_id)
                     self.register_instance_hook(hook_type="pre_reply", hook_name="mempalace_prereply", hook=hook.__call__)
                     registered.append("pre_reply")
                 # L2 Room Recall — auto-inject relevant context
