@@ -45,7 +45,12 @@ def main() -> None:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Propose skills but do not call create_skill.",
+        help="Propose skills but do not call create_skill (implicitly disables notification).",
+    )
+    parser.add_argument(
+        "--no-notification",
+        action="store_true",
+        help="Suppress WhatsApp notification even when a skill is created.",
     )
     args = parser.parse_args()
 
@@ -61,7 +66,13 @@ def main() -> None:
             if args.workspace
             else _default_workspace(agent)
         )
-        proposals = run_once(agent_name=agent, workspace_dir=workspace, dry_run=args.dry_run)
+        notification = not args.dry_run and not args.no_notification
+        proposals = run_once(
+            agent_name=agent,
+            workspace_dir=workspace,
+            dry_run=args.dry_run,
+            notification=notification,
+        )
         total_proposals.extend(proposals)
 
     if total_proposals:

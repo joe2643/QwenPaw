@@ -6,9 +6,16 @@ level) so it can be invoked directly from crontab without loading the full app.
 """
 import json
 import logging
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+# Notification target — hardcoded, personal WhatsApp for skill review alerts.
+# To change, edit here and redeploy.
+NOTIFICATION_CHANNEL = "whatsapp"
+NOTIFICATION_TARGET_USER = "+85251159218"
+NOTIFICATION_TARGET_SESSION = "whatsapp--+85251159218"
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +201,49 @@ def _call_llm(prompt: str, api_key: str, base_url: str, timeout: int = 120) -> s
 
 
 # ---------------------------------------------------------------------------
+# Notification
+# ---------------------------------------------------------------------------
+
+def _send_notification(skill_name: str, description: str, agent: str) -> bool:
+    """Push a Cantonese WhatsApp alert via `copaw channels send`.
+
+    Returns True on success, False on any failure.  Never raises — cron must
+    not abort just because the notification side-channel is down.
+    """
+    message = (
+        f"🔔 skill_review 提議新 skill\n\n"
+        f"📦 {skill_name}\n"
+        f"📝 {description}\n\n"
+        f"未 enable（authored_by=skill_review）\n"
+        f"去 ~/.copaw/workspaces/{agent}/skills.json 開 enable"
+    )
+    cmd = [
+        "copaw", "channels", "send",
+        "--agent-id", agent,
+        "--channel", NOTIFICATION_CHANNEL,
+        "--target-user", NOTIFICATION_TARGET_USER,
+        "--target-session", NOTIFICATION_TARGET_SESSION,
+        "--text", message,
+    ]
+    try:
+        result = subprocess.run(cmd, timeout=30, capture_output=True, text=True)
+        if result.returncode != 0:
+            logger.warning(
+                "skill_review: notification failed (exit %d): %s",
+                result.returncode, result.stderr[:200],
+            )
+            return False
+        logger.info("skill_review: notification sent for '%s'", skill_name)
+        return True
+    except subprocess.TimeoutExpired:
+        logger.warning("skill_review: notification timed out for '%s'", skill_name)
+        return False
+    except Exception as e:
+        logger.warning("skill_review: notification error for '%s': %s", skill_name, e)
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -201,13 +251,17 @@ def run_once(
     agent_name: str,
     workspace_dir: Path,
     dry_run: bool = False,
+    notification: bool = True,
 ) -> list[SkillProposal]:
     """Review recent WAL content and propose / create skills.
 
     Args:
         agent_name: Agent identifier (used for logging only).
         workspace_dir: Path to agent workspace (e.g. ~/.copaw/workspaces/default).
-        dry_run: If True, propose but do not call create_skill.
+        dry_run: If True, propose but do not call create_skill.  Implicitly
+            disables notification.
+        notification: If True (default), push a WhatsApp alert after each
+            successful skill creation.  Has no effect when dry_run=True.
 
     Returns:
         List of SkillProposal objects (empty if nothing worthy found).
@@ -280,26 +334,35 @@ def run_once(
     logger.info("skill_review: proposed '%s': %s", proposal.name, proposal.description)
 
     if dry_run:
-        logger.info("skill_review: dry_run=True — skipping create_skill")
+        logger.info("skill_review: dry_run=True — skipping create_skill and notification")
         return [proposal]
 
     # 7. Create skill — disabled by default so a human must explicitly enable it
+    created_name = None
     try:
         from copaw.agents.skills_manager import SkillService
         svc = SkillService(workspace_dir)
-        created = svc.create_skill(
+        created_name = svc.create_skill(
             name=proposal.name,
             content=proposal.skill_md,
             overwrite=False,
             enable=False,  # Always disabled; human enables after review
             authored_by="skill_review",
         )
-        if created:
-            logger.info("skill_review: created skill '%s' (disabled, pending review)", created)
+        if created_name:
+            logger.info("skill_review: created skill '%s' (disabled, pending review)", created_name)
         else:
             logger.info("skill_review: skill '%s' already exists — skipped", proposal.name)
     except Exception as e:
         logger.error("skill_review: create_skill failed: %s", e)
         # Return proposal even on creation failure (caller can retry / inspect)
+
+    # 8. Notify — only when creation succeeded and notification is enabled
+    if created_name and notification:
+        _send_notification(
+            skill_name=proposal.name,
+            description=proposal.description,
+            agent=agent_name,
+        )
 
     return [proposal]
