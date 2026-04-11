@@ -137,6 +137,11 @@ export interface WeixinConfig extends BaseChannelConfig {
   bot_token_file?: string;
   base_url?: string;
   media_dir?: string;
+export interface OneBotConfig extends BaseChannelConfig {
+  ws_host: string;
+  ws_port: number;
+  access_token: string;
+  share_session_in_group: boolean;
 }
 
 export interface ChannelConfig {
@@ -156,6 +161,7 @@ export interface ChannelConfig {
   whatsapp: WhatsAppConfig;
   signal: SignalConfig;
   weixin: WeixinConfig;
+  onebot: OneBotConfig;
 }
 
 export type SingleChannelConfig =
@@ -175,3 +181,4 @@ export type SingleChannelConfig =
   | WhatsAppConfig
   | SignalConfig
   | WeixinConfig;
+  | OneBotConfig;

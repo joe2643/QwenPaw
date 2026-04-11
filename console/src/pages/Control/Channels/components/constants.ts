@@ -21,6 +21,7 @@ export const CHANNEL_LABELS: Record<string, string> = {
   weixin: "WeChat",
   signal: "Signal",
   whatsapp: "WhatsApp",
+  onebot: "OneBot",
 };
 
 function formatCustomChannelKey(key: string): string {
