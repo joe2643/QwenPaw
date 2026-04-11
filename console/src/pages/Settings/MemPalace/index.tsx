@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Card,
   Table,
@@ -14,7 +14,6 @@ import {
   Statistic,
   Popconfirm,
   Typography,
-  Descriptions,
 } from "antd";
 import {
   ReloadOutlined,
@@ -61,7 +60,7 @@ function useDarkStyles() {
 
 // ── Overview Tab ─────────────────────────────────────────────────────────
 
-function OverviewTab({ status, kgStats, onRefresh }: { status: any; kgStats: any; onRefresh: () => void }) {
+function OverviewTab({ status, kgStats, onRefresh: _onRefresh }: { status: any; kgStats: any; onRefresh: () => void }) {
   const ds = useDarkStyles();
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>

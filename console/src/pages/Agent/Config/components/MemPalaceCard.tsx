@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Card, Switch, InputNumber } from "@agentscope-ai/design";
 import { Space, Typography, Descriptions, Spin } from "antd";
-import { DatabaseOutlined, ReloadOutlined } from "@ant-design/icons";
+import { DatabaseOutlined } from "@ant-design/icons";
 import { mempalaceApi } from "@/api/modules/mempalace";
 import styles from "../index.module.less";
 

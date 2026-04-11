@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useAppMessage } from "../../../hooks/useAppMessage";
 import { mempalaceApi } from "../../../api/modules/mempalace";
 import { useAgentStore } from "../../../stores/agentStore";
@@ -38,7 +38,7 @@ export function useMemPalace() {
   // -- Wings --
   const loadWings = useCallback(async () => {
     try {
-      const data = await mempalaceApi.getWings();
+      const data: any = await mempalaceApi.getWings();
       setWings(Array.isArray(data?.wings) ? data.wings : Array.isArray(data) ? data : []);
     } catch (err) {
       console.error("Failed to load wings:", err);
