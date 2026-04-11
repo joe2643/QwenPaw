@@ -150,11 +150,14 @@ class TestStateFileIsolation:
 class TestRunOnceMocked:
     """Test run_once() with mocked LLM to avoid live API calls."""
 
-    def _make_llm_response(self, propose: bool, name: str = "test_skill") -> str:
+    def _make_llm_response(
+        self, propose: bool, name: str = "test_skill", action: str = "create"
+    ) -> str:
         if not propose:
             return json.dumps({"propose": False})
         return json.dumps({
             "propose": True,
+            "action": action,
             "name": name,
             "description": "A test skill",
             "skill_md": "## Purpose\nTest.\n## Steps\n1. Do it.",
@@ -218,7 +221,7 @@ class TestRunOnceMocked:
             name="my_new_skill",
             content=proposals[0].skill_md,
             overwrite=False,
-            enable=False,
+            enable=True,
             authored_by="skill_review",
         )
 
@@ -314,9 +317,10 @@ class TestSendNotification:
 class TestRunOnceNotification:
     """Verify notification is called/suppressed correctly in run_once."""
 
-    def _make_llm_response(self, name: str = "notif_skill") -> str:
+    def _make_llm_response(self, name: str = "notif_skill", action: str = "create") -> str:
         return json.dumps({
             "propose": True,
+            "action": action,
             "name": name,
             "description": "Notification test skill",
             "skill_md": "## Purpose\nTest.\n## Steps\n1. Done.",
@@ -367,6 +371,7 @@ class TestRunOnceNotification:
             skill_name="notif_skill",
             description="Notification test skill",
             agent="test",
+            action="create",
         )
 
     def test_notification_not_fired_when_skill_already_exists(self, tmp_path):
@@ -384,6 +389,109 @@ class TestRunOnceNotification:
         ):
             run_once("test", tmp_path, dry_run=False, notification=True)
         mock_notif.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Q3: Auto-enable + Q2: Update path
+# ---------------------------------------------------------------------------
+
+class TestAutoEnableAndUpdatePath:
+    """Verify Hermes-style auto-enable and update path behaviour."""
+
+    def _make_create_response(self, name: str = "auto_skill") -> str:
+        return json.dumps({
+            "propose": True,
+            "action": "create",
+            "name": name,
+            "description": "Auto-enabled skill",
+            "skill_md": "## Purpose\nTest.\n## Steps\n1. Done.",
+        })
+
+    def _make_update_response(self, name: str = "existing_skill") -> str:
+        return json.dumps({
+            "propose": True,
+            "action": "update",
+            "name": name,
+            "description": "Updated skill",
+            "skill_md": "## Purpose\nUpdated.\n## Steps\n1. Better.",
+        })
+
+    def test_new_skill_auto_enabled(self, tmp_path):
+        """create path must pass enable=True (Hermes-style auto-enable)."""
+        from copaw.skill_review.review import run_once
+        _write_wal(tmp_path)
+        mock_svc = MagicMock()
+        mock_svc.create_skill.return_value = "auto_skill"
+
+        with (
+            patch("copaw.skill_review.review._load_api_config", return_value=("k", "https://x")),
+            patch("copaw.skill_review.review._call_llm", return_value=self._make_create_response()),
+            patch("copaw.skill_review.review._get_existing_skills", return_value="(none)"),
+            patch("copaw.agents.skills_manager.SkillService", return_value=mock_svc),
+            patch("copaw.skill_review.review._send_notification"),
+        ):
+            proposals = run_once("test", tmp_path, dry_run=False)
+
+        assert len(proposals) == 1
+        mock_svc.create_skill.assert_called_once_with(
+            name="auto_skill",
+            content=proposals[0].skill_md,
+            overwrite=False,
+            enable=True,
+            authored_by="skill_review",
+        )
+
+    def test_update_path_calls_overwrite(self, tmp_path):
+        """update path must pass overwrite=True so existing skill is replaced."""
+        from copaw.skill_review.review import run_once
+        _write_wal(tmp_path)
+        mock_svc = MagicMock()
+        mock_svc.create_skill.return_value = "existing_skill"
+
+        with (
+            patch("copaw.skill_review.review._load_api_config", return_value=("k", "https://x")),
+            patch("copaw.skill_review.review._call_llm", return_value=self._make_update_response()),
+            patch("copaw.skill_review.review._get_existing_skills", return_value="- existing_skill: old desc"),
+            patch("copaw.agents.skills_manager.SkillService", return_value=mock_svc),
+            patch("copaw.skill_review.review._send_notification"),
+        ):
+            proposals = run_once("test", tmp_path, dry_run=False)
+
+        assert len(proposals) == 1
+        assert proposals[0].action == "update"
+        mock_svc.create_skill.assert_called_once_with(
+            name="existing_skill",
+            content=proposals[0].skill_md,
+            overwrite=True,
+            enable=True,
+            authored_by="skill_review",
+        )
+
+    def test_notification_create_template_contains_auto_enabled(self):
+        """Create notification must mention that skill is already live."""
+        from copaw.skill_review.review import _send_notification
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        with patch("subprocess.run", return_value=mock_result) as mock_sub:
+            _send_notification("new_skill", "A brand new skill", "default", action="create")
+        cmd = mock_sub.call_args[0][0]
+        text = cmd[cmd.index("--text") + 1]
+        assert "已啟用" in text
+        assert "new_skill" in text
+        assert "A brand new skill" in text
+
+    def test_notification_update_template_contains_update_wording(self):
+        """Update notification must mention skill was updated and state preserved."""
+        from copaw.skill_review.review import _send_notification
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        with patch("subprocess.run", return_value=mock_result) as mock_sub:
+            _send_notification("old_skill", "Improved skill", "default", action="update")
+        cmd = mock_sub.call_args[0][0]
+        text = cmd[cmd.index("--text") + 1]
+        assert "更新咗" in text
+        assert "old_skill" in text
+        assert "原有 enabled state 保留" in text
 
 
 # ---------------------------------------------------------------------------
