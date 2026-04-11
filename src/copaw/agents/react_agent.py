@@ -463,6 +463,15 @@ class CoPawAgent(ToolGuardMixin, ReActAgent):
                     hook = MemPalacePreReplyHook(working_dir=working_dir)
                     self.register_instance_hook(hook_type="pre_reply", hook_name="mempalace_prereply", hook=hook.__call__)
                     registered.append("pre_reply")
+                # L2 Room Recall — auto-inject relevant context
+                if getattr(mp_cfg, "l2_recall", True):
+                    try:
+                        from .hooks.mempalace_recall import MemPalaceRecallHook
+                        recall_hook = MemPalaceRecallHook()
+                        self.register_instance_hook(hook_type="pre_reasoning", hook_name="mempalace_l2_recall", hook=recall_hook.__call__)
+                        registered.append("l2_recall")
+                    except ImportError as e:
+                        logger.warning("L2 Recall hook not available: %s", e)
                 logger.info("MemPalace hooks registered: %s", ", ".join(registered))
             except ImportError as e:
                 logger.warning("MemPalace hooks not available: %s", e)

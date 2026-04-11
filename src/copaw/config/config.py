@@ -728,6 +728,7 @@ class MemPalaceHooksConfig(BaseModel):
     pre_reply_save: bool = True
     bg_save_on_new: bool = True
     session_wal: bool = True
+    l2_recall: bool = True
 
 
 class AgentProfileConfig(BaseModel):
