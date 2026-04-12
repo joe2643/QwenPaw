@@ -515,3 +515,91 @@ class TestRunOnceLive:
         for p in proposals:
             assert p.name
             assert "## " in p.skill_md  # Must have at least one section
+
+
+# ---------------------------------------------------------------------------
+# User context loading tests
+# ---------------------------------------------------------------------------
+
+class TestLoadUserContext:
+    """Tests for _load_user_context() — PROFILE.md loading with identity stripping."""
+
+    def test_user_context_loaded(self, tmp_path):
+        """PROFILE.md exists → user profile sections returned, identity stripped."""
+        from copaw.skill_review.review import _load_user_context
+
+        profile = (
+            "## 身份\n\n"
+            "- **名字：** 夕慶 (Yūkei) / Vesper\n"
+            "- **定位：** OpenClaw AI\n\n"
+            "## 用户资料\n\n"
+            "- **名字：** joe\n"
+            "- **時區：** UTC+9\n"
+        )
+        (tmp_path / "PROFILE.md").write_text(profile)
+
+        result = _load_user_context(tmp_path)
+
+        assert "joe" in result
+        assert "UTC+9" in result
+        assert "Vesper" not in result
+        assert "夕慶" not in result
+        assert "身份" not in result
+
+    def test_user_context_missing_file(self, tmp_path):
+        """PROFILE.md doesn't exist → returns empty string, no crash."""
+        from copaw.skill_review.review import _load_user_context
+
+        result = _load_user_context(tmp_path)
+
+        assert result == ""
+
+    def test_user_context_strips_identity(self, tmp_path):
+        """## Identity (English heading) is also stripped."""
+        from copaw.skill_review.review import _load_user_context
+
+        profile = (
+            "## Identity\n\n"
+            "- Name: Vesper\n"
+            "- Role: AI Agent\n\n"
+            "## User Profile\n\n"
+            "- Name: joe\n"
+            "- Timezone: UTC+9\n"
+        )
+        (tmp_path / "PROFILE.md").write_text(profile)
+
+        result = _load_user_context(tmp_path)
+
+        assert "joe" in result
+        assert "Vesper" not in result
+        assert "AI Agent" not in result
+
+    def test_user_context_truncation(self, tmp_path):
+        """Content exceeding max_chars is truncated."""
+        from copaw.skill_review.review import _load_user_context
+
+        profile = "## User Profile\n\n" + ("x" * 3000)
+        (tmp_path / "PROFILE.md").write_text(profile)
+
+        result = _load_user_context(tmp_path, max_chars=500)
+
+        assert len(result) < 600  # 500 + "[...truncated]" + some header
+        assert "[...truncated]" in result
+
+    def test_user_context_with_frontmatter(self, tmp_path):
+        """YAML frontmatter is stripped before processing."""
+        from copaw.skill_review.review import _load_user_context
+
+        profile = (
+            "---\n"
+            "title: Agent Profile\n"
+            "---\n\n"
+            "## 用户资料\n\n"
+            "- **名字：** joe\n"
+        )
+        (tmp_path / "PROFILE.md").write_text(profile)
+
+        result = _load_user_context(tmp_path)
+
+        assert "joe" in result
+        assert "title:" not in result

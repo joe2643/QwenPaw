@@ -35,11 +35,49 @@ class SkillProposal:
 # LLM prompt
 # ---------------------------------------------------------------------------
 
+import re as _re
+
+
+def _load_user_context(workspace_dir: Path, max_chars: int = 2000) -> str:
+    """Read user profile from PROFILE.md, stripping agent identity section.
+
+    Fail-open: returns "" if file missing or unreadable.
+    Strips ## 身份 / ## Identity section (agent persona, not user profile).
+    Truncates to max_chars to bound prompt size.
+    """
+    profile_path = workspace_dir / "PROFILE.md"
+    if not profile_path.exists():
+        return ""
+    try:
+        text = profile_path.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+
+    # Strip YAML frontmatter
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) >= 3:
+            text = parts[2]
+
+    # Strip ## 身份 / ## Identity section (up to next ## heading or end of text)
+    text = _re.sub(
+        r"^##\s*(?:身份|Identity)\b.*?(?=^##\s|\Z)",
+        "",
+        text,
+        flags=_re.MULTILINE | _re.DOTALL,
+    )
+
+    text = text.strip()
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n[...truncated]"
+    return text
+
+
 SKILL_REVIEW_PROMPT = """你係 skill reviewer。你嘅工作係判斷 agent session 有冇 **LEARNT KNOWLEDGE** 值得固化成 skill。
 
 重要前提：大部分 session **唔值得**建立 skill。你嘅 default 係「唔 propose」。只有 session 明確顯示真正嘅學習過程先考慮 propose。
 
-## Agent Session (WAL entries)
+{user_context_block}## Agent Session (WAL entries)
 {wal_content}
 
 ## 現有 Skills (避免重複)
@@ -308,9 +346,17 @@ def run_once(
     existing_skills = _get_existing_skills(workspace_dir)
 
     # 3. Build prompt
+    # Load user profile context (fail-open)
+    user_ctx = _load_user_context(workspace_dir)
+    user_context_block = (
+        f"## User Context\n{user_ctx}\n\n"
+        if user_ctx else ""
+    )
+
     prompt = SKILL_REVIEW_PROMPT.format(
         wal_content=wal_content,
         existing_skills=existing_skills,
+        user_context_block=user_context_block,
     )
 
     # 4. Load API config
