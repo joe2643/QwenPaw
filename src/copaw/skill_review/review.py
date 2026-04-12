@@ -73,11 +73,66 @@ def _load_user_context(workspace_dir: Path, max_chars: int = 2000) -> str:
     return text
 
 
+
+
+def _fetch_mempalace_context(wal_content: str, max_chars: int = 1500) -> str:
+    """Query MemPalace for session-relevant context to inject into review prompt.
+
+    Extracts keywords from WAL content, searches MemPalace, returns formatted
+    results. Fail-open: returns "" on any error.
+    """
+    try:
+        # Import MemPalace searcher directly (same Python env, no HTTP needed)
+        from mempalace.searcher import search_memories
+        palace_path = str(Path.home() / ".mempalace" / "palace")
+    except ImportError:
+        return ""
+
+    # Extract keywords from WAL — take first 500 chars, split on whitespace,
+    # filter to meaningful words
+    words = set()
+    for word in wal_content[:500].split():
+        clean = word.strip(".,!?;:()[]{}" + chr(39) + chr(96) + chr(34))
+        if len(clean) > 3 and clean.isascii():
+            words.add(clean)
+    if not words:
+        return ""
+
+    # Build search query from top keywords (limit to 10 most distinctive)
+    query = " ".join(sorted(words, key=len, reverse=True)[:10])
+
+    try:
+        result = search_memories(query, palace_path, n_results=5)
+        if not result or "error" in result:
+            return ""
+
+        hits = result.get("results", [])
+        if not hits:
+            return ""
+
+        # Format results
+        parts = []
+        total_chars = 0
+        for h in hits:
+            text = h.get("text", "")[:300]
+            wing = h.get("wing", "?")
+            room = h.get("room", "?")
+            entry = f"[{wing}/{room}] {text}"
+            if total_chars + len(entry) > max_chars:
+                break
+            parts.append(entry)
+            total_chars += len(entry)
+
+        return "\n".join(parts)
+    except Exception:
+        return ""
+
+
 SKILL_REVIEW_PROMPT = """你係 skill reviewer。你嘅工作係判斷 agent session 有冇 **LEARNT KNOWLEDGE** 值得固化成 skill。
 
 重要前提：大部分 session **唔值得**建立 skill。你嘅 default 係「唔 propose」。只有 session 明確顯示真正嘅學習過程先考慮 propose。
 
-{user_context_block}## Agent Session (WAL entries)
+{user_context_block}{memory_context_block}## Agent Session (WAL entries)
 {wal_content}
 
 ## 現有 Skills (避免重複)
@@ -353,10 +408,18 @@ def run_once(
         if user_ctx else ""
     )
 
+    # Load MemPalace context (fail-open)
+    mem_ctx = _fetch_mempalace_context(wal_content)
+    memory_context_block = (
+        f"## Related Memory (from MemPalace)\n{mem_ctx}\n\n"
+        if mem_ctx else ""
+    )
+
     prompt = SKILL_REVIEW_PROMPT.format(
         wal_content=wal_content,
         existing_skills=existing_skills,
         user_context_block=user_context_block,
+        memory_context_block=memory_context_block,
     )
 
     # 4. Load API config
