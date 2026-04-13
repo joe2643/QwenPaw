@@ -1,0 +1,120 @@
+.mempalacePage {
+  height: 100%;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+}
+
+/* Stats cards */
+.statsRow {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.statCard {
+  flex: 1;
+  min-width: 180px;
+}
+
+/* Structure layout */
+.structureLayout {
+  display: flex;
+  gap: 16px;
+  min-height: 400px;
+}
+
+.treePanel {
+  width: 280px;
+  flex-shrink: 0;
+}
+
+.drawerPanel {
+  flex: 1;
+}
+
+/* Hook log */
+.hookLogContainer {
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 12px;
+  border-radius: 6px;
+  max-height: 500px;
+  overflow-y: auto;
+  background: #fafafa;
+  color: rgba(0, 0, 0, 0.88);
+  border: 1px solid #e8e8e8;
+}
+
+.logLineDefault { color: rgba(0, 0, 0, 0.65); }
+.logLineError { color: #ff4d4f; }
+.logLineSave { color: #389e0d; }
+.logLineInterval { color: #096dd9; }
+.logLinePreReply { color: #d48806; }
+
+/* ─── Dark mode ─────────────────────────────────────────────────────────────── */
+:global(.dark-mode) {
+  .treePanel {
+    :global {
+      .qwenpaw-spark-card, .qwenpaw-card {
+        background: #1f1f1f !important;
+      }
+    }
+  }
+
+  .hookLogContainer {
+    background: #141414;
+    color: rgba(255, 255, 255, 0.85);
+    border-color: #303030;
+  }
+
+  .logLineDefault { color: rgba(255, 255, 255, 0.65); }
+  .logLineSave { color: #52c41a; }
+  .logLineInterval { color: #1890ff; }
+  .logLinePreReply { color: #faad14; }
+
+  /* Fix all text colors in dark mode */
+  :global {
+    .qwenpaw-statistic-title,
+    .qwenpaw-card-head-title,
+    .qwenpaw-descriptions-item-label,
+    .qwenpaw-descriptions-item-content,
+    .qwenpaw-tabs-tab,
+    .qwenpaw-tree-title,
+    .qwenpaw-tree-node-content-wrapper,
+    .qwenpaw-tag {
+      color: rgba(255, 255, 255, 0.85) !important;
+    }
+
+    .qwenpaw-statistic-content,
+    .qwenpaw-statistic-content-value {
+      color: rgba(255, 255, 255, 0.95) !important;
+    }
+
+    .qwenpaw-table-wrapper .qwenpaw-table-container .qwenpaw-table-thead > tr > th {
+      background: rgba(255, 255, 255, 0.04) !important;
+      color: rgba(255, 255, 255, 0.65) !important;
+    }
+
+    .qwenpaw-table-wrapper .qwenpaw-table-tbody > tr > td {
+      color: rgba(255, 255, 255, 0.85) !important;
+    }
+
+    .qwenpaw-empty-description {
+      color: rgba(255, 255, 255, 0.35) !important;
+    }
+
+    .qwenpaw-card {
+      border-color: #303030 !important;
+    }
+  }
+}

@@ -184,7 +184,7 @@ class Workspace:
                 ),
                 start_method="start",
                 stop_method="close",
-                reusable=True,
+                reusable=False,
                 priority=20,
                 concurrent_init=True,
             ),
@@ -206,7 +206,7 @@ class Workspace:
                 name="chat_manager",
                 service_class=None,
                 post_init=create_chat_service,
-                reusable=True,
+                reusable=False,
                 priority=20,
                 concurrent_init=True,
             ),
@@ -225,7 +225,7 @@ class Workspace:
             ),
         )
 
-        # Priority 30: Channel manager
+        # Priority 30: Channel manager (reusable to preserve neonize WebSocket on reload)
         sm.register(
             ServiceDescriptor(
                 name="channel_manager",
@@ -235,6 +235,7 @@ class Workspace:
                 stop_method="stop_all",
                 priority=30,
                 concurrent_init=False,
+                reusable=True,
             ),
         )
 
@@ -345,6 +346,14 @@ class Workspace:
 
             # 2. Start all services via ServiceManager
             await self._service_manager.start_all()
+
+            # 3. Refresh reused channel_manager to point to new runner
+            cm = self._service_manager.services.get("channel_manager")
+            runner = self._service_manager.services.get("runner")
+            if (cm and runner
+                    and "channel_manager" in self._service_manager.reused_services):
+                from .service_factories import reload_channel_service
+                await reload_channel_service(self, cm)
 
             self._started = True
             logger.info(f"Workspace started successfully: {self.agent_id}")

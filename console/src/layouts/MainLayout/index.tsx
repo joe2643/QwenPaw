@@ -49,6 +49,12 @@ const VoiceTranscriptionPage = lazyWithRetry(
   () => import("../../pages/Settings/VoiceTranscription"),
 );
 const AgentsPage = lazyWithRetry(() => import("../../pages/Settings/Agents"));
+const MediaServerPage = lazyWithRetry(
+  () => import("../../pages/Control/MediaServer"),
+);
+const MemPalacePage = lazyWithRetry(
+  () => import("../../pages/Settings/MemPalace"),
+);
 
 const { Content } = Layout;
 
@@ -58,11 +64,13 @@ const pathToKey: Record<string, string> = {
   "/sessions": "sessions",
   "/cron-jobs": "cron-jobs",
   "/heartbeat": "heartbeat",
+  "/media-server": "media-server",
   "/skills": "skills",
   "/skill-pool": "skill-pool",
   "/tools": "tools",
   "/mcp": "mcp",
   "/workspace": "workspace",
+  "/mempalace": "mempalace",
   "/agents": "agents",
   "/models": "models",
   "/environments": "environments",
@@ -102,11 +110,13 @@ export default function MainLayout() {
                   <Route path="/sessions" element={<SessionsPage />} />
                   <Route path="/cron-jobs" element={<CronJobsPage />} />
                   <Route path="/heartbeat" element={<HeartbeatPage />} />
+                  <Route path="/media-server" element={<MediaServerPage />} />
                   <Route path="/skills" element={<SkillsPage />} />
                   <Route path="/skill-pool" element={<SkillPoolPage />} />
                   <Route path="/tools" element={<ToolsPage />} />
                   <Route path="/mcp" element={<MCPPage />} />
                   <Route path="/workspace" element={<WorkspacePage />} />
+                  <Route path="/mempalace" element={<MemPalacePage />} />
                   <Route path="/agents" element={<AgentsPage />} />
                   <Route path="/models" element={<ModelsPage />} />
                   <Route path="/environments" element={<EnvironmentsPage />} />

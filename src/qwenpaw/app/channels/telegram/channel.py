@@ -36,6 +36,7 @@ from ....config.config import TelegramConfig as TelegramChannelConfig
 from ....constant import WORKING_DIR
 from .format_html import markdown_to_telegram_html
 from ..utils import file_url_to_local_path
+from ..media_utils import resolve_media_url
 from ..base import (
     BaseChannel,
     OnReplySent,
@@ -209,9 +210,9 @@ async def _build_content_parts_from_message(
                 filename_hint="photo.jpg",
             )
             if local_path:
-                file_url = Path(local_path).resolve().as_uri()
+                media_url = await resolve_media_url(str(local_path))
                 content_parts.append(
-                    ImageContent(type=ContentType.IMAGE, image_url=file_url),
+                    ImageContent(type=ContentType.IMAGE, image_url=media_url),
                 )
 
     for attr_name, content_cls, content_type, url_field in _MEDIA_ATTRS:
@@ -229,9 +230,9 @@ async def _build_content_parts_from_message(
             filename_hint=file_name,
         )
         if local_path:
-            file_url = Path(local_path).resolve().as_uri()
+            media_url = await resolve_media_url(str(local_path))
             content_parts.append(
-                content_cls(type=content_type, **{url_field: file_url}),
+                content_cls(type=content_type, **{url_field: media_url}),
             )
 
     return content_parts, has_bot_command, is_bot_mentioned

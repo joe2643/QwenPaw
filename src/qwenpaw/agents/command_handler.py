@@ -177,12 +177,23 @@ class CommandHandler(ConversationCommandHandlerMixin):
             )
 
         self.memory_manager.add_async_summary_task(messages=messages)
+
+        # MemPalace: background LLM save before clearing
+        try:
+            from .hooks.mempalace_diary import _bg_mempalace_save
+            import asyncio
+            asyncio.create_task(_bg_mempalace_save(self, messages))
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).debug(f"MemPalace bg save skipped: {e}")
+
         self.memory.clear_compressed_summary()
 
         self.memory.clear_content()
         return await self._make_system_msg(
             "**New Conversation Started!**\n\n"
             "- Summary task started in background\n"
+            "- MemPalace save task started in background\n"
             "- Ready for new conversation",
         )
 

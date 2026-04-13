@@ -10,6 +10,7 @@ import {
   ToolResultCompactCard,
   MemorySummaryCard,
   EmbeddingConfigCard,
+  MemPalaceCard,
 } from "./components";
 import { PageHeader } from "@/components/PageHeader";
 import styles from "./index.module.less";
@@ -164,6 +165,20 @@ function AgentConfigPage() {
                 children: (
                   <div className={styles.tabContent}>
                     <EmbeddingConfigCard />
+                  </div>
+                ),
+              },
+              {
+                key: "mempalace",
+                label: (
+                  <span className={styles.tabLabel}>
+                    MemPalace
+                  </span>
+                ),
+                children: (
+                  <div className={styles.tabContent}>
+                    {/* MemPalace hooks — manages own state via API */}
+                    <MemPalaceCard />
                   </div>
                 ),
               },

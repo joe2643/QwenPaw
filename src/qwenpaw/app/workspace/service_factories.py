@@ -61,12 +61,12 @@ async def create_chat_service(ws: "Workspace", service):
     # pylint: enable=protected-access
 
 
-async def create_channel_service(ws: "Workspace", _):
-    """Create channel manager if configured.
+async def create_channel_service(ws: "Workspace", existing_cm):
+    """Create channel manager if configured, or reuse existing one.
 
     Args:
         ws: Workspace instance
-        _: Unused service parameter
+        existing_cm: Existing ChannelManager if reused, None if creating new
 
     Returns:
         ChannelManager instance or None if not configured
@@ -79,29 +79,35 @@ async def create_channel_service(ws: "Workspace", _):
     from ..channels.manager import ChannelManager
     from ..channels.utils import make_process_from_runner
 
-    temp_config = Config(channels=ws._config.channels)
     runner = ws._service_manager.services["runner"]
 
-    def on_last_dispatch(channel, user_id, session_id):
-        update_last_dispatch(
-            channel=channel,
-            user_id=user_id,
-            session_id=session_id,
-            agent_id=ws.agent_id,
+    if existing_cm is not None:
+        # Reused from previous workspace — channels will be updated by
+        # reload_channel_service() after start_all() completes.
+        cm = existing_cm
+        ws._service_manager.services["channel_manager"] = cm
+    else:
+        # Fresh start — create new ChannelManager
+        temp_config = Config(channels=ws._config.channels)
+
+        def on_last_dispatch(channel, user_id, session_id):
+            update_last_dispatch(
+                channel=channel,
+                user_id=user_id,
+                session_id=session_id,
+                agent_id=ws.agent_id,
+            )
+
+        cm = ChannelManager.from_config(
+            process=make_process_from_runner(runner),
+            config=temp_config,
+            on_last_dispatch=on_last_dispatch,
+            workspace_dir=ws.workspace_dir,
         )
+        ws._service_manager.services["channel_manager"] = cm
 
-    cm = ChannelManager.from_config(
-        process=make_process_from_runner(runner),
-        config=temp_config,
-        on_last_dispatch=on_last_dispatch,
-        workspace_dir=ws.workspace_dir,
-    )
-    ws._service_manager.services["channel_manager"] = cm
-
-    # Inject workspace into ChannelManager and all channels
+    # Always inject workspace into ChannelManager, all channels, and runner
     cm.set_workspace(ws)
-
-    # Inject workspace into runner for control command handlers
     runner.set_workspace(ws)
 
     return cm
@@ -168,3 +174,30 @@ async def create_mcp_config_watcher(ws: "Workspace", _):
     ws._service_manager.services["mcp_config_watcher"] = watcher
     return watcher
     # pylint: enable=protected-access
+
+async def reload_channel_service(ws, cm) -> None:
+    """Update reused channel_manager to point to the new runner.
+
+    When channel_manager is reused during hot-reload, the channels
+    still reference the old runner (now stopped). This swaps the
+    process callback on all channels to the new runner.
+    """
+    from ..channels.utils import make_process_from_runner
+    import logging
+    _logger = logging.getLogger(__name__)
+
+    runner = ws._service_manager.services.get("runner")
+    if not runner:
+        _logger.warning("channel_manager reload: no runner found, skipping")
+        return
+
+    new_process = make_process_from_runner(runner)
+    for ch in cm.channels:
+        old_id = id(getattr(ch, "_process", None))
+        ch._process = new_process
+        _logger.debug("channel_manager reload: %s _process %s -> %s", ch.channel, old_id, id(new_process))
+    cm.set_workspace(ws)
+    _logger.info(
+        "channel_manager reload: updated %d channels to new runner (id=%s)",
+        len(cm.channels), id(runner),
+    )

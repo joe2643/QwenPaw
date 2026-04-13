@@ -730,6 +730,194 @@ It is recommended to configure the following in `@BotFather`:
 
 ---
 
+## WhatsApp
+
+The WhatsApp channel uses [neonize](https://github.com/krypton-byte/neonize) (a Python binding for the whatsmeow Go library). It connects directly to WhatsApp Web servers — no extra server, no Meta Business API, no separate daemon required.
+
+### Link your phone
+
+1. In the Console, go to **Control → Channels**, click the **WhatsApp** card, and toggle **Enabled**.
+2. Click **Get Pair Code** or **Show QR Code**:
+   - **Pair Code** (recommended): enter your phone number in E.164 format (e.g. `+85212345678`). The console shows an 8-character code.
+   - **QR Code**: scan the displayed image with WhatsApp → Settings → Linked Devices → Link a device.
+3. On your phone: **Settings → Linked Devices → Link with phone number** and type in the 8-character code (if using pair code), or scan the QR.
+4. After linking, the card shows **Linked** with the bot's phone number.
+
+The session is persisted under `~/.qwenpaw/credentials/whatsapp/default/neonize.db`. Restart QwenPaw and the bot reconnects automatically — no re-pairing needed.
+
+### Configure
+
+**Method 1:** Configure in the Console (Control → Channels → WhatsApp).
+
+**Method 2:** Edit agent workspace `agent.json`:
+
+```json
+"whatsapp": {
+    "enabled": true,
+    "bot_prefix": "@bot",
+    "dm_policy": "allowlist",
+    "group_policy": "allowlist",
+    "allow_from": ["+85212345678"],
+    "groups": ["120363421135228220@g.us"],
+    "group_allow_from": ["*"],
+    "require_mention": true,
+    "send_read_receipts": true,
+    "self_chat_mode": false
+}
+```
+
+**WhatsApp-specific fields:**
+
+| Field                | Type    | Default            | Description                                                          |
+| -------------------- | ------- | ------------------ | -------------------------------------------------------------------- |
+| `auth_dir`           | string  | `""`               | Directory for neonize session DB. Defaults to `~/.qwenpaw/credentials/whatsapp/default` |
+| `send_read_receipts` | bool    | `true`             | Send read receipts (double blue ticks)                               |
+| `self_chat_mode`     | bool    | `false`            | Process messages sent from the bot's own number (for self-commands)  |
+| `text_chunk_limit`   | int     | `4096`             | Maximum characters per outgoing message (longer replies are split)   |
+| `groups`             | list    | `[]`               | Group JID allowlist (e.g. `"120363421135228220@g.us"`)                |
+| `group_allow_from`   | list    | `[]`               | Who can trigger the bot in groups. `["*"]` = everyone                |
+
+### Features
+
+- **Text** (DM + group) with markdown rendering via WhatsApp's native formatting
+- **Images**, **audio** (voice notes), **video**, **documents**, **stickers** (receive + send)
+- **Mentions**: detects both @phone and WhatsApp's native LID mentions
+- **Reply-to**: quoted message content (text + media) injected as context for the agent
+- **Group history**: non-mentioned messages buffered and injected when the bot is mentioned
+- **Typing indicator**: continuously sent during agent response generation
+- **Slash commands**: `/new`, `/stop`, `/clear` etc. work even when the message starts with `@+bot_phone`
+
+### Notes
+
+- WhatsApp Web sessions are tied to your phone — if you unlink the device on your phone, you'll need to re-pair.
+- Group IDs end with `@g.us` (e.g. `120363421135228220@g.us`). You can find them in the Console drawer after the bot joins a group.
+- `group_policy: allowlist` with an empty `groups` list blocks all group messages.
+
+---
+
+## Signal
+The Signal channel uses the [bbernhard/signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api) Docker image (2.5k★), which wraps the official `signal-cli` in a REST + WebSocket API. Run this container alongside QwenPaw.
+
+### Prerequisites
+
+- **Docker** or **Podman** installed on the host
+- **Signal** installed on your phone (the linked-device approach needs an existing Signal account)
+- Port **8082** available (or adjust the `-p` flag below)
+
+### Step 1: Start signal-cli REST API daemon
+
+```bash
+# With Docker
+docker run -d --name signal-cli \
+  -p 8082:8080 \
+  -v ~/.local/share/signal-cli:/home/.local/share/signal-cli \
+  -e MODE=json-rpc \
+  bbernhard/signal-cli-rest-api:latest
+
+# Or with Podman
+podman run -d --name signal-cli --restart unless-stopped \
+  -p 8082:8080 \
+  -v ~/.local/share/signal-cli:/home/.local/share/signal-cli:Z \
+  -e MODE=json-rpc \
+  bbernhard/signal-cli-rest-api:latest
+```
+
+### Step 2: Link to your Signal account
+
+The easiest method is linking as a secondary device (your phone must already have Signal installed):
+
+```bash
+# Generate a linking QR code in the terminal
+curl -s http://localhost:8082/v1/qrcodelink?device_name=QwenPaw | qrencode -t ANSIUTF8
+```
+
+If `qrencode` is not installed, open `http://localhost:8082/v1/qrcodelink?device_name=QwenPaw` directly in a browser to see the QR code.
+
+Scan the QR code with your phone: **Signal → Settings → Linked Devices → Link New Device**.
+
+> **Alternative: Register a new number** (if you have a dedicated phone number):
+> ```bash
+> curl -X POST http://localhost:8082/v1/register/+85212345678
+> curl -X POST http://localhost:8082/v1/register/+85212345678/verify/123456
+> ```
+
+### Step 3: Verify connection
+
+```bash
+curl -s http://localhost:8082/v1/about
+# Should return: {"versions":["v1","v2"],...,"mode":"json-rpc"}
+```
+
+If you see a JSON response with `"mode":"json-rpc"`, the daemon is ready.
+
+### Step 4: Configure in QwenPaw
+
+Set the channel config in QwenPaw (via the console UI or directly in config):
+
+```json
+"signal": {
+    "enabled": true,
+    "account": "+85212345678",
+    "http_url": "http://127.0.0.1:8082",
+    "dm_policy": "allowlist",
+    "group_policy": "allowlist",
+    "allow_from": ["+85298765432", "uuid:5720b72c-1051-47bd-962b-8c0c9db5aff1"],
+    "groups": ["sBlO8LhzR42XNBbUqUrNVNokyOe2NdDZCTs0fSuZnJc="],
+    "group_allow_from": ["*"],
+    "require_mention": true,
+    "send_read_receipts": true
+}
+```
+
+### Configuration reference
+
+| Field                | Type    | Default              | Description                                                |
+| -------------------- | ------- | -------------------- | ---------------------------------------------------------- |
+| `account`            | string  | `""` (required)      | Phone number registered with signal-cli, E.164 format (e.g. `+85212345678`) |
+| `http_url`           | string  | `""`                 | Full URL of bbernhard REST API (e.g. `http://127.0.0.1:8082`) |
+| `http_host`          | string  | `"127.0.0.1"`        | Host (used if `http_url` empty)                            |
+| `http_port`          | int     | `8080`               | Port (used if `http_url` empty)                            |
+| `auto_start`         | bool    | `false`              | Auto-start the signal-cli daemon process                   |
+| `send_read_receipts` | bool    | `true`               | Send read receipts when messages are processed             |
+| `text_chunk_limit`   | int     | `4000`               | Maximum characters per outgoing message                    |
+| `media_max_mb`       | int     | `8`                  | Maximum media attachment size in MB                        |
+| `groups`             | list    | `[]`                 | Group internal-id allowlist (base64 values from signal-cli) |
+| `group_allow_from`   | list    | `[]`                 | Who can trigger the bot in groups. `["*"]` = everyone; supports `+phone` or `uuid:...` |
+| `reply_to_trigger`   | bool    | `true`               | Quote-reply the original inbound message when sending responses |
+| `filter_thinking`    | bool    | `false`              | Hide reasoning/thinking blocks from replies                |
+| `text_mode`          | string  | `"styled"`           | Message format: `"styled"` for markdown, `"plain"` for plain text |
+
+### Features
+
+- **Text** (DM + group) with native markdown via `text_mode: "styled"` (`**bold**`, `*italic*`, `` `code` ``, `~~strike~~`)
+- **Images**, **audio**, **video**, **files** (receive + send via base64 attachments)
+- **Reactions**: receive + send emoji reactions
+- **Quote/reply-to**: extracts quoted message text + attachments as context
+- **Group history**: non-mentioned messages buffered with media, injected when bot is mentioned
+- **Typing indicator**: continuously refreshed during response generation
+- **WebSocket receive**: real-time message stream, no polling
+
+### Troubleshooting
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| Container fails to start | Port 8082 already in use | Change `-p 8082:8080` to another port (e.g. `-p 8083:8080`) and update `http_url` |
+| QR code expired | Linking URI has a short TTL | Re-run the `qrcodelink` command to generate a fresh code |
+| `Connection refused` in QwenPaw | Daemon not ready or wrong URL | Check `docker logs signal-cli`; verify `http_url` matches the published port |
+| Messages not received | Account not linked or WebSocket disconnected | Verify with `curl http://localhost:8082/v1/about`; restart container if needed |
+| Group messages ignored | Group ID not in allowlist | Get group IDs via `curl http://localhost:8082/v1/groups/+YOUR_NUMBER` and add the `internal-id` to `groups` |
+| `signal-cli` data lost after restart | Volume not mounted | Ensure `-v ~/.local/share/signal-cli:/home/.local/share/signal-cli` is present |
+| Bot replies but phone shows duplicate | Linked device echoes | This is normal; the phone shows both sides of the conversation |
+
+### Notes
+
+- Signal does not expose a public API — `signal-cli` is the only bridge, and `bbernhard/signal-cli-rest-api` is the most popular wrapper.
+- Group IDs in `groups` are the **internal-id** from `GET /v1/groups/{number}` (base64-looking strings like `sBlO8LhzR42X...=`), NOT the `group.xxx` external form.
+- `group_allow_from` accepts phone numbers (`+85212345678`), UUIDs (`uuid:xxx-xxx-...`), or `"*"` for everyone.
+- If the container fails to start, check `docker logs signal-cli` or `podman logs signal-cli` for details.
+
+---
+
 ## Mattermost
 
 The Mattermost channel uses WebSockets for real-time monitoring and REST APIs for replies. It supports both direct messages and group chats, using **Threads** to isolate conversation contexts in channels.

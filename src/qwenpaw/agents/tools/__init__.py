@@ -24,6 +24,7 @@ from .memory_search import create_memory_search_tool
 from .get_current_time import get_current_time, set_user_timezone
 from .get_token_usage import get_token_usage
 from .agent_management import list_agents, chat_with_agent
+from .mempalace_diary import mempalace_diary_write
 
 __all__ = [
     "execute_python_code",
@@ -47,4 +48,5 @@ __all__ = [
     "get_token_usage",
     "list_agents",
     "chat_with_agent",
+    "mempalace_diary_write",
 ]

@@ -52,6 +52,7 @@ from .tools import (
     view_video,
     write_file,
     create_memory_search_tool,
+    mempalace_diary_write,
 )
 from .utils import process_file_and_media_blocks_in_message
 from ..constant import (
@@ -456,6 +457,57 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                 hook=memory_compact_hook.__call__,
             )
             logger.debug("Registered memory compaction hook")
+
+        # MemPalace hooks — config-driven registration
+        mp_cfg = getattr(self._agent_config, "mempalace", None)
+        if mp_cfg and mp_cfg.enabled:
+            try:
+                from .hooks.mempalace_diary import (
+                    MemPalacePreCompactHook, MemPalaceIntervalHook, MemPalacePreReplyHook,
+                )
+                registered = []
+                _session_id = self._request_context.get("session_id", "default")
+                if mp_cfg.precompact_save.enabled:
+                    hook = MemPalacePreCompactHook(compact_threshold=mp_cfg.precompact_save.threshold)
+                    self.register_instance_hook(hook_type="pre_reasoning", hook_name="mempalace_precompact", hook=hook.__call__)
+                    registered.append("precompact")
+                if mp_cfg.interval_save.enabled:
+                    hook = MemPalaceIntervalHook(working_dir=working_dir, write_interval=mp_cfg.interval_save.write_interval, session_id=_session_id)
+                    self.register_instance_hook(hook_type="post_reasoning", hook_name="mempalace_interval", hook=hook.__call__)
+                    registered.append("interval")
+                if mp_cfg.pre_reply_save:
+                    hook = MemPalacePreReplyHook(working_dir=working_dir, session_id=_session_id)
+                    self.register_instance_hook(hook_type="pre_reply", hook_name="mempalace_prereply", hook=hook.__call__)
+                    registered.append("pre_reply")
+                # L2 Room Recall — auto-inject relevant context
+                if getattr(mp_cfg, "l2_recall", True):
+                    try:
+                        from .hooks.mempalace_recall import MemPalaceRecallHook
+                        recall_hook = MemPalaceRecallHook()
+                        self.register_instance_hook(hook_type="pre_reasoning", hook_name="mempalace_l2_recall", hook=recall_hook.__call__)
+                        registered.append("l2_recall")
+                    except ImportError as e:
+                        logger.warning("L2 Recall hook not available: %s", e)
+                logger.info("MemPalace hooks registered: %s", ", ".join(registered))
+            except ImportError as e:
+                logger.warning("MemPalace hooks not available: %s", e)
+        else:
+            logger.debug("MemPalace hooks disabled")
+
+        # Session WAL — write-ahead log for crash recovery
+        wal_enabled = mp_cfg.session_wal if (mp_cfg and mp_cfg.enabled) else False
+        if wal_enabled:
+            try:
+                from .hooks.tool_wal import (
+                    SessionWAL, ToolWALPreActingHook, ToolWALPostActingHook, ReasoningWALHook,
+                )
+                wal = SessionWAL(working_dir=working_dir)
+                self.register_instance_hook(hook_type="pre_acting", hook_name="wal_pre_acting", hook=ToolWALPreActingHook(wal).__call__)
+                self.register_instance_hook(hook_type="post_acting", hook_name="wal_post_acting", hook=ToolWALPostActingHook(wal).__call__)
+                self.register_instance_hook(hook_type="post_reasoning", hook_name="wal_post_reasoning", hook=ReasoningWALHook(wal).__call__)
+                logger.info("Session WAL hooks registered")
+            except ImportError as e:
+                logger.warning(f"Session WAL hooks not available: {e}")
 
     def rebuild_sys_prompt(self) -> None:
         """Rebuild and replace the system prompt.

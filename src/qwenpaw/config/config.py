@@ -223,6 +223,40 @@ class WeixinConfig(BaseChannelConfig):
     media_dir: Optional[str] = None
 
 
+class WhatsAppConfig(BaseChannelConfig):
+    """WhatsApp channel config (neonize backend)."""
+
+    auth_dir: str = ""
+    send_read_receipts: bool = True
+    self_chat_mode: bool = False
+    text_chunk_limit: int = 4096
+    media_max_mb: int = 50
+    groups: List[str] = Field(default_factory=list)
+    group_allow_from: List[str] = Field(default_factory=list)
+    ack_reaction_thinking: str = "🤔"
+    ack_reaction_done: str = "👀"
+    ack_reaction_error: str = "⚠️"
+    reply_to_trigger: bool = True
+
+
+class SignalConfig(BaseChannelConfig):
+    """Signal channel config (signal-cli REST daemon)."""
+
+    account: str = ""
+    http_url: str = ""
+    http_host: str = "127.0.0.1"
+    http_port: int = 8080
+    auto_start: bool = False
+    send_read_receipts: bool = True
+    text_chunk_limit: int = 4000
+    groups: List[str] = Field(default_factory=list)
+    group_allow_from: List[str] = Field(default_factory=list)
+    ack_reaction_thinking: str = "🤔"
+    ack_reaction_done: str = "👀"
+    ack_reaction_error: str = "⚠️"
+    reply_to_trigger: bool = True
+
+
 class ChannelConfig(BaseModel):
     """Built-in channel configs; extra keys allowed for plugin channels."""
 
@@ -242,6 +276,8 @@ class ChannelConfig(BaseModel):
     wecom: WecomConfig = WecomConfig()
     xiaoyi: XiaoYiConfig = XiaoYiConfig()
     weixin: WeixinConfig = WeixinConfig()
+    whatsapp: WhatsAppConfig = WhatsAppConfig()
+    signal: SignalConfig = SignalConfig()
     onebot: OneBotConfig = OneBotConfig()
 
 
@@ -468,6 +504,37 @@ class MemorySummaryConfig(BaseModel):
     )
 
 
+
+class MediaServerConfig(BaseModel):
+    """Media server for view_video/view_image signed URL serving."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Whether to enable the media server for signed URL serving",
+    )
+    server_url: str = Field(
+        default="http://localhost:8089",
+        description="Local media server URL",
+    )
+    tunnel_domain: str = Field(
+        default="",
+        description="Public tunnel domain for external access (e.g. https://media.example.com)",
+    )
+    media_secret: str = Field(
+        default="",
+        description="Secret key for signing media URLs (auto-generated if empty)",
+    )
+    allowed_dirs: List[str] = Field(
+        default_factory=lambda: ["/tmp", "~/.qwenpaw/media"],
+        description="Directories allowed for media serving",
+    )
+    max_size_mb: int = Field(
+        default=100,
+        ge=1,
+        description="Maximum file size in MB for media serving",
+    )
+
+
 class AgentsRunningConfig(BaseModel):
     """Agent runtime behavior configuration."""
 
@@ -608,6 +675,7 @@ class AgentsRunningConfig(BaseModel):
         ),
     )
 
+
     @property
     def memory_compact_reserve(self) -> int:
         """Memory compact reserve size (tokens)."""
@@ -668,6 +736,28 @@ class AgentProfileRef(BaseModel):
     )
 
 
+
+# -- MemPalace integration config --
+
+class MemPalaceIntervalSaveConfig(BaseModel):
+    enabled: bool = True
+    write_interval: int = 15
+
+class MemPalacePreCompactSaveConfig(BaseModel):
+    enabled: bool = True
+    threshold: float = 0.75
+
+class MemPalaceHooksConfig(BaseModel):
+    """MemPalace integration configuration (per-agent)."""
+    enabled: bool = False
+    interval_save: MemPalaceIntervalSaveConfig = MemPalaceIntervalSaveConfig()
+    precompact_save: MemPalacePreCompactSaveConfig = MemPalacePreCompactSaveConfig()
+    pre_reply_save: bool = True
+    bg_save_on_new: bool = True
+    session_wal: bool = True
+    l2_recall: bool = True
+
+
 class AgentProfileConfig(BaseModel):
     """Complete Agent Profile configuration (stored in workspace/agent.json).
 
@@ -726,6 +816,10 @@ class AgentProfileConfig(BaseModel):
     security: Optional["SecurityConfig"] = Field(
         default=None,
         description="Security configuration for this agent",
+    )
+    mempalace: MemPalaceHooksConfig = Field(
+        default_factory=MemPalaceHooksConfig,
+        description="MemPalace integration configuration",
     )
 
 
@@ -1172,6 +1266,11 @@ class Config(BaseModel):
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     last_dispatch: Optional[LastDispatchConfig] = None
     security: SecurityConfig = Field(default_factory=SecurityConfig)
+    mempalace: MemPalaceHooksConfig = Field(default_factory=MemPalaceHooksConfig)
+    media_server: MediaServerConfig = Field(
+        default_factory=MediaServerConfig,
+        description="Global media server configuration for signed URL serving",
+    )
     show_tool_details: bool = True
     user_timezone: str = Field(
         default_factory=detect_system_timezone,
@@ -1200,6 +1299,8 @@ ChannelConfigUnion = Union[
     WecomConfig,
     XiaoYiConfig,
     WeixinConfig,
+    WhatsAppConfig,
+    SignalConfig,
 ]
 
 

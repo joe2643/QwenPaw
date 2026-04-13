@@ -17,11 +17,13 @@ import { agentsApi } from "./modules/agents";
 import { workspaceApi } from "./modules/workspace";
 import { localModelApi } from "./modules/localModel";
 import { mcpApi } from "./modules/mcp";
+import { mempalaceApi } from "./modules/mempalace";
 import { tokenUsageApi } from "./modules/tokenUsage";
 import { toolsApi } from "./modules/tools";
 import { securityApi } from "./modules/security";
 import { userTimezoneApi } from "./modules/userTimezone";
 import { languageApi } from "./modules/language";
+import { mediaServerApi } from "./modules/mediaServer";
 
 export const api = {
   // Root
@@ -63,6 +65,9 @@ export const api = {
   // MCP Clients
   ...mcpApi,
 
+  // MemPalace
+  ...mempalaceApi,
+
   // Token Usage
   ...tokenUsageApi,
   // Tools
@@ -76,6 +81,9 @@ export const api = {
 
   // Language
   ...languageApi,
+
+  // Media Server
+  ...mediaServerApi,
 };
 
 export default api;

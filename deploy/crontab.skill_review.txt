@@ -1,0 +1,20 @@
+# QwenPaw Skill Review — cron entry
+#
+# Runs 3× daily at 06:00, 14:00, 22:00.
+# Offset 2h from reclassifier batch (0 4,8,12,16,20,0 *) to avoid overlap.
+#
+# Install (appends to current crontab):
+#   crontab -l | cat - deploy/crontab.skill_review.txt | crontab -
+#
+# Log: /home/joe/.qwenpaw/skill_review.log
+#
+# TODO before installing — replace placeholders:
+#   QWENPAW_DIR  = path to QwenPaw repo clone (e.g. /home/joe/QwenPaw)
+#   PYTHON_BIN = Python interpreter with QwenPaw installed
+#              (e.g. /home/joe/.local/bin/python3.11 or /home/joe/.venv/copaw/bin/python)
+#
+# Add/remove --agent lines as needed (one line per agent workspace to review).
+
+0 6,14,22 * * * cd /home/joe/QwenPaw && /home/joe/.local/bin/python3.11 -m qwenpaw.skill_review --agent default >> /home/joe/.qwenpaw/skill_review.log 2>&1
+# 0 6,14,22 * * * cd /home/joe/QwenPaw && /home/joe/.local/bin/python3.11 -m qwenpaw.skill_review --agent discord-triage >> /home/joe/.qwenpaw/skill_review.log 2>&1
+# 0 6,14,22 * * * cd /home/joe/QwenPaw && /home/joe/.local/bin/python3.11 -m qwenpaw.skill_review --agent ai-news >> /home/joe/.qwenpaw/skill_review.log 2>&1

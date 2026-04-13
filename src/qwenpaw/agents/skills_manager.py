@@ -1522,6 +1522,7 @@ class SkillService:
         extra_files: dict[str, Any] | None = None,
         config: dict[str, Any] | None = None,
         enable: bool = False,
+        authored_by: str | None = None,
     ) -> str | None:
         _validate_skill_content(content)
         skill_name = _normalize_skill_dir_name(name)
@@ -1569,6 +1570,9 @@ class SkillService:
                 "metadata": metadata,
                 "requirements": metadata["requirements"],
                 "updated_at": metadata["updated_at"],
+                # Track who created the skill: "agent", "user", tool name, etc.
+                # Preserved from existing entry if not explicitly set.
+                "authored_by": authored_by or entry.get("authored_by"),
             }
 
         _mutate_json(
