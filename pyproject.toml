@@ -105,6 +105,9 @@ whatsapp = [
     # grpcio-status, googleapis-common-protos, google-cloud-*, a2a-sdk,
     # opentelemetry-proto, onnxruntime, qdrant-client, etc.
     "neonize-qwenpaw>=0.3.16.1",
+    # QR code endpoint (/config/channels/whatsapp/qrcode) renders the
+    # linking QR via segno. Without it, the QR endpoint 500s.
+    "segno>=1.6.1",
 ]
 full = [
     "qwenpaw[local,ollama,llamacpp,whisper]",
