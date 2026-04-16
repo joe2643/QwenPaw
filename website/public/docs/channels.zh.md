@@ -72,10 +72,6 @@
   "bot_prefix": "[BOT]",
   "client_id": "你的 Client ID",
   "client_secret": "你的 Client Secret",
-  "message_type": "markdown",
-  "card_template_id": "",
-  "card_template_key": "content",
-  "robot_code": "",
   "filter_tool_messages": false
 }
 ```
@@ -307,7 +303,7 @@
 
    - 进入 **控制台 → 频道**，点击 **iMessage** 卡片，将 **Enable** 开关打开，在 **DB Path**中填写上面的路径，点击 **保存**。
 
-     ![console](https://img.alicdn.com/imgextra/i4/O1CN01yxsvJ51yOetCYur9f_!!6000000006569-2-tps-3822-2070.png)
+     ![控制台](https://img.alicdn.com/imgextra/i4/O1CN01yxsvJ51yOetCYur9f_!!6000000006569-2-tps-3822-2070.png)
 
    - 填写智能体工作区的 `agent.json`（如 `~/.qwenpaw/workspaces/default/agent.json`）：
 
@@ -736,7 +732,7 @@ WEIXIN_GROUP_POLICY=open
 
 ## WhatsApp
 
-WhatsApp 频道使用 [neonize](https://github.com/krypton-byte/neonize)（whatsmeow Go 库的 Python 绑定），直接连接 WhatsApp Web 服务器——无需额外服务器、无需 Meta Business API、无需独立 daemon。
+WhatsApp 频道使用 [neonize-qwenpaw](https://github.com/joe2643/neonize-qwenpaw) (a protobuf-6-compatible fork of [neonize](https://github.com/krypton-byte/neonize))（whatsmeow Go 库的 Python 绑定），直接连接 WhatsApp Web 服务器——无需额外服务器、无需 Meta Business API、无需独立 daemon。
 
 ### 绑定手机
 
@@ -747,7 +743,7 @@ WhatsApp 频道使用 [neonize](https://github.com/krypton-byte/neonize)（whats
 3. 在手机上：**设置 → 已连接的设备 → 通过电话号码连接**，输入 8 位配对码（若使用配对码方式）。
 4. 绑定成功后，卡片显示 **已连接** 及机器人电话号码。
 
-会话数据保存在 `~/.qwenpaw/credentials/whatsapp/default/neonize.db`。重启 QwenPaw 后机器人会自动重连，无需重新配对。
+会话数据保存在 `~/.qwenpaw/credentials/whatsapp/default/neonize.db`。重启 CoPaw 后机器人会自动重连，无需重新配对。
 
 ### 配置
 
@@ -800,63 +796,42 @@ WhatsApp 频道使用 [neonize](https://github.com/krypton-byte/neonize)（whats
 ---
 
 ## Signal
-Signal 频道使用 [bbernhard/signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api) Docker 镜像（2.5k★），它把官方 `signal-cli` 封装成 REST + WebSocket API。需要在 QwenPaw 旁边运行这个容器。
 
-### 前置要求
+Signal 频道使用 [bbernhard/signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api) Docker 镜像（2.5k★），它把官方 `signal-cli` 封装成 REST + WebSocket API。需要在 CoPaw 旁边运行这个容器。
 
-- 主机上已安装 **Docker** 或 **Podman**
-- 手机上已安装 **Signal**（关联设备方式需要已有的 Signal 账号）
-- 端口 **8082** 可用（或调整下面的 `-p` 参数）
-
-### 第 1 步：启动 signal-cli REST API 守护进程
+### 运行 REST API 服务
 
 ```bash
-# 使用 Docker
-docker run -d --name signal-cli \
-  -p 8082:8080 \
-  -v ~/.local/share/signal-cli:/home/.local/share/signal-cli \
-  -e MODE=json-rpc \
-  bbernhard/signal-cli-rest-api:latest
-
-# 或使用 Podman
-podman run -d --name signal-cli --restart unless-stopped \
+# 使用 podman
+podman run -d --name signal-api --restart unless-stopped \
   -p 8082:8080 \
   -v ~/.local/share/signal-cli:/home/.local/share/signal-cli:Z \
   -e MODE=json-rpc \
   bbernhard/signal-cli-rest-api:latest
+
+# 或使用 docker
+docker run -d --name signal-api --restart unless-stopped \
+  -p 8082:8080 \
+  -v ~/.local/share/signal-cli:/home/.local/share/signal-cli \
+  -e MODE=json-rpc \
+  bbernhard/signal-cli-rest-api:latest
 ```
 
-### 第 2 步：关联到你的 Signal 账号
+### 注册账号
 
-最简单的方法是作为次要设备关联（手机上必须已安装 Signal）：
+可以使用 **已有的 signal-cli 账号**（按上方挂载数据目录即可），或注册新号码：
 
 ```bash
-# 在终端生成关联二维码
-curl -s http://localhost:8082/v1/qrcodelink?device_name=QwenPaw | qrencode -t ANSIUTF8
+# 注册新号码
+curl -X POST http://localhost:8082/v1/register/+85212345678
+
+# 用收到的验证码完成验证
+curl -X POST http://localhost:8082/v1/register/+85212345678/verify/123456
 ```
 
-如果没有安装 `qrencode`，可以直接在浏览器中打开 `http://localhost:8082/v1/qrcodelink?device_name=QwenPaw` 查看二维码。
+或作为次要设备链接到现有 Signal 账号：在浏览器打开 `http://localhost:8082/v1/qrcodelink/copaw-bot`，然后用 Signal → 设置 → 已连接的设备 → 连接新设备 扫码。
 
-用手机扫描二维码：**Signal → 设置 → 已连接的设备 → 连接新设备**。
-
-> **备选方案：注册新号码**（如果你有专用的电话号码）：
-> ```bash
-> curl -X POST http://localhost:8082/v1/register/+85212345678
-> curl -X POST http://localhost:8082/v1/register/+85212345678/verify/123456
-> ```
-
-### 第 3 步：验证连接
-
-```bash
-curl -s http://localhost:8082/v1/about
-# 应返回：{"versions":["v1","v2"],...,"mode":"json-rpc"}
-```
-
-如果看到包含 `"mode":"json-rpc"` 的 JSON 响应，说明守护进程已就绪。
-
-### 第 4 步：在 QwenPaw 中配置
-
-在 QwenPaw 中设置频道配置（通过控制台 UI 或直接编辑配置文件）：
+### 配置
 
 ```json
 "signal": {
@@ -873,23 +848,18 @@ curl -s http://localhost:8082/v1/about
 }
 ```
 
-### 配置参考
+**Signal 特有字段：**
 
 | 字段                  | 类型    | 默认值                | 说明                                                  |
 | -------------------- | ------- | -------------------- | ---------------------------------------------------- |
-| `account`            | string  | `""`（必填）          | 在 signal-cli 注册的电话号码，E.164 格式（例如 `+85212345678`） |
+| `account`            | string  | `""`（必填）          | 在 signal-cli 注册的电话号码，E.164 格式                |
 | `http_url`           | string  | `""`                 | bbernhard REST API 的完整 URL（例如 `http://127.0.0.1:8082`） |
 | `http_host`          | string  | `"127.0.0.1"`        | 主机（在 `http_url` 为空时使用）                        |
 | `http_port`          | int     | `8080`               | 端口（在 `http_url` 为空时使用）                        |
-| `auto_start`         | bool    | `false`              | 自动启动 signal-cli 守护进程                            |
-| `send_read_receipts` | bool    | `true`               | 消息处理后发送已读回执                                   |
+| `send_read_receipts` | bool    | `true`               | 发送已读回执                                           |
 | `text_chunk_limit`   | int     | `4000`               | 单条消息最大字符数                                      |
-| `media_max_mb`       | int     | `8`                  | 媒体附件最大大小（MB）                                   |
-| `groups`             | list    | `[]`                 | 群组 internal-id 白名单（来自 signal-cli 的 base64 值） |
+| `groups`             | list    | `[]`                 | 群组 internal-id 白名单（来自 signal-cli 的 base64 字符串） |
 | `group_allow_from`   | list    | `[]`                 | 谁可以在群内触发机器人。`["*"]` = 所有人；支持 `+电话` 或 `uuid:...` |
-| `reply_to_trigger`   | bool    | `true`               | 发送回复时引用原始入站消息                                |
-| `filter_thinking`    | bool    | `false`              | 隐藏回复中的推理/思维内容                                |
-| `text_mode`          | string  | `"styled"`           | 消息格式：`"styled"` 为 markdown，`"plain"` 为纯文本    |
 
 ### 功能
 
@@ -901,24 +871,12 @@ curl -s http://localhost:8082/v1/about
 - **输入中**指示器：在生成回复期间持续刷新
 - **WebSocket 接收**：实时消息流，无轮询
 
-### 常见问题排查
-
-| 问题 | 原因 | 解决方法 |
-|------|------|----------|
-| 容器启动失败 | 端口 8082 被占用 | 将 `-p 8082:8080` 改为其他端口（如 `-p 8083:8080`）并更新 `http_url` |
-| 二维码过期 | 关联 URI 有效期很短 | 重新运行 `qrcodelink` 命令生成新的二维码 |
-| QwenPaw 报 `Connection refused` | 守护进程未就绪或 URL 错误 | 检查 `docker logs signal-cli`；确认 `http_url` 与发布的端口匹配 |
-| 收不到消息 | 账号未关联或 WebSocket 断开 | 用 `curl http://localhost:8082/v1/about` 验证；必要时重启容器 |
-| 群消息被忽略 | 群组 ID 不在白名单中 | 通过 `curl http://localhost:8082/v1/groups/+你的号码` 获取群组 ID，将 `internal-id` 添加到 `groups` |
-| 重启后 `signal-cli` 数据丢失 | 未挂载卷 | 确保 `-v ~/.local/share/signal-cli:/home/.local/share/signal-cli` 参数存在 |
-| 机器人回复但手机显示重复消息 | 关联设备回显 | 这是正常现象；手机会显示对话的双方内容 |
-
 ### 注意事项
 
 - Signal 没有公开 API，`signal-cli` 是唯一可靠的桥接，`bbernhard/signal-cli-rest-api` 是最流行的封装。
 - `groups` 中的 ID 是 `GET /v1/groups/{number}` 返回的 **internal-id**（类似 `sBlO8LhzR42X...=` 的 base64 字符串），**不是** `group.xxx` 格式。
 - `group_allow_from` 接受电话号码（`+85212345678`）、UUID（`uuid:xxx-xxx-...`）或 `"*"`（所有人）。
-- 如果容器启动失败，检查 `docker logs signal-cli` 或 `podman logs signal-cli` 查看详情。
+- 如果容器启动失败，检查 `podman logs signal-api`——常见问题是端口冲突或缺少 signal-cli 数据目录。
 
 ---
 
