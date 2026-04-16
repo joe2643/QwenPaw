@@ -162,11 +162,21 @@ class AgentConfigWatcher:
                     f"channel '{name}' not found, skip",
                 )
                 return
+
+            # Try in-place config update first (avoids neonize restart etc.)
+            if await old_channel.update_config(new_ch):
+                logger.info(
+                    f"AgentConfigWatcher ({self._agent_id}): "
+                    f"channel '{name}' config updated in-place",
+                )
+                return
+
+            # Fall back to full clone+replace
             new_channel = old_channel.clone(new_ch)
             await self._channel_manager.replace_channel(new_channel)
             logger.info(
                 f"AgentConfigWatcher ({self._agent_id}): "
-                f"channel '{name}' reloaded",
+                f"channel '{name}' reloaded (full restart)",
             )
         except Exception:
             logger.exception(

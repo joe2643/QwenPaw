@@ -574,58 +574,111 @@ class ChannelManager:
     ) -> None:
         """Replace a single channel by name.
 
-        Flow: set enqueue callback → start new (outside lock)
-        → swap + stop old (inside lock). Lock only guards the swap+stop.
+        For channels with requires_sequential_restart=True (e.g. WhatsApp),
+        the old channel is stopped BEFORE the new one starts to avoid
+        resource conflicts (exclusive SQLite locks, websocket collisions).
 
-        Args:
-            new_channel: New channel instance to replace with
-
-        Note:
-            Queue and consumer are created on-demand by UnifiedQueueManager
+        For other channels, zero-downtime flow is preserved:
+        start new -> swap + stop old.
         """
         new_channel_name = new_channel.channel
+        sequential = getattr(new_channel, "requires_sequential_restart", False)
 
-        # 1) Set enqueue callback before start() so the channel
-        #    (e.g. DingTalk) can register its handler
-        if getattr(new_channel, "uses_manager_queue", True):
-            new_channel.set_enqueue(self._make_enqueue_cb(new_channel_name))
+        if sequential:
+            # -- Sequential path: STOP OLD first, then START NEW --
+            async with self._lock:
+                old_channel = None
+                old_index = None
+                for i, ch in enumerate(self.channels):
+                    if ch.channel == new_channel_name:
+                        old_channel = ch
+                        old_index = i
+                        break
 
-        # 2) Start new channel outside lock (may be slow, e.g. DingTalk)
-        logger.info(f"Pre-starting new channel: {new_channel_name}")
-        try:
-            await new_channel.start()
-        except Exception:
-            logger.exception(
-                f"Failed to start new channel: {new_channel_name}",
+                if old_channel is not None:
+                    logger.info(
+                        f"Sequential restart: stopping old channel "
+                        f"{old_channel.channel} first",
+                    )
+                    try:
+                        await old_channel.stop()
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        logger.exception(
+                            f"Failed to stop old channel: "
+                            f"{old_channel.channel}",
+                        )
+                    self.channels.pop(old_index)
+
+            if getattr(new_channel, "uses_manager_queue", True):
+                new_channel.set_enqueue(
+                    self._make_enqueue_cb(new_channel_name),
+                )
+
+            logger.info(
+                f"Sequential restart: starting new channel "
+                f"{new_channel_name}",
             )
             try:
-                await new_channel.stop()
+                await new_channel.start()
             except Exception:
-                pass
-            raise
-
-        # 3) Swap + stop old inside lock
-        async with self._lock:
-            old_channel = None
-            for i, ch in enumerate(self.channels):
-                if ch.channel == new_channel_name:
-                    old_channel = ch
-                    self.channels[i] = new_channel
-                    break
-
-            if old_channel is None:
-                logger.info(f"Adding new channel: {new_channel_name}")
-                self.channels.append(new_channel)
-            else:
-                logger.info(f"Stopping old channel: {old_channel.channel}")
+                logger.exception(
+                    f"Failed to start new channel: {new_channel_name}",
+                )
                 try:
-                    await old_channel.stop()
-                except asyncio.CancelledError:
-                    pass
+                    await new_channel.stop()
                 except Exception:
-                    logger.exception(
-                        f"Failed to stop old channel: {old_channel.channel}",
+                    pass
+                raise
+
+            async with self._lock:
+                self.channels.append(new_channel)
+
+        else:
+            # -- Zero-downtime path: START NEW, then STOP OLD --
+            if getattr(new_channel, "uses_manager_queue", True):
+                new_channel.set_enqueue(
+                    self._make_enqueue_cb(new_channel_name),
+                )
+
+            logger.info(f"Pre-starting new channel: {new_channel_name}")
+            try:
+                await new_channel.start()
+            except Exception:
+                logger.exception(
+                    f"Failed to start new channel: {new_channel_name}",
+                )
+                try:
+                    await new_channel.stop()
+                except Exception:
+                    pass
+                raise
+
+            async with self._lock:
+                old_channel = None
+                for i, ch in enumerate(self.channels):
+                    if ch.channel == new_channel_name:
+                        old_channel = ch
+                        self.channels[i] = new_channel
+                        break
+
+                if old_channel is None:
+                    logger.info(f"Adding new channel: {new_channel_name}")
+                    self.channels.append(new_channel)
+                else:
+                    logger.info(
+                        f"Stopping old channel: {old_channel.channel}",
                     )
+                    try:
+                        await old_channel.stop()
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        logger.exception(
+                            f"Failed to stop old channel: "
+                            f"{old_channel.channel}",
+                        )
 
     async def send_event(
         self,

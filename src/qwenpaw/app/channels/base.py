@@ -77,6 +77,10 @@ class BaseChannel(ABC):
     # If True, manager creates a queue and consumer loop for this channel.
     uses_manager_queue: bool = True
 
+    # If True, replace_channel() stops the old channel BEFORE starting the
+    # new one to avoid resource conflicts (e.g. exclusive SQLite locks).
+    requires_sequential_restart: bool = False
+
     def __init__(
         self,
         process: ProcessHandler,
@@ -1128,6 +1132,15 @@ class BaseChannel(ABC):
                 False,
             ),
         )
+
+    async def update_config(self, config) -> bool:
+        """Try to update config in-place without restart.
+
+        Returns True if applied successfully (no restart needed).
+        Returns False if a full clone+replace is required.
+        Default: returns False (subclasses override to support hot patching).
+        """
+        return False
 
     async def start(self) -> None:
         raise NotImplementedError

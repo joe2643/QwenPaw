@@ -91,6 +91,7 @@ class WhatsAppChannel(BaseChannel):
 
     channel = "whatsapp"
     uses_manager_queue = True
+    requires_sequential_restart = True
 
     def __init__(
         self,
@@ -197,6 +198,57 @@ class WhatsAppChannel(BaseChannel):
             group_allow_from=c.get("group_allow_from") or [],
             reply_to_trigger=c.get("reply_to_trigger", True),
         )
+
+    async def update_config(self, config) -> bool:
+        """Patch config in-place without restarting neonize.
+
+        Returns False if auth_dir or enabled changed (needs full restart).
+        """
+        if isinstance(config, dict):
+            c = config
+        elif hasattr(config, "model_dump"):
+            c = config.model_dump()
+        else:
+            c = vars(config) if hasattr(config, "__dict__") else dict(config)
+
+        # Fields that require full restart
+        new_auth_dir = c.get("auth_dir") or ""
+        new_auth_path = (
+            Path(new_auth_dir).expanduser()
+            if new_auth_dir
+            else Path.home() / ".qwenpaw" / "credentials" / "whatsapp" / "default"
+        )
+        if new_auth_path != self._auth_dir:
+            logger.info("whatsapp: update_config: auth_dir changed, needs restart")
+            return False
+
+        new_enabled = bool(c.get("enabled", False))
+        if new_enabled != self.enabled:
+            logger.info("whatsapp: update_config: enabled changed, needs restart")
+            return False
+
+        # Soft-patchable fields
+        self._send_read_receipts = c.get("send_read_receipts", True)
+        self._text_chunk_limit = c.get("text_chunk_limit", WHATSAPP_MAX_TEXT_LENGTH)
+        self._self_chat_mode = c.get("self_chat_mode", False)
+        self._ack_reaction_thinking = c.get("ack_reaction_thinking", "") or ""
+        self._ack_reaction_done = c.get("ack_reaction_done", "") or ""
+        self._ack_reaction_error = c.get("ack_reaction_error", "") or ""
+        self._groups = c.get("groups") or []
+        self._group_allow_from = c.get("group_allow_from") or []
+        self._reply_to_trigger = c.get("reply_to_trigger", True)
+
+        # BaseChannel fields
+        self.dm_policy = c.get("dm_policy") or "open"
+        self.group_policy = c.get("group_policy") or "open"
+        self.allow_from = set(c.get("allow_from") or [])
+        self.deny_message = c.get("deny_message") or ""
+        self.require_mention = c.get("require_mention", False)
+        self._filter_tool_messages = c.get("filter_tool_messages", False)
+        self._filter_thinking = c.get("filter_thinking", False)
+
+        logger.info("whatsapp: config updated in-place (neonize preserved)")
+        return True
 
     # ── Lifecycle ─────────────────────────────────────────────────────
 

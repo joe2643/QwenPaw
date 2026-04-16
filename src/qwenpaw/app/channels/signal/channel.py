@@ -813,15 +813,15 @@ class SignalChannel(BaseChannel):
 
             # Trusted bot-identity hint (so the agent knows its own Signal
             # number and the mention syntax to tag other users in replies).
-            # Only emit in groups — in DMs the user already knows they're
-            # talking to the bot and mentions serve no purpose.
+            # Emit in both DMs and groups so the bot always knows how to mention.
             # Skip for slash commands (they bypass the agent entirely).
-            if is_group_flag and not has_bot_command:
+            if not has_bot_command:
                 bot_id = self._account or (f"uuid:{self._account_uuid[:8]}" if self._account_uuid else "")
                 hint_line = (
                     f"[Signal bot {bot_id}. "
-                    f"To mention someone in a reply, write @+phone or @uuid:xxxxxxxx "
-                    f"(e.g. @+85251159218 or @uuid:82e0393a).]"
+                    f"To mention someone, write @+phone (name) or @uuid:xxxxxxxx (name) "
+                    f"(e.g. @+85251159218 (Joe) or @uuid:82e0393a (Joe)). "
+                    f"The (name) part is optional but helpful for readability.]"
                 )
                 content_parts.insert(0, TextContent(
                     type=ContentType.TEXT, text=hint_line,
@@ -1088,14 +1088,16 @@ class SignalChannel(BaseChannel):
                 name = self._sender_names.get(uuid_v, "")
             if _looks_like_uuid(name):
                 name = ""
-            # Always show name + id. Prefer phone over uuid for the id.
-            id_str = number if number else (f"uuid:{uuid_v[:8]}" if uuid_v else "")
-            if name and id_str:
-                token = f"@{name} ({id_str})"
-            elif name:
-                token = f"@{name}"
+            # Format: @ID (Name) — ID-first so bot learns the mention syntax.
+            # Prefer phone over uuid for the id.
+            phone_str = number if number.startswith("+") else f"+{number}" if number else ""
+            id_str = phone_str if phone_str else (f"uuid:{uuid_v[:8]}" if uuid_v else "")
+            if id_str and name:
+                token = f"@{id_str} ({name})"
             elif id_str:
                 token = f"@{id_str}"
+            elif name:
+                token = f"@{name}"
             else:
                 token = "@someone"
             result = result[:start] + token + result[start + length:]

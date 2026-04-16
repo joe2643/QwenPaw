@@ -1279,8 +1279,8 @@ class TestSenderDisplayAndMentions:
         mentions = [{"start": 3, "length": 1, "number": "+85298765432", "name": "Alice"}]
         result = ch._expand_mentions(body, mentions)
         assert "\ufffc" not in result
-        assert "@Alice (+85298765432)" in result
-        assert result == "Hi @Alice (+85298765432) how are you"
+        assert "@+85298765432 (Alice)" in result
+        assert result == "Hi @+85298765432 (Alice) how are you"
 
     def test_expand_mentions_multiple(self):
         ch = _make_channel()
@@ -1292,7 +1292,7 @@ class TestSenderDisplayAndMentions:
         result = ch._expand_mentions(body, mentions)
         assert "\ufffc" not in result
         assert "@+852111" in result
-        assert "@Bob (+852222)" in result
+        assert "@+852222 (Bob)" in result
 
     def test_expand_mentions_uses_cached_name(self):
         ch = _make_channel()
@@ -1301,7 +1301,8 @@ class TestSenderDisplayAndMentions:
         mentions = [{"start": 0, "length": 1, "uuid": "uuid-abc123"}]
         result = ch._expand_mentions(body, mentions)
         # Name + uuid tail together
-        assert "@Charlie (uuid:uuid-abc" in result
+        assert "@uuid:uuid-abc" in result
+        assert "(Charlie)" in result
         assert "\ufffc" not in result
 
     def test_expand_mentions_name_with_uuid_tail(self):
@@ -1310,15 +1311,15 @@ class TestSenderDisplayAndMentions:
         body = "\ufffc ping"
         mentions = [{"start": 0, "length": 1, "uuid": "abcdef12-3456", "name": "Dana"}]
         result = ch._expand_mentions(body, mentions)
-        assert "@Dana (uuid:abcdef12)" in result
+        assert "@uuid:abcdef12 (Dana)" in result
 
     def test_expand_mentions_name_with_number_tail(self):
-        """Name + phone stays as 'name (+phone)'."""
+        """Name + phone shows as '@+phone (name)'."""
         ch = _make_channel()
         body = "\ufffc hi"
         mentions = [{"start": 0, "length": 1, "number": "+852111", "name": "Eve"}]
         result = ch._expand_mentions(body, mentions)
-        assert result == "@Eve (+852111) hi"
+        assert result == "@+852111 (Eve) hi"
 
 
 # ===================================================================
