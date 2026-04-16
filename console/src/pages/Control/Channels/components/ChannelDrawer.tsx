@@ -220,7 +220,17 @@ export function ChannelDrawer({
 
   useEffect(() => {
     if (activeKey === "whatsapp") {
-      api.getWhatsappStatus().then((s) => setWaLinked(s.linked)).catch(() => {});
+      // Bootstrap the drawer state from /status so the "connected" UI
+      // shows up immediately on open without requiring the user to first
+      // click Pair. setWaPairStatus mirrors setWaLinked so the rest of
+      // the form (which reads waPairStatus) stays consistent.
+      api
+        .getWhatsappStatus()
+        .then((s) => {
+          setWaLinked(s.linked);
+          if (s.linked) setWaPairStatus("connected");
+        })
+        .catch(() => {});
     }
     return () => {
       stopWaPoll();
@@ -272,6 +282,7 @@ export function ChannelDrawer({
       setWaPairCode("");
       setWaQrImage("");
       setWaPairStatus("idle");
+      setWaLinked(false);  // keep /status-derived flag in sync so UI flips back immediately
       message.success(t("channels.whatsappUnlinked"));
     } catch (err) {
       message.error(t("channels.whatsappUnbindFailed"));
@@ -1000,7 +1011,7 @@ export function ChannelDrawer({
         return (
           <>
             <Form.Item label={t("channels.whatsappConnection")}>
-              {waPairStatus === "connected" ? (
+              {(waPairStatus === "connected" || waLinked) ? (
                 <>
                   <Alert
                     type="success"
