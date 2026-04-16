@@ -1,4 +1,0 @@
-# Signal channel dependencies
-# aiohttp is already a core dependency of CoPaw
-# No additional packages required
-aiohttp>=3.9.0
