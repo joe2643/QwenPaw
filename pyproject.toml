@@ -98,6 +98,14 @@ ollama = [
 whisper = [
     "openai-whisper>=20231117",
 ]
+whatsapp = [
+    # neonize-qwenpaw is a fork of krypton-byte/neonize with proto stubs
+    # regenerated against protoc 30.2 (gencode 6.30.2) so it cohabitates
+    # with the protobuf 6.x ecosystem that QwenPaw already depends on via
+    # grpcio-status, googleapis-common-protos, google-cloud-*, a2a-sdk,
+    # opentelemetry-proto, onnxruntime, qdrant-client, etc.
+    "neonize-qwenpaw>=0.3.16.1",
+]
 full = [
     "qwenpaw[local,ollama,llamacpp,whisper]",
     "mlx-lm>=0.10.0; sys_platform == 'darwin'",

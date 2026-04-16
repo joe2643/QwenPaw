@@ -1434,6 +1434,34 @@ class WhatsAppChannel(BaseChannel):
 
     # ── Session / routing ─────────────────────────────────────────────
 
+    def build_agent_request_from_native(self, native_payload: Any) -> Any:
+        """Build AgentRequest from WhatsApp native dict payload.
+
+        WhatsApp's main inbound path constructs the AgentRequest inline in
+        `_dispatch_message()` with full envelope/history/quote handling,
+        but this hook is required by BaseChannel so that any code routing
+        through `_payload_to_request()` (e.g. re-delivery, replay, testing)
+        still gets a valid AgentRequest with `user_id` + `channel_meta`
+        set correctly.
+        """
+        payload = native_payload if isinstance(native_payload, dict) else {}
+        channel_id = payload.get("channel_id") or self.channel
+        sender_id = payload.get("sender_id") or ""
+        content_parts = payload.get("content_parts") or []
+        meta = payload.get("meta") or {}
+        session_id = self.resolve_session_id(sender_id, meta)
+        user_id = str(meta.get("user_id") or sender_id)
+        request = self.build_agent_request_from_user_content(
+            channel_id=channel_id,
+            sender_id=sender_id,
+            session_id=session_id,
+            content_parts=content_parts,
+            channel_meta=meta,
+        )
+        request.user_id = user_id
+        request.channel_meta = meta
+        return request
+
     def resolve_session_id(
         self, sender_id: str, channel_meta: Optional[Dict[str, Any]] = None,
     ) -> str:
