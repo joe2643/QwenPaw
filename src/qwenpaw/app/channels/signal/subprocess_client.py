@@ -74,7 +74,18 @@ class SignalSubprocessClient:
         self._stopping = False
         if not self._binary_available():
             logger.error(
-                "signal-cli not found on PATH (looked for %r). Signal channel disabled.",
+                "signal-cli not found (looked for %r). Signal channel disabled.\n"
+                "  Install — pick the distribution for your platform:\n"
+                "    Linux x86_64: download signal-cli-X.Y.Z-Linux-native.tar.gz\n"
+                "                  (~97 MB, self-contained, no Java runtime needed)\n"
+                "                  https://github.com/AsamK/signal-cli/releases\n"
+                "    Linux ARM64 / macOS / Windows: download signal-cli-X.Y.Z.tar.gz\n"
+                "                  (~98 MB JAR bundle, requires Java 21+)\n"
+                "                  + brew install openjdk@21 (mac) /\n"
+                "                    apt install openjdk-21-jre (Debian/Ubuntu) /\n"
+                "                    MSI installer (Windows)\n"
+                "  Then either put signal-cli on your $PATH or set\n"
+                "  channels.signal.signal_cli_path to an absolute path in config.",
                 self._signal_cli_path,
             )
             return False

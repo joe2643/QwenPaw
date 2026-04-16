@@ -797,39 +797,53 @@ WhatsApp 频道使用 [neonize-qwenpaw](https://github.com/joe2643/neonize-qwenp
 
 ## Signal
 
-Signal 频道使用 [bbernhard/signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api) Docker 镜像（2.5k★），它把官方 `signal-cli` 封装成 REST + WebSocket API。需要在 CoPaw 旁边运行这个容器。
+Signal 频道通过 **stdin/stdout 子进程** 方式直接调用官方 [`signal-cli`](https://github.com/AsamK/signal-cli)，基于 JSON-RPC 2.0 协议通信。QwenPaw 自行拉起并守护该进程，不再需要 REST/HTTP sidecar、Docker 容器或独立 systemd 服务。
 
-### 运行 REST API 服务
+### 安装 signal-cli
+
+按平台选对应的分发包即可，两者都提供同名 `signal-cli` 命令：
+
+| 平台                             | 分发包                                                                                                    | 安装方式                                                                                                                 |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| **Linux x86_64**                | Native-image（GraalVM 编译，约 97 MB，自包含 ELF，无需 Java 运行时）                                         | 从 [Releases](https://github.com/AsamK/signal-cli/releases) 下载 `signal-cli-X.Y.Z-Linux-native.tar.gz`，解压到 `/opt/signal-cli/` 并建立 `/usr/local/bin/` 软链接 |
+| **Linux ARM64 / macOS / Windows** | JAR 包（约 98 MB，需 Java 21+）                                                                            | 从 Releases 下载 `signal-cli-X.Y.Z.tar.gz`，另装 Java 21（macOS `brew install openjdk@21`、Debian/Ubuntu `apt install openjdk-21-jre`、Windows 走 MSI 安装包） |
+
+> JAR 包内带有 `bin/signal-cli` shell 封装脚本，会自动引导 JVM，因此无论哪种架构，你的 `signal_cli_path` 都指向同一个命令名。
+
+验证安装：
 
 ```bash
-# 使用 podman
-podman run -d --name signal-api --restart unless-stopped \
-  -p 8082:8080 \
-  -v ~/.local/share/signal-cli:/home/.local/share/signal-cli:Z \
-  -e MODE=json-rpc \
-  bbernhard/signal-cli-rest-api:latest
-
-# 或使用 docker
-docker run -d --name signal-api --restart unless-stopped \
-  -p 8082:8080 \
-  -v ~/.local/share/signal-cli:/home/.local/share/signal-cli \
-  -e MODE=json-rpc \
-  bbernhard/signal-cli-rest-api:latest
+signal-cli --version
+# signal-cli 0.14.1
 ```
 
-### 注册账号
+### 注册或链接账号
 
-可以使用 **已有的 signal-cli 账号**（按上方挂载数据目录即可），或注册新号码：
+**方案 A — 链接到已有 Signal 账号（推荐）**，作为次要设备（继续使用你的手机号，不涉及 SMS 费用）：
 
 ```bash
-# 注册新号码
-curl -X POST http://localhost:8082/v1/register/+85212345678
+# 启动链接流程 —— 会输出 tsdevice:/ URL 和 ASCII 二维码
+signal-cli link -n "QwenPaw bot"
+
+# 手机上：Signal → 设置 → 已连接的设备 → 连接新设备，扫描二维码
+```
+
+**方案 B — 注册全新号码**：
+
+```bash
+# 请求短信验证码（用 --voice 改为语音呼叫）
+signal-cli -a +85212345678 register
 
 # 用收到的验证码完成验证
-curl -X POST http://localhost:8082/v1/register/+85212345678/verify/123456
+signal-cli -a +85212345678 verify 123456
 ```
 
-或作为次要设备链接到现有 Signal 账号：在浏览器打开 `http://localhost:8082/v1/qrcodelink/copaw-bot`，然后用 Signal → 设置 → 已连接的设备 → 连接新设备 扫码。
+两种方式均将账号数据存入 `~/.local/share/signal-cli/`。从中取出账号 UUID，下面的 `account_uuid` 字段要用：
+
+```bash
+cat ~/.local/share/signal-cli/data/accounts.json
+# { "accounts": [ { "number": "+85212345678", "uuid": "447e962a-...", "path": "..." } ] }
+```
 
 ### 配置
 
@@ -837,7 +851,8 @@ curl -X POST http://localhost:8082/v1/register/+85212345678/verify/123456
 "signal": {
     "enabled": true,
     "account": "+85212345678",
-    "http_url": "http://127.0.0.1:8082",
+    "account_uuid": "447e962a-1f09-4a21-aef6-79617d8e8ad0",
+    "signal_cli_path": "signal-cli",
     "dm_policy": "allowlist",
     "group_policy": "allowlist",
     "allow_from": ["+85298765432", "uuid:5720b72c-1051-47bd-962b-8c0c9db5aff1"],
@@ -850,16 +865,17 @@ curl -X POST http://localhost:8082/v1/register/+85212345678/verify/123456
 
 **Signal 特有字段：**
 
-| 字段                  | 类型    | 默认值                | 说明                                                  |
-| -------------------- | ------- | -------------------- | ---------------------------------------------------- |
-| `account`            | string  | `""`（必填）          | 在 signal-cli 注册的电话号码，E.164 格式                |
-| `http_url`           | string  | `""`                 | bbernhard REST API 的完整 URL（例如 `http://127.0.0.1:8082`） |
-| `http_host`          | string  | `"127.0.0.1"`        | 主机（在 `http_url` 为空时使用）                        |
-| `http_port`          | int     | `8080`               | 端口（在 `http_url` 为空时使用）                        |
-| `send_read_receipts` | bool    | `true`               | 发送已读回执                                           |
-| `text_chunk_limit`   | int     | `4000`               | 单条消息最大字符数                                      |
-| `groups`             | list    | `[]`                 | 群组 internal-id 白名单（来自 signal-cli 的 base64 字符串） |
-| `group_allow_from`   | list    | `[]`                 | 谁可以在群内触发机器人。`["*"]` = 所有人；支持 `+电话` 或 `uuid:...` |
+| 字段                  | 类型         | 默认值               | 说明                                                                                                            |
+| -------------------- | ------------ | -------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `account`            | string       | `""`（必填）         | 在 signal-cli 注册的电话号码，E.164 格式                                                                          |
+| `account_uuid`       | string       | `""`                 | Bot 账号的 UUID（取自 `accounts.json`），用于检测群内 @机器人自己                                                 |
+| `signal_cli_path`    | string       | `"signal-cli"`       | signal-cli 二进制的路径或 `$PATH` 中的名称。若未在 `$PATH`，请填绝对路径                                          |
+| `extra_args`         | list[str]    | `[]`                 | 追加到 spawn 命令尾部的额外参数，如 `["--trust-new-identities", "always"]`                                        |
+| `show_typing`        | bool         | `true`               | 生成响应期间持续刷新 "输入中" 状态                                                                                 |
+| `send_read_receipts` | bool         | `true`               | 发送已读回执                                                                                                     |
+| `text_chunk_limit`   | int          | `4000`               | 单条消息最大字符数                                                                                               |
+| `groups`             | list         | `[]`                 | 群组 internal-id 白名单（来自 `signal-cli listGroups`，类似 `sBlO8LhzR42X...=` 的 base64 字符串）                  |
+| `group_allow_from`   | list         | `[]`                 | 谁可以在群内触发机器人。`["*"]` = 所有人；支持 `+电话` 或 `uuid:...`                                               |
 
 ### 功能
 
@@ -869,14 +885,15 @@ curl -X POST http://localhost:8082/v1/register/+85212345678/verify/123456
 - **引用回复**：提取被引用消息的文本 + 附件作为上下文
 - **群聊历史**：未被 @的消息会缓冲（含媒体），机器人被 @时注入上下文
 - **输入中**指示器：在生成回复期间持续刷新
-- **WebSocket 接收**：实时消息流，无轮询
+- **子进程守护**：JSON-RPC over stdin/stdout，实时接收，若子进程退出自动重生（5–60 秒退避）
 
 ### 注意事项
 
-- Signal 没有公开 API，`signal-cli` 是唯一可靠的桥接，`bbernhard/signal-cli-rest-api` 是最流行的封装。
-- `groups` 中的 ID 是 `GET /v1/groups/{number}` 返回的 **internal-id**（类似 `sBlO8LhzR42X...=` 的 base64 字符串），**不是** `group.xxx` 格式。
+- Signal 没有公开 API，`signal-cli` 是唯一可靠的桥接。本频道的旧版本曾使用 `bbernhard/signal-cli-rest-api` Docker 容器，子进程方式已彻底去除这一依赖。
+- signal-cli 账号的 SQLite 存储**同一时间只能被一个进程持有**。启动 QwenPaw 之前，请停掉任何旧的 REST API 容器或 daemon。
+- `groups` 中的 ID 是 `signal-cli listGroups` 输出的 **internal-id**（类似 `sBlO8LhzR42X...=` 的 base64 字符串），**不是** `group.xxx` 格式。
 - `group_allow_from` 接受电话号码（`+85212345678`）、UUID（`uuid:xxx-xxx-...`）或 `"*"`（所有人）。
-- 如果容器启动失败，检查 `podman logs signal-api`——常见问题是端口冲突或缺少 signal-cli 数据目录。
+- 如果子进程反复重启，可以手动执行 `signal-cli -a +<号码> --output=json jsonRpc` 看真实错误。最常见原因：`~/.local/share/signal-cli/` 下没有对应账号、`signal_cli_path` 找不到二进制，或 JAR 分发下 `$PATH` 中没有 Java 21。
 
 ---
 

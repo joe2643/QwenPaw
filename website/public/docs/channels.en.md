@@ -797,39 +797,53 @@ The session is persisted under `$WORKING_DIR/credentials/whatsapp/default/neoniz
 
 ## Signal
 
-The Signal channel uses the [bbernhard/signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api) Docker image (2.5k★), which wraps the official `signal-cli` in a REST + WebSocket API. Run this container alongside CoPaw.
+The Signal channel talks to the official [`signal-cli`](https://github.com/AsamK/signal-cli) as a **stdin/stdout subprocess** using JSON-RPC 2.0. QwenPaw spawns and supervises the process itself — no REST/HTTP sidecar, no Docker container, no separate systemd service.
 
-### Run the REST API service
+### Install signal-cli
 
-```bash
-# with podman
-podman run -d --name signal-api --restart unless-stopped \
-  -p 8082:8080 \
-  -v ~/.local/share/signal-cli:/home/.local/share/signal-cli:Z \
-  -e MODE=json-rpc \
-  bbernhard/signal-cli-rest-api:latest
+Pick the distribution that matches your platform. Both expose the same `signal-cli` command:
 
-# or with docker
-docker run -d --name signal-api --restart unless-stopped \
-  -p 8082:8080 \
-  -v ~/.local/share/signal-cli:/home/.local/share/signal-cli \
-  -e MODE=json-rpc \
-  bbernhard/signal-cli-rest-api:latest
-```
+| Platform                             | Distribution                                                                                                 | Install                                                                                                           |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| **Linux x86_64**                     | Native-image (GraalVM, ~97 MB, self-contained ELF, no Java runtime needed)                                   | Download `signal-cli-X.Y.Z-Linux-native.tar.gz` from [releases](https://github.com/AsamK/signal-cli/releases); extract to `/opt/signal-cli/` and symlink into `/usr/local/bin/`. |
+| **Linux ARM64 / macOS / Windows**    | JAR bundle (~98 MB, requires Java 21+)                                                                       | Download `signal-cli-X.Y.Z.tar.gz` from releases, plus install Java 21 (`brew install openjdk@21` on macOS, `apt install openjdk-21-jre` on Debian/Ubuntu, MSI installer on Windows). |
 
-### Register an account
+> The JAR bundle ships with a shell wrapper at `bin/signal-cli` that auto-bootstraps the JVM, so `signal_cli_path` in your config points at the same command regardless of architecture.
 
-Either use an **existing signal-cli account** (mount its data directory as shown above) or register a new one:
+Confirm it works:
 
 ```bash
-# Register a new number
-curl -X POST http://localhost:8082/v1/register/+85212345678
-
-# Verify with the SMS code you receive
-curl -X POST http://localhost:8082/v1/register/+85212345678/verify/123456
+signal-cli --version
+# signal-cli 0.14.1
 ```
 
-Alternatively, link to an existing Signal account as a secondary device by opening `http://localhost:8082/v1/qrcodelink/copaw-bot` in a browser, then scan from Signal → Settings → Linked Devices → Link new device.
+### Register or link an account
+
+**Option A — link to an existing Signal account (recommended)** as a secondary device (keeps using your personal phone number; no SMS cost):
+
+```bash
+# Start the link flow — prints a tsdevice:/ URL and shows an ASCII QR
+signal-cli link -n "QwenPaw bot"
+
+# On your phone: Signal → Settings → Linked Devices → Link new device → scan the QR
+```
+
+**Option B — register a brand-new number**:
+
+```bash
+# Request SMS verification (use --voice for a call instead)
+signal-cli -a +85212345678 register
+
+# Verify with the code you receive
+signal-cli -a +85212345678 verify 123456
+```
+
+Either way, `signal-cli` stores account data under `~/.local/share/signal-cli/`. Grab the account UUID from that store — you'll need it for `account_uuid` below:
+
+```bash
+cat ~/.local/share/signal-cli/data/accounts.json
+# { "accounts": [ { "number": "+85212345678", "uuid": "447e962a-...", "path": "..." } ] }
+```
 
 ### Configure
 
@@ -837,7 +851,8 @@ Alternatively, link to an existing Signal account as a secondary device by openi
 "signal": {
     "enabled": true,
     "account": "+85212345678",
-    "http_url": "http://127.0.0.1:8082",
+    "account_uuid": "447e962a-1f09-4a21-aef6-79617d8e8ad0",
+    "signal_cli_path": "signal-cli",
     "dm_policy": "allowlist",
     "group_policy": "allowlist",
     "allow_from": ["+85298765432", "uuid:5720b72c-1051-47bd-962b-8c0c9db5aff1"],
@@ -850,16 +865,17 @@ Alternatively, link to an existing Signal account as a secondary device by openi
 
 **Signal-specific fields:**
 
-| Field                | Type    | Default              | Description                                                |
-| -------------------- | ------- | -------------------- | ---------------------------------------------------------- |
-| `account`            | string  | `""` (required)      | Phone number registered with signal-cli, E.164 format      |
-| `http_url`           | string  | `""`                 | Full URL of bbernhard REST API (e.g. `http://127.0.0.1:8082`) |
-| `http_host`          | string  | `"127.0.0.1"`        | Host (used if `http_url` empty)                            |
-| `http_port`          | int     | `8080`               | Port (used if `http_url` empty)                            |
-| `send_read_receipts` | bool    | `true`               | Send read receipts                                         |
-| `text_chunk_limit`   | int     | `4000`               | Maximum characters per outgoing message                    |
-| `groups`             | list    | `[]`                 | Group internal-id allowlist (base64-ish values from signal-cli) |
-| `group_allow_from`   | list    | `[]`                 | Who can trigger the bot in groups. `["*"]` = everyone; supports `+phone` or `uuid:...` |
+| Field                | Type         | Default              | Description                                                                                                              |
+| -------------------- | ------------ | -------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `account`            | string       | `""` (required)      | Phone number registered with signal-cli, E.164 format                                                                    |
+| `account_uuid`       | string       | `""`                 | Bot account UUID (from `accounts.json`); used to detect self-mentions in groups                                          |
+| `signal_cli_path`    | string       | `"signal-cli"`       | Path or PATH-lookup name of the signal-cli binary. Use an absolute path if it's not on `$PATH`.                          |
+| `extra_args`         | list[str]    | `[]`                 | Extra CLI flags appended to the spawn command, e.g. `["--trust-new-identities", "always"]`                               |
+| `show_typing`        | bool         | `true`               | Continuous typing-indicator loop during streaming                                                                        |
+| `send_read_receipts` | bool         | `true`               | Send read receipts                                                                                                       |
+| `text_chunk_limit`   | int          | `4000`               | Maximum characters per outgoing message                                                                                  |
+| `groups`             | list         | `[]`                 | Group internal-id allowlist (base64-looking values like `sBlO8LhzR42X...=`, from `signal-cli listGroups`)                |
+| `group_allow_from`   | list         | `[]`                 | Who can trigger the bot in groups. `["*"]` = everyone; supports `+phone` or `uuid:...`                                   |
 
 ### Features
 
@@ -869,14 +885,15 @@ Alternatively, link to an existing Signal account as a secondary device by openi
 - **Quote/reply-to**: extracts quoted message text + attachments as context
 - **Group history**: non-mentioned messages buffered with media, injected when bot is mentioned
 - **Typing indicator**: continuously refreshed during response generation
-- **WebSocket receive**: real-time message stream, no polling
+- **Subprocess supervisor**: JSON-RPC over stdin/stdout, real-time receive, auto-respawn with 5–60 s backoff if the subprocess dies
 
 ### Notes
 
-- Signal doesn't expose a public API — `signal-cli` is the only bridge, and `bbernhard/signal-cli-rest-api` is the most popular wrapper.
-- Group IDs in `groups` are the **internal-id** from `GET /v1/groups/{number}` (base64-looking strings like `sBlO8LhzR42X...=`), NOT the `group.xxx` external form.
+- Signal doesn't expose a public API — `signal-cli` is the only supported bridge. Earlier releases of this channel used `bbernhard/signal-cli-rest-api` Docker container; the subprocess transport removes that dependency.
+- Only **one** process may hold a signal-cli account's SQLite store at a time. Stop any older REST-API container or daemon before starting QwenPaw.
+- Group IDs in `groups` are the **internal-id** from `signal-cli listGroups` (base64-looking strings like `sBlO8LhzR42X...=`), NOT the `group.xxx` external form.
 - `group_allow_from` accepts phone numbers (`+85212345678`), UUIDs (`uuid:xxx-xxx-...`), or `"*"` for everyone.
-- If the container fails to start, check `podman logs signal-api` — most common issue is port conflict or missing signal-cli data directory.
+- If the subprocess keeps respawning, run `signal-cli -a +<number> --output=json jsonRpc` by hand to see the real error; the most common issues are a missing/wrong account under `~/.local/share/signal-cli/`, a `signal_cli_path` that can't be resolved, or Java 21 not on `$PATH` when using the JAR bundle.
 
 ---
 
