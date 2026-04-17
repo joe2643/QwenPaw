@@ -12,23 +12,49 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-# mempalace is installed outside the normal venv
-sys.path.insert(0, "/home/joe/.local/lib/python3.13/site-packages")
+# mempalace is installed outside the normal venv on joe-faex1; add that path
+# only if it exists so the import doesn't blow up on other machines.
+_JOE_FAEX1_MEMPALACE = "/home/joe/.local/lib/python3.13/site-packages"
+if Path(_JOE_FAEX1_MEMPALACE).is_dir():
+    sys.path.insert(0, _JOE_FAEX1_MEMPALACE)
 
-from mempalace.config import MempalaceConfig  # noqa: E402
-from mempalace.chroma_helper import get_collection  # noqa: E402
+try:
+    from mempalace.config import MempalaceConfig  # noqa: E402
+    from mempalace.chroma_helper import get_collection  # noqa: E402
+    _MEMPALACE_AVAILABLE = True
+except ImportError:
+    MempalaceConfig = None  # type: ignore[assignment,misc]
+    get_collection = None  # type: ignore[assignment]
+    _MEMPALACE_AVAILABLE = False
 
 router = APIRouter(prefix="/mempalace", tags=["mempalace"])
 
-_cfg = MempalaceConfig()
-_PALACE_PATH = _cfg.palace_path
+if _MEMPALACE_AVAILABLE:
+    _cfg = MempalaceConfig()
+    _PALACE_PATH = _cfg.palace_path
+else:
+    _cfg = None
+    _PALACE_PATH = None
 _KG_DB = Path.home() / ".mempalace" / "knowledge_graph.sqlite3"
 _HOOK_LOG = Path.home() / ".mempalace" / "hook.log"
 _COLLECTION_NAME = "mempalace_drawers"
 
 
+def _require_mempalace() -> None:
+    """Return 503 when the mempalace package isn't installed in this env."""
+    if not _MEMPALACE_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "mempalace package not installed in this environment. "
+                "The MemPalace router is only functional on the joe-faex1 host."
+            ),
+        )
+
+
 def _get_collection():
     """Return the chroma collection handle."""
+    _require_mempalace()
     return get_collection(palace_path=_PALACE_PATH)
 
 
