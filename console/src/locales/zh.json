@@ -599,7 +599,7 @@
     "whatsappGroupAllowFrom": "群组允许发送者",
     "whatsappGroupAllowFromTooltip": "允许在群组中触发机器人的用户。[\"*\"] = 所有人。",
     "signalAccount": "机器人手机号",
-    "signalAccountTooltip": "已关联的 Signal 账号（E.164 格式，如 +85298349370）。启用前必须已通过 signal-cli 注册或关联。",
+    "signalAccountTooltip": "已关联的 Signal 账号（E.164 格式，如 +85212345678）。启用前必须已通过 signal-cli 注册或关联。",
     "signalAccountUuid": "机器人账号 UUID",
     "signalAccountUuidTooltip": "机器人账号 UUID（可选）。用于在群聊中可靠识别 @机器人 的消息。可通过 signal-cli -u <手机号> listAccounts 获取。",
     "signalCliPath": "signal-cli 路径",

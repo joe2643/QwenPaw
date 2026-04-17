@@ -1351,7 +1351,7 @@ export function ChannelDrawer({
               tooltip={t("channels.signalAccountTooltip")}
               rules={[{ required: true }]}
             >
-              <Input placeholder="+85298349370" />
+              <Input placeholder="+85212345678" />
             </Form.Item>
             <Form.Item
               name="account_uuid"
