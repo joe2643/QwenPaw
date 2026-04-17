@@ -137,7 +137,7 @@ export const UPDATE_MD: Record<string, string> = {
 2. 如果你是通过 pip 安装，在终端中执行以下命令升级：
 
 \`\`\`
-pip install --upgrade qwenpaw
+qwenpaw update
 \`\`\`
 
 3. 如果你是从源码安装，进入项目目录并拉取最新代码后重新安装：
@@ -145,6 +145,9 @@ pip install --upgrade qwenpaw
 \`\`\`
 cd QwenPaw
 git pull origin main
+cd console && npm ci && npm run build
+cd .. && mkdir -p src/qwenpaw/console
+cp -R console/dist/. src/qwenpaw/console/
 pip install -e .
 \`\`\`
 
@@ -166,7 +169,7 @@ docker run -p 127.0.0.1:8088:8088 -v qwenpaw-data:/app/working agentscope/qwenpa
 2. Если устанавливали через pip, выполните:
 
 \`\`\`
-pip install --upgrade qwenpaw
+qwenpaw update
 \`\`\`
 
 3. Если устанавливали из исходников, получите последние изменения и переустановите:
@@ -174,6 +177,9 @@ pip install --upgrade qwenpaw
 \`\`\`
 cd QwenPaw
 git pull origin main
+cd console && npm ci && npm run build
+cd .. && mkdir -p src/qwenpaw/console
+cp -R console/dist/. src/qwenpaw/console/
 pip install -e .
 \`\`\`
 
@@ -195,7 +201,7 @@ To update QwenPaw, use the method matching your installation type:
 2. If installed via pip, run:
 
 \`\`\`
-pip install --upgrade qwenpaw
+qwenpaw update
 \`\`\`
 
 3. If installed from source, pull the latest code and reinstall:
@@ -203,6 +209,9 @@ pip install --upgrade qwenpaw
 \`\`\`
 cd QwenPaw
 git pull origin main
+cd console && npm ci && npm run build
+cd .. && mkdir -p src/qwenpaw/console
+cp -R console/dist/. src/qwenpaw/console/
 pip install -e .
 \`\`\`
 
