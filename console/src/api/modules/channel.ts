@@ -98,4 +98,12 @@ export const channelApi = {
     request<{ linked: boolean; phone?: string | null; uuid?: string | null }>(
       "/config/channels/signal/status",
     ),
+  listSignalContacts: () =>
+    request<{
+      contacts: Array<{ number: string; uuid: string; name: string }>;
+    }>("/config/channels/signal/contacts"),
+  listSignalGroups: () =>
+    request<{ groups: Array<{ id: string; blocked: boolean }> }>(
+      "/config/channels/signal/groups",
+    ),
 };

@@ -305,6 +305,14 @@ export function ChannelDrawer({
   const [sigPairLoading, setSigPairLoading] = useState(false);
   const [sigDeviceName, setSigDeviceName] = useState<string>("QwenPaw");
   const sigPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Directory options for the Signal drawer dropdowns. Populated from
+  // backend /channels/signal/{contacts,groups} when linked.
+  const [sigContacts, setSigContacts] = useState<
+    Array<{ number: string; uuid: string; name: string }>
+  >([]);
+  const [sigGroups, setSigGroups] = useState<
+    Array<{ id: string; blocked: boolean }>
+  >([]);
 
   const stopSigPoll = useCallback(() => {
     if (sigPollRef.current) {
@@ -334,6 +342,20 @@ export function ChannelDrawer({
             if (!currentAccount && s.phone) patch.account = s.phone;
             if (!currentUuid && s.uuid) patch.account_uuid = s.uuid;
             if (Object.keys(patch).length) form.setFieldsValue(patch);
+            // Fetch contacts + groups to populate the allow_from /
+            // group_allow_from / groups dropdowns so users don't have
+            // to type raw phone numbers or base64 group ids.
+            api
+              .listSignalContacts()
+              .then((r) => setSigContacts(r.contacts || []))
+              .catch(() => setSigContacts([]));
+            api
+              .listSignalGroups()
+              .then((r) => setSigGroups(r.groups || []))
+              .catch(() => setSigGroups([]));
+          } else {
+            setSigContacts([]);
+            setSigGroups([]);
           }
         })
         .catch(() => {
@@ -490,6 +512,23 @@ export function ChannelDrawer({
           mode="tags"
           placeholder={t("channels.allowFromPlaceholder")}
           tokenSeparators={[","]}
+          // For Signal, populate with known contacts from
+          // signal-cli's account.db — value is the phone (preferred,
+          // since allowlist often matches on phone), with UUID shown in
+          // the option label. Users can still type free-form to add
+          // values not in the directory (e.g. uuid: prefix or unknown
+          // phones).
+          options={
+            activeKey === "signal" && sigContacts.length
+              ? sigContacts.map((c) => {
+                  const value = c.number || (c.uuid ? `uuid:${c.uuid}` : "");
+                  const label = [c.name, c.number, c.uuid && `uuid:${c.uuid.slice(0, 8)}…`]
+                    .filter(Boolean)
+                    .join(" · ");
+                  return { value, label: label || value };
+                })
+              : undefined
+          }
         />
       </Form.Item>
     </>
@@ -1459,6 +1498,19 @@ export function ChannelDrawer({
                 mode="tags"
                 placeholder={t("channels.signalGroupsPlaceholder")}
                 tokenSeparators={[","]}
+                // Populated from signal-cli's group_v2 table. Group names
+                // are in a protobuf BLOB we don't decode yet, so the
+                // label is just a truncated base64 id — still lets users
+                // pick without typing 40-char strings. Free-form tag
+                // input still works for custom entries.
+                options={
+                  sigGroups.length
+                    ? sigGroups.map((g) => ({
+                        value: g.id,
+                        label: `${g.id.slice(0, 20)}…${g.blocked ? " (blocked)" : ""}`,
+                      }))
+                    : undefined
+                }
               />
             </Form.Item>
             <Form.Item
@@ -1471,6 +1523,20 @@ export function ChannelDrawer({
                 mode="tags"
                 placeholder={t("channels.signalGroupAllowFromPlaceholder")}
                 tokenSeparators={[","]}
+                options={
+                  sigContacts.length
+                    ? [
+                        { value: "*", label: "* (everyone)" },
+                        ...sigContacts.map((c) => {
+                          const value = c.number || (c.uuid ? `uuid:${c.uuid}` : "");
+                          const label = [c.name, c.number, c.uuid && `uuid:${c.uuid.slice(0, 8)}…`]
+                            .filter(Boolean)
+                            .join(" · ");
+                          return { value, label: label || value };
+                        }),
+                      ]
+                    : undefined
+                }
               />
             </Form.Item>
             <Form.Item
