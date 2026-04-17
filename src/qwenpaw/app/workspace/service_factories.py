@@ -175,16 +175,32 @@ async def create_mcp_config_watcher(ws: "Workspace", _):
     return watcher
     # pylint: enable=protected-access
 
-async def reload_channel_service(ws, cm) -> None:
-    """Update reused channel_manager to point to the new runner.
 
-    When channel_manager is reused during hot-reload, the channels
-    still reference the old runner (now stopped). This swaps the
-    process callback on all channels to the new runner.
+async def reload_channel_service(
+    ws,
+    cm,
+) -> None:
+    # pylint: disable=protected-access,redefined-outer-name,reimported
+    """Update reused channel_manager to point to the new runner AND
+    propagate the new agent config down to each reused channel.
+
+    When channel_manager is reused during hot-reload, the channels still
+    reference the old runner (now stopped) AND hold the config snapshot
+    they were constructed with. This function:
+
+    1. Swaps the process callback on all channels to the new runner.
+    2. Propagates the new per-channel config via ``update_config`` (in-place)
+       falling back to ``clone`` + ``replace_channel`` (full restart) for
+       fields that cannot be patched without re-init. Without step 2, saving
+       a channel config in the Console (which routes through
+       ``multi_agent_manager.reload_agent`` → here) would silently drop the
+       change — the file on disk gets the new values but the running channel
+       keeps its old ones (observed 2026-04-17 on Signal: clearing
+       ``allow_from`` didn't take effect until next process restart).
     """
     from ..channels.utils import make_process_from_runner
-    import logging
-    _logger = logging.getLogger(__name__)
+
+    _logger = logger  # reuse module-level logger
 
     runner = ws._service_manager.services.get("runner")
     if not runner:
@@ -192,12 +208,63 @@ async def reload_channel_service(ws, cm) -> None:
         return
 
     new_process = make_process_from_runner(runner)
-    for ch in cm.channels:
+    # Snapshot list — `replace_channel` mutates `cm.channels` mid-iteration.
+    snapshot = list(cm.channels)
+    new_channels_config = getattr(ws._config, "channels", None)
+    for ch in snapshot:
         old_id = id(getattr(ch, "_process", None))
         ch._process = new_process
-        _logger.debug("channel_manager reload: %s _process %s -> %s", ch.channel, old_id, id(new_process))
+        _logger.debug(
+            "channel_manager reload: %s _process %s -> %s",
+            ch.channel,
+            old_id,
+            id(new_process),
+        )
+        # Pull the new sub-config for this channel from the workspace
+        # config and push it into the running channel.
+        if new_channels_config is None:
+            continue
+        new_ch_cfg = getattr(new_channels_config, ch.channel, None)
+        if new_ch_cfg is None:
+            extra = (
+                getattr(new_channels_config, "__pydantic_extra__", None) or {}
+            )
+            new_ch_cfg = extra.get(ch.channel)
+        if new_ch_cfg is None:
+            continue
+        try:
+            applied_in_place = await ch.update_config(new_ch_cfg)
+        except Exception:
+            _logger.exception(
+                "channel_manager reload: update_config raised for %s",
+                ch.channel,
+            )
+            continue
+        if applied_in_place:
+            _logger.info(
+                "channel_manager reload: %s config updated in-place",
+                ch.channel,
+            )
+            continue
+        # update_config returned False — requires clone + replace
+        try:
+            new_ch = ch.clone(new_ch_cfg)
+            await cm.replace_channel(new_ch)
+            _logger.info(
+                "channel_manager reload: %s replaced (full restart) to "
+                "pick up config change",
+                ch.channel,
+            )
+        except Exception:
+            _logger.exception(
+                "channel_manager reload: failed to replace channel %s; "
+                "running channel may have stale config",
+                ch.channel,
+            )
+
     cm.set_workspace(ws)
     _logger.info(
         "channel_manager reload: updated %d channels to new runner (id=%s)",
-        len(cm.channels), id(runner),
+        len(cm.channels),
+        id(runner),
     )
