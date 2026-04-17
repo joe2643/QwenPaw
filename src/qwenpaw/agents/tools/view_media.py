@@ -216,7 +216,11 @@ async def _get_signed_url(resolved: Path) -> str:
         import asyncio
         from urllib.parse import quote as _quote
         auth_token = _quote(media_cfg['media_secret'], safe="")
-        url = f"{media_cfg['server_url']}/sign?path={_quote(str(resolved), safe="")}&ttl=86400&auth={auth_token}"
+        url = (
+            f"{media_cfg['server_url']}/sign"
+            f"?path={_quote(str(resolved), safe='')}"
+            f"&ttl=86400&auth={auth_token}"
+        )
         # MUST use to_thread — media server runs on the same event loop,
         # so blocking urllib would deadlock.
         def _fetch():
