@@ -44,13 +44,25 @@ class MediaServer:
         allowed_dirs: Optional[list] = None,
         max_size_mb: int = 100,
         tunnel_domain: str = "",
+        tunnel_mode: str = "manual",
+        named_tunnel_name: str = "",
+        named_tunnel_hostname: str = "",
+        named_tunnel_config_file: str = "",
     ):
         self.host = host
         self.port = port
         self.secret = secret or os.environ.get("QWENPAW_MEDIA_SECRET", "")
         self.allowed_dirs = allowed_dirs or ["/tmp"]
         self.max_size = max_size_mb * 1024 * 1024
+        # user_tunnel_domain is what the operator configured; tunnel_domain is
+        # the effective value used when signing URLs (driver URL wins).
+        self.user_tunnel_domain = tunnel_domain
         self.tunnel_domain = tunnel_domain
+        self.tunnel_mode = tunnel_mode  # "manual" | "quick" | "named"
+        self.named_tunnel_name = named_tunnel_name
+        self.named_tunnel_hostname = named_tunnel_hostname
+        self.named_tunnel_config_file = named_tunnel_config_file
+        self._tunnel_driver = None  # CloudflareTunnelDriver, lazily created
         self._server_task: Optional[asyncio.Task] = None
         self._app: Optional[FastAPI] = None
         self._token_store: dict[str, tuple[str, int]] = {}  # token -> (raw_path, expires)
@@ -176,8 +188,12 @@ class MediaServer:
         self._server_task = asyncio.create_task(server.serve(), name="media-server")
         logger.info("media-server: started on %s:%s", self.host, self.port)
 
+        if self.tunnel_mode in ("quick", "named"):
+            await self._start_tunnel()
+
     async def stop(self):
         global _runtime_secret
+        await self._stop_tunnel()
         if self._server_task and not self._server_task.done():
             self._server_task.cancel()
             try:
@@ -186,3 +202,107 @@ class MediaServer:
                 pass
         _runtime_secret = ""
         logger.info("media-server: stopped")
+
+    async def _start_tunnel(self) -> None:
+        """Spawn a Cloudflare Tunnel (quick or named) and update tunnel_domain."""
+        if self._tunnel_driver is not None:
+            return
+        if self.tunnel_mode not in ("quick", "named"):
+            return
+        try:
+            # Import lazily so environments without the tunnel extras still
+            # run the plain media server.
+            from ..tunnel import CloudflareTunnelDriver
+        except Exception as exc:
+            logger.warning(
+                "media-server: cloudflare tunnel driver unavailable: %s",
+                exc,
+            )
+            return
+        try:
+            if self.tunnel_mode == "quick":
+                driver = CloudflareTunnelDriver(mode="quick")
+            else:
+                driver = CloudflareTunnelDriver(
+                    mode="named",
+                    tunnel_name=self.named_tunnel_name,
+                    hostname=self.named_tunnel_hostname,
+                    config_file=self.named_tunnel_config_file,
+                )
+        except ValueError as exc:
+            # Missing required named-tunnel fields — log and skip so the
+            # media server itself keeps serving on localhost.
+            logger.error(
+                "media-server: cannot start %s tunnel: %s",
+                self.tunnel_mode, exc,
+            )
+            return
+        try:
+            info = await driver.start(self.port)
+        except Exception as exc:
+            logger.error(
+                "media-server: failed to start %s tunnel: %s",
+                self.tunnel_mode, exc,
+            )
+            return
+        self._tunnel_driver = driver
+        self.tunnel_domain = info.public_url
+        logger.info(
+            "media-server: %s tunnel ready at %s",
+            self.tunnel_mode, info.public_url,
+        )
+
+    async def _stop_tunnel(self) -> None:
+        """Stop the managed tunnel (if any) and restore the user's domain."""
+        driver = self._tunnel_driver
+        if driver is None:
+            return
+        self._tunnel_driver = None
+        try:
+            await driver.stop()
+        except Exception as exc:
+            logger.warning("media-server: error stopping tunnel: %s", exc)
+        self.tunnel_domain = self.user_tunnel_domain
+
+    async def reconcile_tunnel(
+        self,
+        tunnel_mode: str,
+        named_tunnel_name: str = "",
+        named_tunnel_hostname: str = "",
+        named_tunnel_config_file: str = "",
+    ) -> None:
+        """Hot-switch tunnel mode without recreating the MediaServer.
+
+        The PUT /config/media-server handler calls this after saving new
+        config so toggling the Console UI produces immediate effect.
+        """
+        same_mode = tunnel_mode == self.tunnel_mode
+        same_named = (
+            tunnel_mode != "named"
+            or (
+                named_tunnel_name == self.named_tunnel_name
+                and named_tunnel_hostname == self.named_tunnel_hostname
+                and named_tunnel_config_file == self.named_tunnel_config_file
+            )
+        )
+        if same_mode and same_named:
+            # No state change — leave the (possibly running) driver alone.
+            return
+
+        # Stop any existing tunnel before applying new settings, otherwise we
+        # could have two cloudflared subprocesses fighting over the same port.
+        await self._stop_tunnel()
+        self.tunnel_mode = tunnel_mode
+        self.named_tunnel_name = named_tunnel_name
+        self.named_tunnel_hostname = named_tunnel_hostname
+        self.named_tunnel_config_file = named_tunnel_config_file
+
+        if tunnel_mode in ("quick", "named"):
+            await self._start_tunnel()
+
+    def get_tunnel_url(self) -> str:
+        """Return the current managed tunnel URL, or '' if none is running."""
+        driver = self._tunnel_driver
+        if driver is None:
+            return ""
+        return driver.get_public_url() or ""

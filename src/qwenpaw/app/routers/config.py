@@ -1036,18 +1036,25 @@ async def put_media_server_config(
     # Reconcile live MediaServer instance
     ms = getattr(request.app.state, "media_server", None)
     body_dict = body.model_dump()
-    parsed_port = body_dict.get("port", 8089)
 
     if body.enabled and ms is None:
-        # Start new server
+        # Start new server. The MediaServer constructor accepts max_size_mb
+        # (MB), not raw bytes — keep the same unit here to avoid doubling.
         from ..media_server import MediaServer
+        from urllib.parse import urlparse
 
+        parsed = urlparse(body.server_url or "")
         server = MediaServer(
-            port=parsed_port,
+            host=parsed.hostname or "127.0.0.1",
+            port=parsed.port or 8089,
             secret=body_dict.get("media_secret", ""),
             allowed_dirs=body_dict.get("allowed_dirs", []),
-            max_size=body_dict.get("max_size_mb", 100) * 1024 * 1024,
+            max_size_mb=body_dict.get("max_size_mb", 100),
             tunnel_domain=body_dict.get("tunnel_domain", ""),
+            tunnel_mode=body.tunnel_mode,
+            named_tunnel_name=body.named_tunnel_name,
+            named_tunnel_hostname=body.named_tunnel_hostname,
+            named_tunnel_config_file=body.named_tunnel_config_file,
         )
         await server.start()
         request.app.state.media_server = server
@@ -1060,7 +1067,17 @@ async def put_media_server_config(
         ms.secret = body_dict.get("media_secret") or ms.secret
         ms.allowed_dirs = body_dict.get("allowed_dirs", ms.allowed_dirs)
         ms.max_size = body_dict.get("max_size_mb", 100) * 1024 * 1024
-        ms.tunnel_domain = body_dict.get("tunnel_domain", "")
+        ms.user_tunnel_domain = body_dict.get("tunnel_domain", "")
+        # Only overwrite the effective tunnel_domain from user config when
+        # no managed tunnel is currently owning it.
+        if ms._tunnel_driver is None:
+            ms.tunnel_domain = ms.user_tunnel_domain
+        await ms.reconcile_tunnel(
+            tunnel_mode=body.tunnel_mode,
+            named_tunnel_name=body.named_tunnel_name,
+            named_tunnel_hostname=body.named_tunnel_hostname,
+            named_tunnel_config_file=body.named_tunnel_config_file,
+        )
 
     return body.model_dump()
 
@@ -1072,8 +1089,19 @@ async def put_media_server_config(
 async def get_media_server_status(request: Request) -> dict:
     """Check if the global media server is running and healthy."""
     ms = getattr(request.app.state, "media_server", None)
-    running = ms is not None and ms._server_task and not ms._server_task.done()
-    return {"running": running, "port": ms.port if ms else None}
+    running = bool(
+        ms is not None
+        and ms._server_task is not None
+        and not ms._server_task.done(),
+    )
+    tunnel_url = ms.get_tunnel_url() if ms is not None else ""
+    return {
+        "running": running,
+        "port": ms.port if ms else None,
+        "tunnel_mode": ms.tunnel_mode if ms is not None else "manual",
+        "tunnel_url": tunnel_url,
+        "tunnel_running": bool(tunnel_url),
+    }
 
 
 # -- MemPalace Config --

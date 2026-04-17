@@ -620,7 +620,22 @@ class MemorySummaryConfig(BaseModel):
 
 
 class MediaServerConfig(BaseModel):
-    """Media server for view_video/view_image signed URL serving."""
+    """Media server for view_video/view_image signed URL serving.
+
+    ``tunnel_mode`` picks how the public URL is resolved:
+
+    - ``manual`` — no tunnel managed; ``tunnel_domain`` is used verbatim
+      (set it to your reverse-proxy / pre-existing tunnel URL).
+    - ``quick`` — driver spawns a Cloudflare Quick Tunnel
+      (``cloudflared tunnel --url``) and uses the random
+      ``*.trycloudflare.com`` URL. Zero config, but URL rotates on restart
+      and routing can be flaky (e.g. interferes with Tailscale on some
+      hosts).
+    - ``named`` — driver spawns ``cloudflared tunnel run <named_tunnel_name>``
+      and uses ``named_tunnel_hostname`` as the public URL. Requires the
+      tunnel to be pre-created (``cloudflared tunnel login`` + ``tunnel
+      create``) with DNS CNAME pointing at it.
+    """
 
     enabled: bool = Field(
         default=False,
@@ -632,7 +647,47 @@ class MediaServerConfig(BaseModel):
     )
     tunnel_domain: str = Field(
         default="",
-        description="Public tunnel domain for external access (e.g. https://media.example.com)",
+        description="Public tunnel domain used in manual mode (e.g. "
+        "https://media.example.com). Overwritten at runtime when "
+        "tunnel_mode is 'quick' or 'named'.",
+    )
+    tunnel_mode: Literal["manual", "quick", "named"] = Field(
+        default="manual",
+        description=(
+            "How the public URL is produced. 'manual' uses tunnel_domain "
+            "verbatim; 'quick' spawns a Cloudflare Quick Tunnel; 'named' "
+            "spawns a pre-configured Cloudflare Named Tunnel."
+        ),
+    )
+    named_tunnel_name: str = Field(
+        default="",
+        description=(
+            "Tunnel name passed to 'cloudflared tunnel run' when "
+            "tunnel_mode='named'. Must already exist (cloudflared tunnel "
+            "list)."
+        ),
+    )
+    named_tunnel_hostname: str = Field(
+        default="",
+        description=(
+            "Public hostname (e.g. media.example.com) used as the signed-URL "
+            "base when tunnel_mode='named'. DNS for this hostname must "
+            "CNAME to <UUID>.cfargotunnel.com."
+        ),
+    )
+    named_tunnel_config_file: str = Field(
+        default="",
+        description=(
+            "Optional path to a cloudflared config.yml (passed as --config). "
+            "Leave empty to use the default ~/.cloudflared/config.yml."
+        ),
+    )
+    # Deprecated shim — older configs may still have this. The validator
+    # below promotes True → tunnel_mode='quick'. Kept for one release so we
+    # don't require a config migration script.
+    use_cloudflare_tunnel: bool = Field(
+        default=False,
+        description="[DEPRECATED] use tunnel_mode='quick' instead.",
     )
     media_secret: str = Field(
         default="",
@@ -647,6 +702,14 @@ class MediaServerConfig(BaseModel):
         ge=1,
         description="Maximum file size in MB for media serving",
     )
+
+    @model_validator(mode="after")
+    def _migrate_use_cloudflare_tunnel(self) -> "MediaServerConfig":
+        # Only bump to 'quick' if the user left tunnel_mode at its default —
+        # otherwise an explicit tunnel_mode always wins.
+        if self.use_cloudflare_tunnel and self.tunnel_mode == "manual":
+            self.tunnel_mode = "quick"
+        return self
 
 
 class AgentsRunningConfig(BaseModel):

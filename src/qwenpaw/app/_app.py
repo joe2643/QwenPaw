@@ -273,6 +273,10 @@ async def lifespan(
             allowed_dirs=list(ms_cfg.allowed_dirs),
             max_size_mb=ms_cfg.max_size_mb,
             tunnel_domain=ms_cfg.tunnel_domain,
+            tunnel_mode=ms_cfg.tunnel_mode,
+            named_tunnel_name=ms_cfg.named_tunnel_name,
+            named_tunnel_hostname=ms_cfg.named_tunnel_hostname,
+            named_tunnel_config_file=ms_cfg.named_tunnel_config_file,
         )
         await _media_server.start()
         logger.info("Global media server started")

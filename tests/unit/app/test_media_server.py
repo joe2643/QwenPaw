@@ -274,3 +274,178 @@ class TestGlobalServerLifecycle:
         assert srv.secret == ms_mod._runtime_secret
         # Cleanup
         ms_mod._runtime_secret = ""
+
+
+# ---------------------------------------------------------------------------
+# Cloudflare Quick Tunnel integration
+# ---------------------------------------------------------------------------
+
+class TestCloudflareTunnelIntegration:
+    """MediaServer should drive a CloudflareTunnelDriver per tunnel_mode.
+
+    Driver is patched so we exercise reconcile / URL-override logic
+    without spawning cloudflared.
+    """
+
+    @pytest.mark.asyncio
+    async def test_reconcile_turns_quick_tunnel_on(self, tmp_path):
+        srv = MediaServer(
+            port=8089,
+            secret="x",
+            allowed_dirs=[str(tmp_path)],
+            tunnel_domain="https://user.example.com",
+            tunnel_mode="manual",
+        )
+        assert srv.tunnel_domain == "https://user.example.com"
+        assert srv.user_tunnel_domain == "https://user.example.com"
+        assert srv.get_tunnel_url() == ""
+
+        fake_driver = MagicMock()
+        fake_info = MagicMock(public_url="https://abc123.trycloudflare.com")
+        fake_driver.start = AsyncMock(return_value=fake_info)
+        fake_driver.stop = AsyncMock()
+        fake_driver.get_public_url = MagicMock(
+            return_value="https://abc123.trycloudflare.com",
+        )
+        factory = MagicMock(return_value=fake_driver)
+        with patch("qwenpaw.tunnel.CloudflareTunnelDriver", factory):
+            await srv.reconcile_tunnel(tunnel_mode="quick")
+
+        factory.assert_called_once_with(mode="quick")
+        fake_driver.start.assert_awaited_once_with(8089)
+        assert srv.tunnel_domain == "https://abc123.trycloudflare.com"
+        assert srv.get_tunnel_url() == "https://abc123.trycloudflare.com"
+        assert srv.user_tunnel_domain == "https://user.example.com"
+        assert srv.tunnel_mode == "quick"
+
+    @pytest.mark.asyncio
+    async def test_reconcile_turns_tunnel_off_restores_user_domain(
+        self,
+        tmp_path,
+    ):
+        srv = MediaServer(
+            port=8089,
+            secret="x",
+            allowed_dirs=[str(tmp_path)],
+            tunnel_domain="https://user.example.com",
+        )
+        fake_driver = MagicMock()
+        fake_driver.start = AsyncMock(
+            return_value=MagicMock(public_url="https://abc.trycloudflare.com"),
+        )
+        fake_driver.stop = AsyncMock()
+        fake_driver.get_public_url = MagicMock(
+            return_value="https://abc.trycloudflare.com",
+        )
+        with patch(
+            "qwenpaw.tunnel.CloudflareTunnelDriver",
+            return_value=fake_driver,
+        ):
+            await srv.reconcile_tunnel(tunnel_mode="quick")
+            assert srv.tunnel_domain == "https://abc.trycloudflare.com"
+            await srv.reconcile_tunnel(tunnel_mode="manual")
+
+        fake_driver.stop.assert_awaited_once()
+        assert srv.tunnel_domain == "https://user.example.com"
+        assert srv.tunnel_mode == "manual"
+        assert srv.get_tunnel_url() == ""
+
+    @pytest.mark.asyncio
+    async def test_tunnel_failure_leaves_user_domain_untouched(self, tmp_path):
+        """If cloudflared fails to start, the signed-URL domain must not
+        silently become empty — we'd serve broken localhost URLs."""
+        srv = MediaServer(
+            port=8089,
+            secret="x",
+            allowed_dirs=[str(tmp_path)],
+            tunnel_domain="https://user.example.com",
+        )
+        fake_driver = MagicMock()
+        fake_driver.start = AsyncMock(side_effect=RuntimeError("no binary"))
+        fake_driver.stop = AsyncMock()
+        with patch(
+            "qwenpaw.tunnel.CloudflareTunnelDriver",
+            return_value=fake_driver,
+        ):
+            await srv.reconcile_tunnel(tunnel_mode="quick")
+
+        assert srv._tunnel_driver is None
+        assert srv.tunnel_domain == "https://user.example.com"
+
+    @pytest.mark.asyncio
+    async def test_named_tunnel_uses_user_hostname(self, tmp_path):
+        """Named-mode driver is spawned with tunnel_name + hostname and the
+        user hostname becomes the effective tunnel_domain."""
+        srv = MediaServer(
+            port=8089,
+            secret="x",
+            allowed_dirs=[str(tmp_path)],
+            tunnel_domain="",
+        )
+        fake_driver = MagicMock()
+        fake_driver.start = AsyncMock(
+            return_value=MagicMock(
+                public_url="https://media.example.com",
+            ),
+        )
+        fake_driver.stop = AsyncMock()
+        fake_driver.get_public_url = MagicMock(
+            return_value="https://media.example.com",
+        )
+        factory = MagicMock(return_value=fake_driver)
+        with patch("qwenpaw.tunnel.CloudflareTunnelDriver", factory):
+            await srv.reconcile_tunnel(
+                tunnel_mode="named",
+                named_tunnel_name="media",
+                named_tunnel_hostname="media.example.com",
+                named_tunnel_config_file="/etc/cloudflared/media.yml",
+            )
+
+        factory.assert_called_once_with(
+            mode="named",
+            tunnel_name="media",
+            hostname="media.example.com",
+            config_file="/etc/cloudflared/media.yml",
+        )
+        fake_driver.start.assert_awaited_once_with(8089)
+        assert srv.tunnel_domain == "https://media.example.com"
+        assert srv.tunnel_mode == "named"
+
+    @pytest.mark.asyncio
+    async def test_reconcile_no_op_when_mode_and_config_unchanged(
+        self,
+        tmp_path,
+    ):
+        """Saving the same config twice shouldn't restart the tunnel —
+        otherwise the user gets a new trycloudflare URL on every config
+        save, which breaks already-issued signed URLs."""
+        srv = MediaServer(
+            port=8089,
+            secret="x",
+            allowed_dirs=[str(tmp_path)],
+            tunnel_domain="",
+            tunnel_mode="quick",
+        )
+        fake_driver = MagicMock()
+        fake_driver.start = AsyncMock(
+            return_value=MagicMock(
+                public_url="https://alpha.trycloudflare.com",
+            ),
+        )
+        fake_driver.stop = AsyncMock()
+        fake_driver.get_public_url = MagicMock(
+            return_value="https://alpha.trycloudflare.com",
+        )
+        with patch(
+            "qwenpaw.tunnel.CloudflareTunnelDriver",
+            return_value=fake_driver,
+        ):
+            # simulate a first reconcile to spin up the tunnel
+            await srv.reconcile_tunnel(tunnel_mode="manual")  # stops nothing
+            await srv.reconcile_tunnel(tunnel_mode="quick")
+            assert fake_driver.start.await_count == 1
+
+            # second reconcile with same mode: driver should not be touched
+            await srv.reconcile_tunnel(tunnel_mode="quick")
+            assert fake_driver.start.await_count == 1
+            fake_driver.stop.assert_not_awaited()
