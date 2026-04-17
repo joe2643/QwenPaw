@@ -64,4 +64,38 @@ export const channelApi = {
     ),
   getWhatsappStatus: () =>
     request<{ linked: boolean; phone?: string }>("/config/channels/whatsapp/status"),
+
+  // ── Signal link flow (signal-cli subprocess pairing) ─────────────────────
+  startSignalLink: (device_name?: string) =>
+    request<{
+      status: string;
+      qr_image?: string;
+      link_url?: string;
+      device_name?: string;
+    }>("/config/channels/signal/link", {
+      method: "POST",
+      body: JSON.stringify({ device_name: device_name || "QwenPaw" }),
+      headers: { "Content-Type": "application/json" },
+    }),
+  checkSignalLinkStatus: () =>
+    request<{
+      status: string;
+      phone?: string;
+      uuid?: string;
+      link_url?: string;
+      error?: string;
+    }>("/config/channels/signal/link/status"),
+  stopSignalLink: () =>
+    request<{ status: string }>("/config/channels/signal/link/stop", {
+      method: "POST",
+    }),
+  unbindSignal: () =>
+    request<{ status: string; detail?: string }>(
+      "/config/channels/signal/unbind",
+      { method: "POST" },
+    ),
+  getSignalStatus: () =>
+    request<{ linked: boolean; phone?: string | null; uuid?: string | null }>(
+      "/config/channels/signal/status",
+    ),
 };

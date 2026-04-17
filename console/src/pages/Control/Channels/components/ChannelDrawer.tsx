@@ -290,6 +290,122 @@ export function ChannelDrawer({
   }, [message, t]);
 
 
+  // ── Signal link flow state ──────────────────────────────────────────
+  // Parallels WhatsApp's waPhone / waQrImage / waPairStatus pattern but
+  // with signal-cli subprocess semantics: no phone-number param (the
+  // subprocess returns one), QR is the only path (no pair-code fallback).
+  const [sigLinked, setSigLinked] = useState(false);
+  const [sigPhone, setSigPhone] = useState<string>("");
+  // UUID is not shown in the drawer but is stored on the form; the
+  // setter is still useful for that purpose (hence the _ prefix — it
+  // signals "intentionally unread state" to Copilot / strict-TS).
+  const [, setSigUuid] = useState<string>("");
+  const [sigQrImage, setSigQrImage] = useState<string>("");
+  const [sigPairStatus, setSigPairStatus] = useState<string>("idle");
+  const [sigPairLoading, setSigPairLoading] = useState(false);
+  const [sigDeviceName, setSigDeviceName] = useState<string>("QwenPaw");
+  const sigPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopSigPoll = useCallback(() => {
+    if (sigPollRef.current) {
+      clearInterval(sigPollRef.current);
+      sigPollRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeKey === "signal") {
+      api
+        .getSignalStatus()
+        .then((s) => {
+          setSigLinked(Boolean(s.linked));
+          if (s.linked) {
+            setSigPairStatus("linked");
+            if (s.phone) setSigPhone(s.phone);
+            if (s.uuid) setSigUuid(s.uuid);
+          }
+        })
+        .catch(() => {
+          /* ignore — endpoint may be 404 on older backends */
+        });
+    }
+    return () => {
+      stopSigPoll();
+    };
+  }, [activeKey, stopSigPoll]);
+
+  const handleSignalLink = useCallback(async () => {
+    stopSigPoll();
+    setSigPairLoading(true);
+    setSigQrImage("");
+    setSigPairStatus("starting");
+    try {
+      const data = await api.startSignalLink(sigDeviceName || "QwenPaw");
+      if (data.qr_image) {
+        setSigQrImage(data.qr_image);
+        setSigPairStatus(data.status || "waiting_qr");
+      }
+      // Poll for completion. Slightly longer interval than WhatsApp
+      // (3s) because signal-cli link rarely confirms in under 10s.
+      sigPollRef.current = setInterval(async () => {
+        try {
+          const s = await api.checkSignalLinkStatus();
+          if (s.status === "linked") {
+            stopSigPoll();
+            setSigQrImage("");
+            setSigPairStatus("linked");
+            setSigLinked(true);
+            if (s.phone) setSigPhone(s.phone);
+            if (s.uuid) setSigUuid(s.uuid);
+            setSigPairLoading(false);
+            form.setFieldsValue({
+              account: s.phone || "",
+              account_uuid: s.uuid || "",
+            });
+            message.success(t("channels.signalLinkSuccess"));
+          } else if (s.status === "error") {
+            stopSigPoll();
+            setSigPairStatus("error");
+            setSigPairLoading(false);
+            message.error(s.error || t("channels.signalLinkFailed"));
+          }
+        } catch {
+          /* transient — keep polling */
+        }
+      }, 3000);
+    } catch (err) {
+      const msg = (err as Error)?.message || t("channels.signalLinkFailed");
+      message.error(msg);
+      setSigPairStatus("error");
+      // Error-path terminal state: clear loading immediately. The previous
+      // unconditional `finally` fired right after the polling interval was
+      // scheduled, which flipped the spinner off while the link flow was
+      // still in progress. Loading now only clears on terminal states —
+      // inline clears inside the poll loop (linked / error branches) handle
+      // the happy path and the server-reported error.
+      setSigPairLoading(false);
+    }
+  }, [sigDeviceName, stopSigPoll, form, message, t]);
+
+  const handleSignalUnbind = useCallback(async () => {
+    stopSigPoll();
+    try {
+      await api.unbindSignal();
+      setSigLinked(false);
+      setSigPhone("");
+      setSigUuid("");
+      setSigQrImage("");
+      setSigPairStatus("idle");
+      form.setFieldsValue({ account: "", account_uuid: "" });
+      message.success(t("channels.signalUnlinkSuccess"));
+    } catch (err) {
+      const msg = (err as Error)?.message || t("channels.signalUnlinkFailed");
+      message.error(msg);
+    }
+  }, [stopSigPoll, form, message, t]);
+
+  // ── Access control fields (shared across multiple channels) ──────────────
+
   // ── Access control fields (shared across multiple channels) ──────────────
 
   const renderAccessControlFields = () => (
@@ -1160,39 +1276,177 @@ export function ChannelDrawer({
       case "signal":
         return (
           <>
-            <Form.Item name="account" label={t("channels.signalAccount")} tooltip={t("channels.signalAccountTooltip")} rules={[{ required: true }]}>
+            <Form.Item label={t("channels.signalConnection")}>
+              {sigLinked || sigPairStatus === "linked" ? (
+                <>
+                  <Alert
+                    type="success"
+                    showIcon
+                    message={t("channels.signalLinked")}
+                    description={
+                      sigPhone
+                        ? `${t("channels.signalLinkedAs")}: ${sigPhone}`
+                        : t("channels.signalSessionActive")
+                    }
+                    style={{ marginBottom: 12 }}
+                  />
+                  <Button
+                    danger
+                    block
+                    loading={sigPairLoading}
+                    onClick={handleSignalUnbind}
+                  >
+                    {t("channels.signalUnlinkDevice")}
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Input
+                    placeholder={t("channels.signalDeviceNamePlaceholder")}
+                    value={sigDeviceName}
+                    onChange={(e) => setSigDeviceName(e.target.value)}
+                    style={{ marginBottom: 8 }}
+                  />
+                  <Button
+                    type="primary"
+                    block
+                    loading={sigPairLoading}
+                    onClick={handleSignalLink}
+                  >
+                    {t("channels.signalLinkDevice")}
+                  </Button>
+                  {sigQrImage && (
+                    <div style={{ textAlign: "center", marginTop: 12 }}>
+                      <img
+                        src={`data:image/png;base64,${sigQrImage}`}
+                        alt="Signal link QR"
+                        style={{ width: 220, height: 220 }}
+                      />
+                      <div
+                        style={{
+                          marginTop: 8,
+                          fontSize: 12,
+                          opacity: 0.7,
+                        }}
+                      >
+                        {t("channels.signalScanInstructions")}
+                      </div>
+                    </div>
+                  )}
+                  {sigPairStatus === "error" && (
+                    <div style={{ marginTop: 8 }}>
+                      <Alert
+                        type="error"
+                        showIcon
+                        message={t("channels.signalLinkFailed")}
+                      />
+                    </div>
+                  )}
+                </>
+              )}
+            </Form.Item>
+            <Form.Item
+              name="account"
+              label={t("channels.signalAccount")}
+              tooltip={t("channels.signalAccountTooltip")}
+              rules={[{ required: true }]}
+            >
               <Input placeholder="+85298349370" />
             </Form.Item>
-            <Form.Item name="http_url" label={t("channels.signalHttpUrl")} tooltip={t("channels.signalHttpUrlTooltip")}>
-              <Input placeholder="http://127.0.0.1:8082" />
+            <Form.Item
+              name="account_uuid"
+              label={t("channels.signalAccountUuid")}
+              tooltip={t("channels.signalAccountUuidTooltip")}
+            >
+              <Input placeholder="447e962a-0000-0000-0000-000000000000" />
             </Form.Item>
-            <Form.Item name="http_port" label={t("channels.signalBridgePort")} initialValue={8082}>
-              <InputNumber min={1} max={65535} style={{ width: "100%" }} />
+            <Form.Item
+              name="signal_cli_path"
+              label={t("channels.signalCliPath")}
+              tooltip={t("channels.signalCliPathTooltip")}
+            >
+              <Input placeholder={t("channels.signalCliPathPlaceholder")} />
             </Form.Item>
-            <Form.Item name="auto_start" label={t("channels.signalAutoStart")} valuePropName="checked">
+            <Form.Item
+              name="data_dir"
+              label={t("channels.signalDataDir")}
+              tooltip={t("channels.signalDataDirTooltip")}
+            >
+              <Input placeholder={t("channels.signalDataDirPlaceholder")} />
+            </Form.Item>
+            <Form.Item
+              name="extra_args"
+              label={t("channels.signalExtraArgs")}
+              tooltip={t("channels.signalExtraArgsTooltip")}
+              initialValue={[]}
+            >
+              <Select
+                mode="tags"
+                placeholder={t("channels.signalExtraArgsPlaceholder")}
+                tokenSeparators={[","]}
+              />
+            </Form.Item>
+            <Form.Item
+              name="show_typing"
+              label={t("channels.signalShowTyping")}
+              valuePropName="checked"
+            >
               <Switch />
             </Form.Item>
-            <Form.Item name="send_read_receipts" label={t("channels.signalSendReadReceipts")} valuePropName="checked" initialValue={true}>
-              <Switch defaultChecked />
+            <Form.Item
+              name="send_read_receipts"
+              label={t("channels.signalSendReadReceipts")}
+              valuePropName="checked"
+            >
+              <Switch />
             </Form.Item>
-            <Form.Item name="text_chunk_limit" label={t("channels.signalTextChunkLimit")} initialValue={4000}>
-              <InputNumber min={256} max={8192} step={256} style={{ width: "100%" }} />
+            <Form.Item
+              name="text_chunk_limit"
+              label={t("channels.signalTextChunkLimit")}
+              tooltip={t("channels.signalTextChunkLimitTooltip")}
+            >
+              <InputNumber
+                min={100}
+                max={10000}
+                style={{ width: "100%" }}
+                placeholder="4000"
+              />
             </Form.Item>
-            <Form.Item name="media_max_mb" label={t("channels.signalMediaMaxMb")} tooltip={t("channels.signalMediaMaxMbTooltip")} initialValue={8}>
-              <InputNumber min={1} max={100} style={{ width: "100%" }} />
+            <Form.Item
+              name="groups"
+              label={t("channels.signalGroups")}
+              tooltip={t("channels.signalGroupsTooltip")}
+              initialValue={[]}
+            >
+              <Select
+                mode="tags"
+                placeholder={t("channels.signalGroupsPlaceholder")}
+                tokenSeparators={[","]}
+              />
             </Form.Item>
-            <Form.Item name="groups" label={t("channels.signalGroups")} tooltip={t("channels.signalGroupsTooltip")}>
-              <Select mode="tags" placeholder="sBlO8LhzR42X...=" tokenSeparators={[","," ","\n"]} />
+            <Form.Item
+              name="group_allow_from"
+              label={t("channels.signalGroupAllowFrom")}
+              tooltip={t("channels.signalGroupAllowFromTooltip")}
+              initialValue={[]}
+            >
+              <Select
+                mode="tags"
+                placeholder={t("channels.signalGroupAllowFromPlaceholder")}
+                tokenSeparators={[","]}
+              />
             </Form.Item>
-            <Form.Item name="group_allow_from" label={t("channels.signalGroupAllowFrom")} tooltip={t("channels.signalGroupAllowFromTooltip")}>
-              <Select mode="tags" placeholder="* (everyone)" tokenSeparators={[","," "]} />
+            <Form.Item
+              name="reply_to_trigger"
+              label={t("channels.signalReplyToTrigger")}
+              tooltip={t("channels.signalReplyToTriggerTooltip")}
+              valuePropName="checked"
+            >
+              <Switch />
             </Form.Item>
-            <Form.Item name="reply_to_trigger" label={t("channels.replyToTrigger")} valuePropName="checked" tooltip={t("channels.replyToTriggerTooltip")} initialValue={true}>
-              <Switch defaultChecked />
-            </Form.Item>
-            {/* filter_thinking is rendered by the shared global section below — don't duplicate it here */}
           </>
         );
+
 
       case "onebot":
         return (
