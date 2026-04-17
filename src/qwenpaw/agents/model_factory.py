@@ -113,9 +113,18 @@ def _normalize_messages_for_formatter(
     supports_multimodal = _supports_multimodal_for_current_model()
     if getattr(formatter_instance, "_qwenpaw_force_strip_media", False):
         supports_multimodal = False
+
+    if is_anthropic_formatter:
+        target_family = "anthropic"
+    elif is_gemini_formatter:
+        target_family = "gemini"
+    else:
+        target_family = "openai"
+
     normalized_msgs = normalize_messages_for_model_request(
         msgs,
         supports_multimodal=supports_multimodal,
+        target_family=target_family,
     )
 
     return normalized_msgs, is_anthropic_formatter, is_gemini_formatter
@@ -553,6 +562,73 @@ def _promote_tool_result_videos(
     return new_messages
 
 
+def _reorder_tool_and_promoted_messages(
+    messages: list[dict],
+) -> list[dict]:
+    """Move promoted user messages after all tool results in a sequence.
+
+    When ``promote_tool_result_images`` is True the upstream formatter
+    inserts a ``role=user`` message after each ``role=tool`` message to
+    carry the promoted image.  The OpenAI / Anthropic APIs require all
+    tool-result messages to appear contiguously after the assistant
+    message.  This helper collects the interleaved user messages and
+    appends them after the last tool message in each sequence.
+    """
+    result: list[dict] = []
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            result.append(msg)
+            i += 1
+            tool_msgs: list[dict] = []
+            promoted_msgs: list[dict] = []
+            while i < len(messages) and messages[i].get("role") in (
+                "tool",
+                "user",
+            ):
+                if messages[i]["role"] == "tool":
+                    tool_msgs.append(messages[i])
+                else:
+                    promoted_msgs.append(messages[i])
+                i += 1
+            result.extend(tool_msgs)
+            result.extend(promoted_msgs)
+        else:
+            result.append(msg)
+            i += 1
+    return result
+
+
+# Mapping of non-standard MIME subtypes to their correct forms.
+_MIME_FIXES: dict[str, str] = {
+    "image/jpg": "image/jpeg",
+}
+
+
+def _fix_image_mime_types(messages: list[dict]) -> None:
+    """Fix non-standard MIME types in base64 data URLs in-place.
+
+    agentscope derives MIME from the file extension literally
+    (e.g. ``.jpg`` → ``image/jpg``), but ``image/jpg`` is not a
+    valid IANA MIME type — the correct form is ``image/jpeg``.
+    Some APIs (Bedrock via litellm) reject the non-standard form.
+    """
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            url = (block.get("image_url") or {}).get("url", "")
+            for wrong, right in _MIME_FIXES.items():
+                if url.startswith(f"data:{wrong};"):
+                    block["image_url"]["url"] = url.replace(
+                        f"data:{wrong};",
+                        f"data:{right};",
+                        1,
+                    )
+
+
 # pylint: disable-next=too-many-statements
 def _create_file_block_support_formatter(
     base_formatter_class: Type[FormatterBase],
@@ -659,14 +735,27 @@ def _create_file_block_support_formatter(
                         messages,
                     )
 
-            if extra_contents:
+            # Image promotion inserts user messages between tool
+            # results, violating the API's contiguity requirement.
+            messages = _reorder_tool_and_promoted_messages(messages)
+
+            # Normalize non-standard MIME types (e.g. image/jpg → image/jpeg)
+            _fix_image_mime_types(messages)
+
+            if extra_contents and _is_gemini_formatter:
                 for message in messages:
                     for tc in message.get("tool_calls", []):
                         ec = extra_contents.get(tc.get("id"))
                         if ec:
                             tc["extra_content"] = ec
 
-            if reasoning_contents:
+            if reasoning_contents and not is_anthropic_formatter:
+                # Anthropic passes thinking blocks natively through
+                # _format_anthropic_messages; injecting reasoning_content
+                # would be redundant and the API doesn't use this field.
+                # OpenAI/Gemini (OpenAI-compat) formatters drop thinking
+                # blocks, so we re-inject the content as reasoning_content.
+                #
                 # Build a list of reasoning values aligned with surviving
                 # assistant messages.  The parent formatter drops
                 # thinking-only messages (no content/tool_calls), so we
