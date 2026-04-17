@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Embedded media file server for QwenPaw.
 
 Runs as a process-level service — starts/stops with the qwenpaw daemon.
@@ -21,13 +22,13 @@ try:
     from fastapi import FastAPI, HTTPException, Query
     from fastapi.responses import FileResponse
     import uvicorn
+
     _DEPS_AVAILABLE = True
 except ImportError:
     _DEPS_AVAILABLE = False
 
 # Single runtime secret (set when server starts, read by _get_media_config)
 _runtime_secret: str = ""
-
 
 
 class MediaServer:
@@ -65,7 +66,10 @@ class MediaServer:
         self._tunnel_driver = None  # CloudflareTunnelDriver, lazily created
         self._server_task: Optional[asyncio.Task] = None
         self._app: Optional[FastAPI] = None
-        self._token_store: dict[str, tuple[str, int]] = {}  # token -> (raw_path, expires)
+        self._token_store: dict[
+            str,
+            tuple[str, int],
+        ] = {}  # token -> (raw_path, expires)
 
     def _create_app(self) -> "FastAPI":
         app = FastAPI(title="QwenPaw Media", docs_url=None, redoc_url=None)
@@ -86,15 +90,35 @@ class MediaServer:
             resolved = Path(path).resolve()
             if not resolved.is_file():
                 raise HTTPException(404, "File not found")
-            if not any(resolved.is_relative_to(Path(d).resolve()) for d in server.allowed_dirs):
+            if not any(
+                resolved.is_relative_to(Path(d).resolve())
+                for d in server.allowed_dirs
+            ):
                 raise HTTPException(403, "Path not in allowed directories")
             media_exts = {
-                ".mp4", ".webm", ".mov", ".avi", ".mkv", ".mpeg",
-                ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
-                ".mp3", ".wav", ".ogg", ".flac", ".m4a",
+                ".mp4",
+                ".webm",
+                ".mov",
+                ".avi",
+                ".mkv",
+                ".mpeg",
+                ".png",
+                ".jpg",
+                ".jpeg",
+                ".gif",
+                ".webp",
+                ".bmp",
+                ".mp3",
+                ".wav",
+                ".ogg",
+                ".flac",
+                ".m4a",
             }
             if resolved.suffix.lower() not in media_exts:
-                raise HTTPException(400, f"Extension {resolved.suffix} not allowed")
+                raise HTTPException(
+                    400,
+                    f"Extension {resolved.suffix} not allowed",
+                )
             if resolved.stat().st_size > server.max_size:
                 raise HTTPException(413, "File too large")
             # Cap TTL at 24h
@@ -102,7 +126,11 @@ class MediaServer:
             expires = int(time.time()) + ttl
             raw_path = str(resolved)
             sig = server._sign(raw_path, expires)
-            domain = server.tunnel_domain.rstrip("/") if server.tunnel_domain else f"http://{server.host}:{server.port}"
+            domain = (
+                server.tunnel_domain.rstrip("/")
+                if server.tunnel_domain
+                else f"http://{server.host}:{server.port}"
+            )
             token = secrets.token_urlsafe(24)
             server._token_store[token] = (raw_path, expires)
             server._cleanup_expired_tokens()
@@ -124,17 +152,37 @@ class MediaServer:
             if not server._verify(raw_path, exp, sig):
                 raise HTTPException(403, "Invalid or expired signature")
             resolved = Path(raw_path).resolve()
-            if not any(resolved.is_relative_to(Path(d).resolve()) for d in server.allowed_dirs):
+            if not any(
+                resolved.is_relative_to(Path(d).resolve())
+                for d in server.allowed_dirs
+            ):
                 raise HTTPException(403, "Path not in allowed directories")
             if not resolved.is_file():
                 raise HTTPException(404, "File not found")
             media_exts = {
-                ".mp4", ".webm", ".mov", ".avi", ".mkv", ".mpeg",
-                ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
-                ".mp3", ".wav", ".ogg", ".flac", ".m4a",
+                ".mp4",
+                ".webm",
+                ".mov",
+                ".avi",
+                ".mkv",
+                ".mpeg",
+                ".png",
+                ".jpg",
+                ".jpeg",
+                ".gif",
+                ".webp",
+                ".bmp",
+                ".mp3",
+                ".wav",
+                ".ogg",
+                ".flac",
+                ".m4a",
             }
             if resolved.suffix.lower() not in media_exts:
-                raise HTTPException(400, f"Extension {resolved.suffix} not allowed")
+                raise HTTPException(
+                    400,
+                    f"Extension {resolved.suffix} not allowed",
+                )
             if resolved.stat().st_size > server.max_size:
                 raise HTTPException(413, "File too large")
             return FileResponse(str(resolved), filename=resolved.name)
@@ -150,7 +198,11 @@ class MediaServer:
 
     def _sign(self, file_path: str, expires: int) -> str:
         msg = f"{file_path}:{expires}"
-        return hmac.new(self.secret.encode(), msg.encode(), hashlib.sha256).hexdigest()[:32]
+        return hmac.new(
+            self.secret.encode(),
+            msg.encode(),
+            hashlib.sha256,
+        ).hexdigest()[:32]
 
     def _verify(self, file_path: str, expires: int, sig: str) -> bool:
         if time.time() > expires:
@@ -160,14 +212,19 @@ class MediaServer:
     async def start(self):
         global _runtime_secret
         if not _DEPS_AVAILABLE:
-            logger.warning("media-server: fastapi/uvicorn not installed, skipping")
+            logger.warning(
+                "media-server: fastapi/uvicorn not installed, skipping",
+            )
             return
         if not self.secret:
             self.secret = secrets.token_hex(32)
-            logger.warning("media-server: no secret configured, generated random secret")
+            logger.warning(
+                "media-server: no secret configured, generated random secret",
+            )
         _runtime_secret = self.secret
         # Check if port is already bound
         import socket as _socket
+
         _probe = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
         try:
             _probe.bind((self.host, self.port))
@@ -181,11 +238,16 @@ class MediaServer:
             return
         self._app = self._create_app()
         config = uvicorn.Config(
-            self._app, host=self.host, port=self.port,
+            self._app,
+            host=self.host,
+            port=self.port,
             log_level="warning",
         )
         server = uvicorn.Server(config)
-        self._server_task = asyncio.create_task(server.serve(), name="media-server")
+        self._server_task = asyncio.create_task(
+            server.serve(),
+            name="media-server",
+        )
         logger.info("media-server: started on %s:%s", self.host, self.port)
 
         if self.tunnel_mode in ("quick", "named"):
@@ -204,7 +266,7 @@ class MediaServer:
         logger.info("media-server: stopped")
 
     async def _start_tunnel(self) -> None:
-        """Spawn a Cloudflare Tunnel (quick or named) and update tunnel_domain."""
+        """Spawn a Cloudflare Tunnel and update tunnel_domain."""
         if self._tunnel_driver is not None:
             return
         if self.tunnel_mode not in ("quick", "named"):
@@ -234,7 +296,8 @@ class MediaServer:
             # media server itself keeps serving on localhost.
             logger.error(
                 "media-server: cannot start %s tunnel: %s",
-                self.tunnel_mode, exc,
+                self.tunnel_mode,
+                exc,
             )
             return
         try:
@@ -242,14 +305,16 @@ class MediaServer:
         except Exception as exc:
             logger.error(
                 "media-server: failed to start %s tunnel: %s",
-                self.tunnel_mode, exc,
+                self.tunnel_mode,
+                exc,
             )
             return
         self._tunnel_driver = driver
         self.tunnel_domain = info.public_url
         logger.info(
             "media-server: %s tunnel ready at %s",
-            self.tunnel_mode, info.public_url,
+            self.tunnel_mode,
+            info.public_url,
         )
 
     async def _stop_tunnel(self) -> None:
@@ -277,13 +342,10 @@ class MediaServer:
         config so toggling the Console UI produces immediate effect.
         """
         same_mode = tunnel_mode == self.tunnel_mode
-        same_named = (
-            tunnel_mode != "named"
-            or (
-                named_tunnel_name == self.named_tunnel_name
-                and named_tunnel_hostname == self.named_tunnel_hostname
-                and named_tunnel_config_file == self.named_tunnel_config_file
-            )
+        same_named = tunnel_mode != "named" or (
+            named_tunnel_name == self.named_tunnel_name
+            and named_tunnel_hostname == self.named_tunnel_hostname
+            and named_tunnel_config_file == self.named_tunnel_config_file
         )
         if same_mode and same_named:
             # No state change — leave the (possibly running) driver alone.

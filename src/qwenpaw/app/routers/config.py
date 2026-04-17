@@ -662,11 +662,16 @@ async def remove_from_whitelist(
 # different agents is safe because each gets its own state dict.
 _whatsapp_pair_states: dict[str, dict] = {}
 
+
 def _get_wa_pair_state(agent_id: str) -> dict:
     """Get or create per-agent WhatsApp pairing state."""
     if agent_id not in _whatsapp_pair_states:
         _whatsapp_pair_states[agent_id] = {
-            "client": None, "code": None, "status": "idle", "qr_data": None, "task": None,
+            "client": None,
+            "code": None,
+            "status": "idle",
+            "qr_data": None,
+            "task": None,
         }
     return _whatsapp_pair_states[agent_id]
 
@@ -685,13 +690,16 @@ def _get_wa_auth_dir(agent) -> str:
     """
     from pathlib import Path
     from ...constant import WORKING_DIR
+
     wa_cfg = getattr(agent.config.channels, "whatsapp", None)
     explicit = (getattr(wa_cfg, "auth_dir", "") if wa_cfg else "") or ""
     if explicit:
         return explicit
     ws = getattr(agent, "workspace_dir", None)
     if ws:
-        return str(Path(ws).expanduser() / "credentials" / "whatsapp" / "default")
+        return str(
+            Path(ws).expanduser() / "credentials" / "whatsapp" / "default",
+        )
     return str(WORKING_DIR / "credentials" / "whatsapp" / "default")
 
 
@@ -703,14 +711,16 @@ def _get_wa_auth_dir(agent) -> str:
 async def start_whatsapp_pair(request: Request, phone: str = "") -> dict:
     """Start WhatsApp pair code auth. Requires E.164 phone number."""
     import re
+
     E164_RE = re.compile(r"^\+[1-9]\d{4,14}$")
     if not phone or not E164_RE.match(phone):
         raise HTTPException(
             status_code=400,
             detail="Phone number required in E.164 format "
-                   "(^\\+[1-9]\\d{4,14}$, e.g. +85212345678)",
+            "(^\\+[1-9]\\d{4,14}$, e.g. +85212345678)",
         )
     import asyncio
+
     try:
         from neonize.aioze.client import NewAClient
         from neonize.events import ConnectedEv
@@ -718,15 +728,17 @@ async def start_whatsapp_pair(request: Request, phone: str = "") -> dict:
         raise HTTPException(
             status_code=500,
             detail="neonize-qwenpaw not installed. "
-                   "Install: pip install qwenpaw[whatsapp]",
+            "Install: pip install qwenpaw[whatsapp]",
         )
 
     from ..agent_context import get_agent_for_request
+
     agent = await get_agent_for_request(request)
     auth_dir = _get_wa_auth_dir(agent)
     state = _get_wa_pair_state(agent.agent_id)
 
     from pathlib import Path
+
     db_path = str(Path(auth_dir).expanduser() / "neonize.db")
     Path(auth_dir).expanduser().mkdir(parents=True, exist_ok=True)
 
@@ -762,9 +774,11 @@ async def start_whatsapp_pair(request: Request, phone: str = "") -> dict:
     @client.qr
     async def on_qr(c, qr_bytes):
         import base64
+
         try:
             import segno
             import io
+
             qr = segno.make_qr(qr_bytes)
             buf = io.BytesIO()
             qr.save(buf, kind="png", scale=5, border=2)
@@ -801,6 +815,7 @@ async def start_whatsapp_pair(request: Request, phone: str = "") -> dict:
 async def check_whatsapp_pair_status(request: Request) -> dict:
     """Check current WhatsApp pairing status."""
     from ..agent_context import get_agent_for_request
+
     agent = await get_agent_for_request(request)
     state = _get_wa_pair_state(agent.agent_id)
     result = {"status": state["status"]}
@@ -818,6 +833,7 @@ async def check_whatsapp_pair_status(request: Request) -> dict:
 async def stop_whatsapp_pair(request: Request) -> dict:
     """Stop the WhatsApp pairing process."""
     from ..agent_context import get_agent_for_request
+
     agent = await get_agent_for_request(request)
     state = _get_wa_pair_state(agent.agent_id)
     client = state.get("client")
@@ -826,7 +842,15 @@ async def stop_whatsapp_pair(request: Request) -> dict:
             await client.disconnect()
         except Exception:
             pass
-    state.update({"client": None, "code": None, "status": "idle", "qr_data": None, "task": None})
+    state.update(
+        {
+            "client": None,
+            "code": None,
+            "status": "idle",
+            "qr_data": None,
+            "task": None,
+        },
+    )
     return {"status": "stopped"}
 
 
@@ -839,6 +863,7 @@ async def get_whatsapp_qrcode(request: Request) -> dict:
     import asyncio
     import base64
     import io
+
     try:
         from neonize.aioze.client import NewAClient
         from neonize.events import ConnectedEv
@@ -847,15 +872,17 @@ async def get_whatsapp_qrcode(request: Request) -> dict:
         raise HTTPException(
             status_code=500,
             detail="neonize-qwenpaw or segno not installed. "
-                   "Install: pip install qwenpaw[whatsapp]",
+            "Install: pip install qwenpaw[whatsapp]",
         )
 
     from ..agent_context import get_agent_for_request
+
     agent = await get_agent_for_request(request)
     auth_dir = _get_wa_auth_dir(agent)
     state = _get_wa_pair_state(agent.agent_id)
 
     from pathlib import Path
+
     db_path = str(Path(auth_dir).expanduser() / "neonize.db")
     Path(auth_dir).expanduser().mkdir(parents=True, exist_ok=True)
 
@@ -935,6 +962,7 @@ async def unbind_whatsapp(request: Request) -> dict:
     from pathlib import Path as _P
 
     from ..agent_context import get_agent_for_request
+
     agent = await get_agent_for_request(request)
     auth_dir = _get_wa_auth_dir(agent)
     state = _get_wa_pair_state(agent.agent_id)
@@ -957,8 +985,19 @@ async def unbind_whatsapp(request: Request) -> dict:
     db_path = _P(auth_dir).expanduser() / "neonize.db"
     if db_path.exists():
         db_path.unlink()
-        state.update({"client": None, "code": None, "status": "idle", "qr_data": None, "task": None})
-        return {"status": "unbound", "detail": "Session deleted. Restart QwenPaw to re-pair."}
+        state.update(
+            {
+                "client": None,
+                "code": None,
+                "status": "idle",
+                "qr_data": None,
+                "task": None,
+            },
+        )
+        return {
+            "status": "unbound",
+            "detail": "Session deleted. Restart QwenPaw to re-pair.",
+        }
     return {"status": "idle", "detail": "No session found."}
 
 
@@ -971,6 +1010,7 @@ async def get_whatsapp_status(request: Request) -> dict:
     try:
         from pathlib import Path
         from ..agent_context import get_agent_for_request
+
         agent = await get_agent_for_request(request)
         auth_dir = _get_wa_auth_dir(agent)
         db_path = Path(auth_dir).expanduser() / "neonize.db"
@@ -978,6 +1018,7 @@ async def get_whatsapp_status(request: Request) -> dict:
             return {"linked": False, "phone": None}
         import asyncio
         import sqlite3
+
         def _check_linked():
             conn = sqlite3.connect(str(db_path))
             try:
@@ -999,6 +1040,7 @@ async def get_whatsapp_status(request: Request) -> dict:
                 return (False, None)
             finally:
                 conn.close()
+
         linked, phone = await asyncio.to_thread(_check_linked)
         if linked:
             return {"linked": True, "phone": phone}
@@ -1106,10 +1148,12 @@ async def get_media_server_status(request: Request) -> dict:
 
 # -- MemPalace Config --
 
+
 @router.get("/mempalace", tags=["config"])
 async def get_mempalace_config(request: Request):
     from ..agent_context import get_current_agent_id
     from qwenpaw.config.config import load_agent_config, MemPalaceHooksConfig
+
     agent_id = get_current_agent_id() or "default"
     try:
         cfg = load_agent_config(agent_id)
@@ -1122,7 +1166,12 @@ async def get_mempalace_config(request: Request):
 @router.put("/mempalace", tags=["config"])
 async def update_mempalace_config(request: Request, body: dict = Body(...)):
     from ..agent_context import get_current_agent_id
-    from qwenpaw.config.config import load_agent_config, save_agent_config, MemPalaceHooksConfig
+    from qwenpaw.config.config import (
+        load_agent_config,
+        save_agent_config,
+        MemPalaceHooksConfig,
+    )
+
     agent_id = get_current_agent_id() or "default"
     try:
         new_cfg = MemPalaceHooksConfig(**body)
@@ -1170,6 +1219,7 @@ def _get_signal_data_dir(agent) -> "Path":
     """
     from ..channels.signal.channel import _resolve_signal_data_dir
     from pathlib import Path
+
     sig_cfg = getattr(agent.config.channels, "signal", None)
     explicit = (getattr(sig_cfg, "data_dir", "") if sig_cfg else "") or ""
     ws = getattr(agent, "workspace_dir", None)
@@ -1198,6 +1248,7 @@ def _read_signal_accounts(data_dir: "Path") -> dict:
     ``accounts.get("accounts", [])`` without exception handling.
     """
     import json
+
     accounts_file = data_dir / "data" / "accounts.json"
     if not accounts_file.exists():
         return {"accounts": []}
@@ -1240,6 +1291,7 @@ async def _run_signal_link(
     """
     import asyncio
     import re as _re
+
     state = _get_signal_link_states_raw(agent_id)
     proc = state.get("proc")
     if not proc:
@@ -1253,7 +1305,8 @@ async def _run_signal_link(
         while True:
             try:
                 raw = await asyncio.wait_for(
-                    proc.stdout.readline(), timeout=1.0,
+                    proc.stdout.readline(),
+                    timeout=1.0,
                 )
             except asyncio.TimeoutError:
                 if proc.returncode is not None:
@@ -1295,9 +1348,8 @@ async def _run_signal_link(
             stderr = stderr_bytes.decode(errors="replace").strip()
             detail = stderr or ("\n".join(tail[-5:]) if tail else "")
             state["status"] = "error"
-            state["error"] = (
-                f"signal-cli link exited with code {rc}"
-                + (f": {detail}" if detail else "")
+            state["error"] = f"signal-cli link exited with code {rc}" + (
+                f": {detail}" if detail else ""
             )
     except asyncio.CancelledError:
         raise
@@ -1333,6 +1385,7 @@ async def start_signal_link(
     import re as _re
 
     from ..agent_context import get_agent_for_request
+
     agent = await get_agent_for_request(request)
     state = _get_signal_link_state(agent.agent_id)
 
@@ -1371,17 +1424,19 @@ async def start_signal_link(
         except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
             pass
 
-    state.update({
-        "proc": None,
-        "task": None,
-        "status": "starting",
-        "qr_image": None,
-        "link_url": None,
-        "device_name": body.device_name,
-        "phone": None,
-        "uuid": None,
-        "error": None,
-    })
+    state.update(
+        {
+            "proc": None,
+            "task": None,
+            "status": "starting",
+            "qr_image": None,
+            "link_url": None,
+            "device_name": body.device_name,
+            "phone": None,
+            "uuid": None,
+            "error": None,
+        },
+    )
 
     signal_cli_path = _get_signal_cli_path(agent)
     try:
@@ -1394,9 +1449,11 @@ async def start_signal_link(
 
     cmd = [
         signal_cli_path,
-        "-c", str(data_dir),
+        "-c",
+        str(data_dir),
         "link",
-        "-n", body.device_name or "QwenPaw",
+        "-n",
+        body.device_name or "QwenPaw",
     ]
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -1423,7 +1480,8 @@ async def start_signal_link(
         for _ in range(50):  # at most ~50 lines before giving up
             try:
                 raw = await asyncio.wait_for(
-                    proc.stdout.readline(), timeout=15.0,
+                    proc.stdout.readline(),
+                    timeout=15.0,
                 )
             except asyncio.TimeoutError:
                 break
@@ -1444,7 +1502,8 @@ async def start_signal_link(
         state["status"] = "error"
         state["error"] = f"link stdout read failed: {e}"
         raise HTTPException(
-            status_code=502, detail=state["error"],
+            status_code=502,
+            detail=state["error"],
         ) from e
 
     if not link_url:
@@ -1454,7 +1513,8 @@ async def start_signal_link(
         if proc.stderr is not None:
             try:
                 stderr_bytes = await asyncio.wait_for(
-                    proc.stderr.read(), timeout=2.0,
+                    proc.stderr.read(),
+                    timeout=2.0,
                 )
             except asyncio.TimeoutError:
                 pass
@@ -1489,16 +1549,21 @@ async def start_signal_link(
     qr.save(buf, kind="png", scale=5, border=2)
     qr_image = base64.b64encode(buf.getvalue()).decode()
 
-    state.update({
-        "status": "waiting_qr",
-        "qr_image": qr_image,
-        "link_url": link_url,
-    })
+    state.update(
+        {
+            "status": "waiting_qr",
+            "qr_image": qr_image,
+            "link_url": link_url,
+        },
+    )
 
     # Spawn the background watcher to flip state once the phone scans.
     state["task"] = asyncio.create_task(
         _run_signal_link(
-            agent.agent_id, signal_cli_path, data_dir, body.device_name,
+            agent.agent_id,
+            signal_cli_path,
+            data_dir,
+            body.device_name,
         ),
         name=f"signal_link_watcher_{agent.agent_id}",
     )
@@ -1517,6 +1582,7 @@ async def start_signal_link(
 async def check_signal_link_status(request: Request) -> dict:
     """Return the current per-agent Signal link state."""
     from ..agent_context import get_agent_for_request
+
     agent = await get_agent_for_request(request)
     state = _get_signal_link_state(agent.agent_id)
     out: dict[str, Any] = {"status": state["status"]}
@@ -1541,6 +1607,7 @@ async def stop_signal_link(request: Request) -> dict:
     """Kill the signal-cli link subprocess for this agent."""
     import asyncio
     from ..agent_context import get_agent_for_request
+
     agent = await get_agent_for_request(request)
     state = _get_signal_link_state(agent.agent_id)
     proc = state.get("proc")
@@ -1560,10 +1627,16 @@ async def stop_signal_link(request: Request) -> dict:
             await asyncio.wait_for(task, timeout=1.0)
         except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
             pass
-    state.update({
-        "proc": None, "task": None, "status": "idle",
-        "qr_image": None, "link_url": None, "error": None,
-    })
+    state.update(
+        {
+            "proc": None,
+            "task": None,
+            "status": "idle",
+            "qr_image": None,
+            "link_url": None,
+            "error": None,
+        },
+    )
     return {"status": "stopped"}
 
 
@@ -1626,11 +1699,18 @@ async def unbind_signal(request: Request) -> dict:
                 status_code=500,
                 detail=f"Failed to remove {account_data}: {e}",
             ) from e
-        state.update({
-            "proc": None, "task": None, "status": "idle",
-            "qr_image": None, "link_url": None,
-            "phone": None, "uuid": None, "error": None,
-        })
+        state.update(
+            {
+                "proc": None,
+                "task": None,
+                "status": "idle",
+                "qr_image": None,
+                "link_url": None,
+                "phone": None,
+                "uuid": None,
+                "error": None,
+            },
+        )
         return {
             "status": "unbound",
             "detail": (
@@ -1653,6 +1733,7 @@ async def get_signal_status(request: Request) -> dict:
     required.
     """
     from ..agent_context import get_agent_for_request
+
     agent = await get_agent_for_request(request)
     try:
         data_dir = _get_signal_data_dir(agent)
@@ -1719,6 +1800,7 @@ async def list_signal_contacts(request: Request) -> dict:
     """
     import sqlite3
     from ..agent_context import get_agent_for_request
+
     agent = await get_agent_for_request(request)
     data_dir = _get_signal_data_dir(agent)
     db = _signal_account_db_path(data_dir)
@@ -1744,7 +1826,7 @@ async def list_signal_contacts(request: Request) -> dict:
         conn.close()
 
     contacts = []
-    for (number, aci, gn, fn, nn, pgn, pfn) in rows:
+    for number, aci, gn, fn, nn, pgn, pfn in rows:
         parts = [p for p in (gn, fn) if p]
         display = " ".join(parts) if parts else ""
         if not display and nn:
@@ -1752,11 +1834,13 @@ async def list_signal_contacts(request: Request) -> dict:
         if not display:
             pparts = [p for p in (pgn, pfn) if p]
             display = " ".join(pparts) if pparts else ""
-        contacts.append({
-            "number": number or "",
-            "uuid": aci or "",
-            "name": display or "",
-        })
+        contacts.append(
+            {
+                "number": number or "",
+                "uuid": aci or "",
+                "name": display or "",
+            },
+        )
     return {"contacts": contacts}
 
 
@@ -1777,6 +1861,7 @@ async def list_signal_groups(request: Request) -> dict:
     import base64
     import sqlite3
     from ..agent_context import get_agent_for_request
+
     agent = await get_agent_for_request(request)
     data_dir = _get_signal_data_dir(agent)
     db = _signal_account_db_path(data_dir)
@@ -1795,7 +1880,7 @@ async def list_signal_groups(request: Request) -> dict:
         conn.close()
 
     groups = []
-    for (gid_blob, blocked) in rows:
+    for gid_blob, blocked in rows:
         if not gid_blob:
             continue
         gid_b64 = base64.b64encode(gid_blob).decode("ascii")

@@ -19,6 +19,7 @@ from qwenpaw.app.media_server import MediaServer
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def tmp_media(tmp_path):
     """Create test media files."""
@@ -47,8 +48,8 @@ def server(tmp_media):
 # Auth: /sign requires auth + validates allowed_dirs/ext/size
 # ---------------------------------------------------------------------------
 
-class TestSignAuth:
 
+class TestSignAuth:
     def test_sign_requires_valid_secret(self, server):
         """sign must require auth=media_secret."""
         assert server.secret == "test-secret-12345"
@@ -58,18 +59,36 @@ class TestSignAuth:
     def test_sign_validates_allowed_dirs(self, server, tmp_media):
         """sign must check allowed_dirs before signing."""
         test_file = tmp_media / "test.png"
-        assert test_file.resolve().is_relative_to(Path(str(tmp_media)).resolve())
+        assert test_file.resolve().is_relative_to(
+            Path(str(tmp_media)).resolve(),
+        )
 
         outside = Path("/etc/passwd")
         if outside.exists():
-            assert not outside.resolve().is_relative_to(Path(str(tmp_media)).resolve())
+            assert not outside.resolve().is_relative_to(
+                Path(str(tmp_media)).resolve(),
+            )
 
     def test_sign_rejects_wrong_extension(self, server, tmp_media):
         """sign must reject non-media extensions."""
         media_exts = {
-            ".mp4", ".webm", ".mov", ".avi", ".mkv", ".mpeg",
-            ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
-            ".mp3", ".wav", ".ogg", ".flac", ".m4a",
+            ".mp4",
+            ".webm",
+            ".mov",
+            ".avi",
+            ".mkv",
+            ".mpeg",
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".gif",
+            ".webp",
+            ".bmp",
+            ".mp3",
+            ".wav",
+            ".ogg",
+            ".flac",
+            ".m4a",
         }
         txt = tmp_media / "secret.txt"
         assert txt.suffix.lower() not in media_exts
@@ -84,8 +103,8 @@ class TestSignAuth:
 # Localhost URL rejection
 # ---------------------------------------------------------------------------
 
-class TestLocalhostUrlRejection:
 
+class TestLocalhostUrlRejection:
     def test_localhost_url_detected(self):
         localhost_urls = [
             "http://localhost:8089/media?t=abc&sig=def",
@@ -102,13 +121,17 @@ class TestLocalhostUrlRejection:
     def test_empty_tunnel_domain_triggers_fallback(self):
         tunnel_domain = ""
         url = "http://localhost:8089/media?t=abc"
-        should_fallback = ("localhost" in url or "127.0.0.1" in url) and not tunnel_domain
+        should_fallback = (
+            "localhost" in url or "127.0.0.1" in url
+        ) and not tunnel_domain
         assert should_fallback is True
 
     def test_configured_tunnel_domain_no_fallback(self):
         tunnel_domain = "https://media.example.com"
         url = "https://media.example.com/media?t=abc"
-        should_fallback = ("localhost" in url or "127.0.0.1" in url) and not tunnel_domain
+        should_fallback = (
+            "localhost" in url or "127.0.0.1" in url
+        ) and not tunnel_domain
         assert should_fallback is False
 
 
@@ -116,8 +139,8 @@ class TestLocalhostUrlRejection:
 # Opaque tokens (no path leakage)
 # ---------------------------------------------------------------------------
 
-class TestOpaqueTokens:
 
+class TestOpaqueTokens:
     def test_token_store_maps_token_to_path(self, server, tmp_media):
         """token_store should map opaque token to real path."""
         token = secrets.token_urlsafe(24)
@@ -133,9 +156,13 @@ class TestOpaqueTokens:
     def test_token_is_opaque(self, server):
         """token must not contain decodable path info."""
         import base64
+
         token = secrets.token_urlsafe(24)
         try:
-            decoded = base64.urlsafe_b64decode(token + "==").decode("utf-8", errors="ignore")
+            decoded = base64.urlsafe_b64decode(token + "==").decode(
+                "utf-8",
+                errors="ignore",
+            )
         except Exception:
             decoded = ""
         assert "/tmp" not in decoded
@@ -143,8 +170,14 @@ class TestOpaqueTokens:
 
     def test_expired_tokens_cleaned_up(self, server):
         """_cleanup_expired_tokens removes old entries."""
-        server._token_store["old_token"] = ("/tmp/old.mp4", int(time.time()) - 100)
-        server._token_store["new_token"] = ("/tmp/new.mp4", int(time.time()) + 3600)
+        server._token_store["old_token"] = (
+            "/tmp/old.mp4",
+            int(time.time()) - 100,
+        )
+        server._token_store["new_token"] = (
+            "/tmp/new.mp4",
+            int(time.time()) + 3600,
+        )
 
         server._cleanup_expired_tokens()
 
@@ -161,8 +194,8 @@ class TestOpaqueTokens:
 # HMAC signature tests
 # ---------------------------------------------------------------------------
 
-class TestHMACSignature:
 
+class TestHMACSignature:
     def test_signature_is_32_chars(self, server):
         sig = server._sign("/tmp/test.mp4", 9999999999)
         assert len(sig) == 32
@@ -175,7 +208,11 @@ class TestHMACSignature:
         assert server._verify(path, expires, sig)
 
     def test_verify_wrong_signature_rejected(self, server):
-        assert not server._verify("/tmp/test.mp4", int(time.time()) + 3600, "wrong" * 8)
+        assert not server._verify(
+            "/tmp/test.mp4",
+            int(time.time()) + 3600,
+            "wrong" * 8,
+        )
 
     def test_verify_expired_rejected(self, server):
         path = "/tmp/test.mp4"
@@ -194,8 +231,8 @@ class TestHMACSignature:
 # Path validation (symlink protection)
 # ---------------------------------------------------------------------------
 
-class TestPathValidation:
 
+class TestPathValidation:
     def test_relative_to_catches_outside_path(self, server, tmp_media):
         allowed = Path(str(tmp_media)).resolve()
         outside = Path("/etc/passwd").resolve()
@@ -224,8 +261,8 @@ class TestPathValidation:
 # Global server lifecycle
 # ---------------------------------------------------------------------------
 
-class TestGlobalServerLifecycle:
 
+class TestGlobalServerLifecycle:
     @pytest.mark.asyncio
     async def test_start_sets_runtime_secret(self, tmp_path):
         """start() must set _runtime_secret."""
@@ -267,10 +304,14 @@ class TestGlobalServerLifecycle:
         # Simulate what start() does: generate secret if empty
         if not srv.secret:
             import secrets as _secrets
+
             srv.secret = _secrets.token_hex(32)
         from qwenpaw.app import media_server as ms_mod
+
         ms_mod._runtime_secret = srv.secret
-        assert len(ms_mod._runtime_secret) == 64  # token_hex(32) -> 64 hex chars
+        assert (
+            len(ms_mod._runtime_secret) == 64
+        )  # token_hex(32) -> 64 hex chars
         assert srv.secret == ms_mod._runtime_secret
         # Cleanup
         ms_mod._runtime_secret = ""
@@ -279,6 +320,7 @@ class TestGlobalServerLifecycle:
 # ---------------------------------------------------------------------------
 # Cloudflare Quick Tunnel integration
 # ---------------------------------------------------------------------------
+
 
 class TestCloudflareTunnelIntegration:
     """MediaServer should drive a CloudflareTunnelDriver per tunnel_mode.

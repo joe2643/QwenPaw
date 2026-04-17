@@ -21,6 +21,7 @@ if Path(_JOE_FAEX1_MEMPALACE).is_dir():
 try:
     from mempalace.config import MempalaceConfig  # noqa: E402
     from mempalace.chroma_helper import get_collection  # noqa: E402
+
     _MEMPALACE_AVAILABLE = True
 except ImportError:
     MempalaceConfig = None  # type: ignore[assignment,misc]
@@ -47,7 +48,7 @@ def _require_mempalace() -> None:
             status_code=503,
             detail=(
                 "mempalace package not installed in this environment. "
-                "The MemPalace router is only functional on the joe-faex1 host."
+                "The MemPalace router is only functional on joe-faex1."
             ),
         )
 
@@ -66,6 +67,7 @@ def _kg_connection() -> sqlite3.Connection:
 
 
 # ── Pydantic models ──────────────────────────────────────────────────
+
 
 class RoomInfo(BaseModel):
     name: str
@@ -116,6 +118,7 @@ class KGTriple(BaseModel):
 
 # ── 1. GET /mempalace/status ─────────────────────────────────────────
 
+
 @router.get("/status", summary="Palace statistics")
 async def palace_status() -> Dict[str, Any]:
     col = _get_collection()
@@ -123,8 +126,10 @@ async def palace_status() -> Dict[str, Any]:
 
     # Fetch all metadata to group by wing/room
     all_data = col.get(include=["metadatas"])
-    wing_room_counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    for meta in (all_data.get("metadatas") or []):
+    wing_room_counts: Dict[str, Dict[str, int]] = defaultdict(
+        lambda: defaultdict(int),
+    )
+    for meta in all_data.get("metadatas") or []:
         wing = (meta or {}).get("wing", "unknown")
         room = (meta or {}).get("room", "unknown")
         wing_room_counts[wing][room] += 1
@@ -145,22 +150,23 @@ async def palace_status() -> Dict[str, Any]:
 
     return {
         "total_drawers": total,
-        "wings": {
-            w: dict(rooms) for w, rooms in wing_room_counts.items()
-        },
+        "wings": {w: dict(rooms) for w, rooms in wing_room_counts.items()},
         "kg": kg,
     }
 
 
 # ── 2. GET /mempalace/wings ──────────────────────────────────────────
 
+
 @router.get("/wings", summary="List wings with room counts")
 async def list_wings() -> Dict[str, List[WingInfo]]:
     col = _get_collection()
     all_data = col.get(include=["metadatas"])
 
-    wing_room_counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    for meta in (all_data.get("metadatas") or []):
+    wing_room_counts: Dict[str, Dict[str, int]] = defaultdict(
+        lambda: defaultdict(int),
+    )
+    for meta in all_data.get("metadatas") or []:
         wing = (meta or {}).get("wing", "unknown")
         room = (meta or {}).get("room", "unknown")
         wing_room_counts[wing][room] += 1
@@ -177,6 +183,7 @@ async def list_wings() -> Dict[str, List[WingInfo]]:
 
 
 # ── 3. GET /mempalace/wings/{wing}/rooms/{room} ─────────────────────
+
 
 @router.get(
     "/wings/{wing}/rooms/{room}",
@@ -201,17 +208,19 @@ async def list_drawers_in_room(
         m = meta or {}
         if m.get("wing") == wing and m.get("room") == room:
             doc = (documents[i] if i < len(documents) else "") or ""
-            matched.append(DrawerPreview(
-                id=ids[i],
-                content_preview=doc[:200],
-                metadata=m,
-                filed_at=m.get("filed_at"),
-            ))
+            matched.append(
+                DrawerPreview(
+                    id=ids[i],
+                    content_preview=doc[:200],
+                    metadata=m,
+                    filed_at=m.get("filed_at"),
+                ),
+            )
 
     # Sort by filed_at descending (newest first)
     matched.sort(key=lambda d: d.filed_at or "", reverse=True)
 
-    page = matched[offset: offset + limit]
+    page = matched[offset : offset + limit]
     return {
         "wing": wing,
         "room": room,
@@ -223,6 +232,7 @@ async def list_drawers_in_room(
 
 
 # ── 4. GET /mempalace/drawer/{drawer_id} ─────────────────────────────
+
 
 @router.get("/drawer/{drawer_id}", summary="Full drawer content + metadata")
 async def get_drawer(drawer_id: str) -> DrawerFull:
@@ -240,6 +250,7 @@ async def get_drawer(drawer_id: str) -> DrawerFull:
 
 # ── 5. PUT /mempalace/drawer/{drawer_id} ─────────────────────────────
 
+
 @router.put("/drawer/{drawer_id}", summary="Update drawer metadata")
 async def update_drawer(
     drawer_id: str,
@@ -252,7 +263,9 @@ async def update_drawer(
     if not existing.get("ids"):
         raise HTTPException(404, detail=f"Drawer '{drawer_id}' not found")
 
-    meta = dict((existing["metadatas"][0] if existing.get("metadatas") else {}) or {})
+    meta = dict(
+        (existing["metadatas"][0] if existing.get("metadatas") else {}) or {},
+    )
     updates = body.model_dump(exclude_unset=True)
     meta.update(updates)
 
@@ -261,6 +274,7 @@ async def update_drawer(
 
 
 # ── 6. DELETE /mempalace/drawer/{drawer_id} ──────────────────────────
+
 
 @router.delete("/drawer/{drawer_id}", summary="Delete a drawer")
 async def delete_drawer(drawer_id: str) -> Dict[str, str]:
@@ -275,6 +289,7 @@ async def delete_drawer(drawer_id: str) -> Dict[str, str]:
 
 
 # ── 7. GET /mempalace/kg/stats ───────────────────────────────────────
+
 
 @router.get("/kg/stats", summary="KG entity + triple counts")
 async def kg_stats() -> KGStats:
@@ -291,6 +306,7 @@ async def kg_stats() -> KGStats:
 
 
 # ── 8. GET /mempalace/kg/entities ────────────────────────────────────
+
 
 @router.get("/kg/entities", summary="List KG entities (paginated)")
 async def kg_entities(
@@ -322,6 +338,7 @@ async def kg_entities(
 
 # ── 9. GET /mempalace/kg/triples ────────────────────────────────────
 
+
 @router.get("/kg/triples", summary="List KG triples (paginated)")
 async def kg_triples(
     offset: int = Query(0, ge=0),
@@ -346,13 +363,19 @@ async def kg_triples(
         "offset": offset,
         "limit": limit,
         "triples": [
-            KGTriple(id=r[0], subject=r[1], predicate=r[2], object=r[3]).model_dump()
+            KGTriple(
+                id=r[0],
+                subject=r[1],
+                predicate=r[2],
+                object=r[3],
+            ).model_dump()
             for r in rows
         ],
     }
 
 
 # ── 10. GET /mempalace/hooks/log ─────────────────────────────────────
+
 
 @router.get("/hooks/log", summary="Tail hook.log")
 async def hooks_log(

@@ -140,7 +140,8 @@ class CloudflareTunnelDriver:
         self._info = TunnelInfo(
             public_url=url,
             public_wss_url=url.replace("https://", "wss://").replace(
-                "http://", "ws://",
+                "http://",
+                "ws://",
             ),
             started_at=datetime.now(timezone.utc),
             pid=self._process.pid,
@@ -158,8 +159,10 @@ class CloudflareTunnelDriver:
         """Build the cloudflared argv for the current mode."""
         if self._mode == "quick":
             return [
-                binary, "tunnel",
-                "--url", f"http://localhost:{local_port}",
+                binary,
+                "tunnel",
+                "--url",
+                f"http://localhost:{local_port}",
             ]
         # Named tunnel: pass --url so all ingress goes to MediaServer
         # regardless of what the user's config.yml / dashboard ingress says.
@@ -169,7 +172,8 @@ class CloudflareTunnelDriver:
             cmd += ["--config", self._config_file]
         cmd += [
             "run",
-            "--url", f"http://localhost:{local_port}",
+            "--url",
+            f"http://localhost:{local_port}",
             self._tunnel_name,
         ]
         return cmd
