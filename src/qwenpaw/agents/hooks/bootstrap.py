@@ -72,29 +72,39 @@ class BootstrapHook:
                     try:
                         result = subprocess.run(
                             ["python3", "-m", "mempalace", "wake-up"],
-                            capture_output=True, text=True, timeout=15,
+                            capture_output=True,
+                            text=True,
+                            timeout=15,
                         )
                         if result.returncode != 0 or not result.stdout.strip():
                             return None
                         lines = result.stdout.strip().split("\n")
                         wakeup = "\n".join(
-                            l for l in lines
-                            if not l.startswith("Wake-up text") and not l.startswith("===")
+                            line
+                            for line in lines
+                            if not line.startswith("Wake-up text")
+                            and not line.startswith("===")
                         ).strip()
                         if not wakeup or len(wakeup) <= 50:
                             return None
                         return "\n\n## MemPalace Wake-up Context\n" + wakeup
                     except Exception as _e:
-                        logger.warning("MemPalace wake-up fetch failed: %s", _e)
+                        logger.warning(
+                            "MemPalace wake-up fetch failed: %s",
+                            _e,
+                        )
                         return None
 
                 def _log_wakeup(reason: str, length: int):
                     try:
                         from datetime import datetime
+
                         log_path = Path.home() / ".mempalace" / "hook.log"
                         with open(log_path, "a") as f:
                             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            f.write(f"{ts} | INFO | Bootstrap: wake-up {reason} ({length} chars)\n")
+                            f.write(
+                                f"{ts} | INFO | Bootstrap: wake-up {reason} ({length} chars)\n",  # noqa: E501
+                            )
                     except Exception:
                         pass
 
@@ -102,12 +112,20 @@ class BootstrapHook:
                 current_summary = ""
                 try:
                     if hasattr(agent.memory, "get_compressed_summary"):
-                        current_summary = agent.memory.get_compressed_summary() or ""
+                        current_summary = (
+                            agent.memory.get_compressed_summary() or ""
+                        )
                 except Exception:
                     pass
-                summary_marker = hash(current_summary) if current_summary else 0
+                summary_marker = (
+                    hash(current_summary) if current_summary else 0
+                )
 
-                first_time = not getattr(agent, "_mempalace_wakeup_patched", False)
+                first_time = not getattr(
+                    agent,
+                    "_mempalace_wakeup_patched",
+                    False,
+                )
                 last_marker = getattr(agent, "_mempalace_summary_marker", None)
                 summary_changed = (
                     not first_time
@@ -119,16 +137,19 @@ class BootstrapHook:
                     wakeup_block = _fetch_wakeup_block()
                     if wakeup_block:
                         # Build a closure that holds the LATEST wakeup block.
-                        # We mutate a list cell so future refreshes can update it
+                        # We mutate a list cell so future refreshes can update it  # noqa: E501
                         # without re-monkey-patching.
                         if first_time:
                             wakeup_cell = [wakeup_block]
                             agent._mempalace_wakeup_cell = wakeup_cell
                             original_build = agent._build_sys_prompt
 
-                            def _patched_build_sys_prompt(_orig=original_build, _cell=wakeup_cell):
+                            def _patched_build_sys_prompt(
+                                _orig=original_build,
+                                _cell=wakeup_cell,
+                            ):
                                 base = _orig()
-                                # Strip any previous wake-up block before appending fresh one
+                                # Strip any previous wake-up block before appending fresh one  # noqa: E501
                                 marker = "\n\n## MemPalace Wake-up Context\n"
                                 if marker in base:
                                     base = base.split(marker, 1)[0]
@@ -143,11 +164,21 @@ class BootstrapHook:
                         agent.rebuild_sys_prompt()
                         agent._mempalace_summary_marker = summary_marker
 
-                        reason = "injected into sys_prompt" if first_time else "refreshed after compaction"
-                        logger.info("MemPalace wake-up %s (%d chars)", reason, len(wakeup_block))
+                        reason = (
+                            "injected into sys_prompt"
+                            if first_time
+                            else "refreshed after compaction"
+                        )
+                        logger.info(
+                            "MemPalace wake-up %s (%d chars)",
+                            reason,
+                            len(wakeup_block),
+                        )
                         _log_wakeup(reason, len(wakeup_block))
                     elif first_time:
-                        logger.warning("MemPalace wake-up: fetch returned nothing")
+                        logger.warning(
+                            "MemPalace wake-up: fetch returned nothing",
+                        )
                 else:
                     # Steady state — keep tracking the marker
                     if first_time is False and last_marker is None:
@@ -158,13 +189,13 @@ class BootstrapHook:
             # Check WAL for crash recovery (runs every session, not just first)
             try:
                 from .tool_wal import SessionWAL
+
                 crash_report = SessionWAL.get_crash_report(self.working_dir)
                 if crash_report:
                     logger.warning(f"WAL crash detected: {crash_report[:200]}")
                     messages = await agent.memory.get_memory()
                     for msg in messages:
-                        if getattr(msg, 'role', None) == 'user':
-                            from ..prompt import prepend_to_message_content
+                        if getattr(msg, "role", None) == "user":
                             prepend_to_message_content(msg, crash_report)
                             break
             except Exception as e:

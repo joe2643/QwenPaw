@@ -61,7 +61,6 @@ class MemoryCompactionHook:
         )
         await agent.print(msg)
 
-
     @staticmethod
     def _compact_media_blocks(
         messages: list[Msg],
@@ -92,16 +91,26 @@ class MemoryCompactionHook:
 
             new_content = []
             for block in content:
-                block_type = block.get("type") if isinstance(block, dict) else None
+                block_type = (
+                    block.get("type") if isinstance(block, dict) else None
+                )
                 if block_type in ("video", "image"):
                     media_type = "Video" if block_type == "video" else "Image"
                     source = block.get("source", {})
-                    url = source.get("url", "unknown") if isinstance(source, dict) else "unknown"
+                    url = (
+                        source.get("url", "unknown")
+                        if isinstance(source, dict)
+                        else "unknown"
+                    )
                     fpath = str(url) if url != "unknown" else "unknown"
-                    fname = os.path.basename(fpath) if fpath != "unknown" else "unknown"
+                    fname = (
+                        os.path.basename(fpath)
+                        if fpath != "unknown"
+                        else "unknown"
+                    )
                     placeholder = TextBlock(
                         type="text",
-                        text=f"[{media_type} was viewed: {fname} — removed from context to save tokens]",
+                        text=f"[{media_type} was viewed: {fname} — removed from context to save tokens]",  # noqa: E501
                     )
                     new_content.append(placeholder)
                     replaced += 1
@@ -112,7 +121,9 @@ class MemoryCompactionHook:
                 msg.content = new_content
 
         if replaced:
-            logger.info(f"Media compaction: replaced {replaced} media blocks with text placeholders")
+            logger.info(
+                f"Media compaction: replaced {replaced} media blocks with text placeholders",  # noqa: E501
+            )
         return replaced
 
     # pylint: disable=too-many-branches
