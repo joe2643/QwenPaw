@@ -26,6 +26,7 @@ import {
   SparkModifyLine,
   SparkBrowseLine,
   SparkMcpMcpLine,
+  SparkScanLine,
   SparkToolLine,
   SparkDataLine,
   SparkMicLine,
@@ -35,6 +36,9 @@ import {
   SparkMenuExpandLine,
   SparkMenuFoldLine,
   SparkOtherLine,
+  SparkBarChartLine,
+  SparkDebugLine,
+  SparkSaveLine,
 } from "@agentscope-ai/icons";
 import { clearAuthToken } from "../api/config";
 import { authApi } from "../api/modules/auth";
@@ -165,12 +169,6 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       label: t("nav.heartbeat"),
     },
     {
-      key: "media-server",
-      icon: <SparkDataLine size={18} />,
-      path: "/media-server",
-      label: t("nav.mediaServer"),
-    },
-    {
       key: "workspace",
       icon: <SparkLocalFileLine size={18} />,
       path: "/workspace",
@@ -201,10 +199,10 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       label: t("nav.mcp"),
     },
     {
-      key: "mempalace",
-      icon: <SparkDataLine size={18} />,
-      path: "/mempalace",
-      label: t("nav.mempalace", "MemPalace"),
+      key: "acp",
+      icon: <SparkScanLine size={18} />,
+      path: "/acp",
+      label: t("nav.acp"),
     },
     {
       key: "agent-config",
@@ -243,6 +241,18 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       label: t("nav.tokenUsage"),
     },
     {
+      key: "agent-stats",
+      icon: <SparkBarChartLine size={18} />,
+      path: "/agent-stats",
+      label: t("nav.agentStats"),
+    },
+    {
+      key: "backups",
+      icon: <SparkSaveLine size={18} />,
+      path: "/backups",
+      label: t("nav.backups"),
+    },
+    {
       key: "voice-transcription",
       icon: <SparkMicLine size={18} />,
       path: "/voice-transcription",
@@ -250,7 +260,7 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
     },
     {
       key: "debug",
-      icon: <SparkOtherLine size={18} />,
+      icon: <SparkDebugLine size={18} />,
       path: "/debug",
       label: t("nav.debug", "Debug"),
     },
@@ -295,11 +305,6 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           label: collapsed ? null : t("nav.heartbeat"),
           icon: <SparkVoiceChat01Line size={16} />,
         },
-        {
-          key: "media-server",
-          label: collapsed ? null : t("nav.mediaServer"),
-          icon: <SparkDataLine size={16} />,
-        },
       ],
     },
     {
@@ -325,6 +330,11 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           key: "mcp",
           label: collapsed ? null : t("nav.mcp"),
           icon: <SparkMcpMcpLine size={16} />,
+        },
+        {
+          key: "acp",
+          label: collapsed ? null : t("nav.acp"),
+          icon: <SparkScanLine size={16} />,
         },
         {
           key: "agent-config",
@@ -368,14 +378,19 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           icon: <SparkBrowseLine size={16} />,
         },
         {
-          key: "mempalace",
-          label: collapsed ? null : t("nav.mempalace", "MemPalace"),
-          icon: <SparkDataLine size={16} />,
-        },
-        {
           key: "token-usage",
           label: collapsed ? null : t("nav.tokenUsage"),
           icon: <SparkDataLine size={16} />,
+        },
+        {
+          key: "agent-stats",
+          label: collapsed ? null : t("nav.agentStats"),
+          icon: <SparkBarChartLine size={16} />,
+        },
+        {
+          key: "backups",
+          label: collapsed ? null : t("nav.backups"),
+          icon: <SparkSaveLine size={16} />,
         },
         {
           key: "voice-transcription",
@@ -385,7 +400,7 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
         {
           key: "debug",
           label: collapsed ? null : t("nav.debug", "Debug"),
-          icon: <SparkOtherLine size={16} />,
+          icon: <SparkDebugLine size={16} />,
         },
       ],
     },

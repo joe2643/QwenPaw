@@ -18,6 +18,7 @@ import { useChannelQrcode } from "./useChannelQrcode";
 import { api } from "../../../../api";
 import styles from "../index.module.less";
 import { useTheme } from "../../../../contexts/ThemeContext";
+import { useAgentStore } from "../../../../stores/agentStore";
 
 const CHANNELS_WITH_ACCESS_CONTROL: ChannelKey[] = [
   "telegram",
@@ -117,6 +118,11 @@ export function ChannelDrawer({
 }: ChannelDrawerProps) {
   const { t, i18n } = useTranslation();
   const { isDark } = useTheme();
+  const { selectedAgent, agents } = useAgentStore();
+  const currentAgent = agents.find((a) => a.id === selectedAgent);
+  const defaultMediaDir = currentAgent?.workspace_dir
+    ? `${currentAgent.workspace_dir}/media`
+    : "~/.qwenpaw/media";
   const currentLang = i18n.language?.startsWith("zh") ? "zh" : "en";
   const label = activeKey ? getChannelLabel(activeKey, t) : activeLabel;
   const { message } = useAppMessage();
@@ -727,6 +733,14 @@ export function ChannelDrawer({
                 );
               }}
             </Form.Item>
+            <Form.Item
+              name="at_sender_on_reply"
+              label={t("channels.atSenderOnReply")}
+              tooltip={t("channels.atSenderOnReplyTooltip")}
+              valuePropName="checked"
+            >
+              <Switch />
+            </Form.Item>
           </>
         );
 
@@ -769,7 +783,7 @@ export function ChannelDrawer({
               <Input placeholder="Optional" />
             </Form.Item>
             <Form.Item name="media_dir" label={t("channels.weixinMediaDir")}>
-              <Input placeholder="~/.qwenpaw/media" />
+              <Input placeholder={defaultMediaDir} />
             </Form.Item>
           </>
         );
@@ -946,7 +960,7 @@ export function ChannelDrawer({
               <Input.Password placeholder="Mattermost bot token" />
             </Form.Item>
             <Form.Item name="media_dir" label={t("channels.weixinMediaDir")}>
-              <Input placeholder="~/.qwenpaw/media/mattermost" />
+              <Input placeholder={defaultMediaDir} />
             </Form.Item>
             <Form.Item
               name="show_typing"
@@ -1082,7 +1096,7 @@ export function ChannelDrawer({
               <Input.Password placeholder="Secret from WeCom backend" />
             </Form.Item>
             <Form.Item name="media_dir" label={t("channels.weixinMediaDir")}>
-              <Input placeholder="~/.qwenpaw/media" />
+              <Input placeholder={defaultMediaDir} />
             </Form.Item>
             <Form.Item
               name="welcome_text"
@@ -1201,7 +1215,7 @@ export function ChannelDrawer({
               <Input placeholder="~/.qwenpaw/weixin_bot_token" />
             </Form.Item>
             <Form.Item name="media_dir" label={t("channels.weixinMediaDir")}>
-              <Input placeholder="~/.qwenpaw/media" />
+              <Input placeholder={defaultMediaDir} />
             </Form.Item>
           </>
         );

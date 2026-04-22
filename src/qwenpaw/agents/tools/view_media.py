@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """Load image or video files into the LLM context for analysis."""
 
-import asyncio
-import base64
+import logging
 import mimetypes
 import os
 import unicodedata
@@ -12,6 +11,8 @@ from typing import Optional
 
 from agentscope.message import ImageBlock, TextBlock, VideoBlock
 from agentscope.tool import ToolResponse
+
+logger = logging.getLogger(__name__)
 
 _IMAGE_EXTENSIONS = {
     ".png",
@@ -115,276 +116,182 @@ def _validate_media_path(
     return resolved, None
 
 
-# ---------------------------------------------------------------------------
-# Media-server configuration
-# Priority: agent running config > env vars > defaults
-# ---------------------------------------------------------------------------
+async def _probe_multimodal_if_needed(
+    media_type: str = "image",
+) -> bool | None:
+    """Trigger a multimodal probe if capability is unknown (None).
 
-_DEFAULT_MEDIA_SERVER_URL = "http://localhost:8089"
-_DEFAULT_MEDIA_TUNNEL_DOMAIN = ""
-_DEFAULT_MEDIA_SECRET = ""
-_DEFAULT_MAX_SIZE_MB = 100
-_DEFAULT_MEDIA_ENABLED = False
+    For ``image``: runs an image-only probe (~3s) and fires the full
+    probe (image + video) as a background task so video support is
+    persisted without blocking the caller.
 
+    For ``video``: runs the full probe and waits for the video result,
+    since video support cannot be inferred from the image probe alone.
 
-def _get_media_config() -> dict:
-    """Load media server config from global config, env vars, or defaults."""
-    cfg = {
-        "enabled": _DEFAULT_MEDIA_ENABLED,
-        "server_url": _DEFAULT_MEDIA_SERVER_URL,
-        "tunnel_domain": _DEFAULT_MEDIA_TUNNEL_DOMAIN,
-        "media_secret": _DEFAULT_MEDIA_SECRET,
-        "max_size_mb": _DEFAULT_MAX_SIZE_MB,
-    }
+    Uses the same agent-specific model resolution as
+    ``_get_active_model_info`` so that per-agent model overrides are
+    respected.
 
-    # Try loading from global (root) config
-    try:
-        from ...config.utils import load_config
-
-        root = load_config()
-        ms = root.media_server
-        if ms.enabled:
-            cfg["enabled"] = True
-        if ms.server_url:
-            cfg["server_url"] = ms.server_url
-        if ms.tunnel_domain:
-            cfg["tunnel_domain"] = ms.tunnel_domain
-        if ms.media_secret:
-            cfg["media_secret"] = ms.media_secret
-        if ms.max_size_mb:
-            cfg["max_size_mb"] = ms.max_size_mb
-    except Exception:
-        pass
-
-    # Fall back to env vars for any values still at defaults
-    env_server = os.environ.get("QWENPAW_MEDIA_SERVER")
-    env_domain = os.environ.get("QWENPAW_MEDIA_DOMAIN")
-    env_secret = os.environ.get("QWENPAW_MEDIA_SECRET")
-    env_max_mb = os.environ.get("QWENPAW_MEDIA_MAX_SIZE_MB")
-    env_enabled = os.environ.get("QWENPAW_MEDIA_ENABLED")
-
-    if env_server and not cfg["server_url"]:
-        cfg["server_url"] = env_server
-    if env_domain and not cfg["tunnel_domain"]:
-        cfg["tunnel_domain"] = env_domain
-    if env_secret and not cfg["media_secret"]:
-        cfg["media_secret"] = env_secret
-    if env_max_mb:
-        try:
-            cfg["max_size_mb"] = int(env_max_mb)
-        except ValueError:
-            pass
-    if env_enabled is not None:
-        cfg["enabled"] = env_enabled.lower() in ("1", "true", "yes")
-
-    # If media_secret is still empty, check the runtime secret from MediaServer.  # noqa: E501
-    if not cfg["media_secret"]:
-        try:
-            from ...app.media_server import _runtime_secret
-
-            if _runtime_secret:
-                cfg["media_secret"] = _runtime_secret
-        except ImportError:
-            pass
-
-    return cfg
-
-
-async def _get_signed_url(resolved: Path) -> str:
-    """Get a signed public URL for a local media file via the media server.
-
-    Falls back to base64 if media server is unavailable.
+    Returns the probe result (True/False) for the requested media type,
+    or None if no probe was needed or the probe failed.
     """
-    import urllib.request
-    import json as _json
-
-    media_cfg = _get_media_config()
-    max_size = media_cfg["max_size_mb"] * 1024 * 1024
-
-    size = resolved.stat().st_size
-    if size > max_size:
-        raise ValueError(
-            f"{resolved.name} is {size / 1e6:.1f}MB, exceeds "
-            f"{media_cfg['max_size_mb']}MB limit. "
-            f"Compress first: ffmpeg -i {resolved} -vf scale=-2:480 -b:v 1M small.mp4",  # noqa: E501
-        )
-
-    if not media_cfg["enabled"]:
-        return None
-
-    try:
-        import asyncio
-        from urllib.parse import quote as _quote
-
-        auth_token = _quote(media_cfg["media_secret"], safe="")
-        url = (
-            f"{media_cfg['server_url']}/sign"
-            f"?path={_quote(str(resolved), safe='')}"
-            f"&ttl=86400&auth={auth_token}"
-        )
-
-        # MUST use to_thread — media server runs on the same event loop,
-        # so blocking urllib would deadlock.
-        def _fetch():
-            return urllib.request.urlopen(url, timeout=5).read()
-
-        raw = await asyncio.to_thread(_fetch)
-        data = _json.loads(raw)
-        signed = data["url"]
-        # Don't return localhost URLs for remote providers (Finding 2)
-        if "localhost" in signed or "127.0.0.1" in signed:
-            if not media_cfg.get("tunnel_domain"):
-                import logging
-
-                logging.getLogger(__name__).warning(
-                    "view_media: media server returned localhost URL but no tunnel_domain configured — falling back",  # noqa: E501
-                )
-                return None
-        # If tunnel domain is set, rewrite URL to use public domain
-        if media_cfg["tunnel_domain"]:
-            from urllib.parse import urlparse, urlunparse
-
-            parsed = urlparse(signed)
-            tunnel = urlparse(media_cfg["tunnel_domain"])
-            signed = urlunparse(
-                parsed._replace(
-                    scheme=tunnel.scheme or "https",
-                    netloc=tunnel.netloc,
-                ),
-            )
-        return signed
-    except Exception as e:
-        import logging
-
-        logging.getLogger(__name__).warning(
-            "view_media: _get_signed_url failed: %s (server_url=%s, file=%s)",
-            e,
-            media_cfg["server_url"],
-            resolved.name,
-        )
-        return None
-
-
-def _local_to_base64_source(resolved: Path, mime_prefix: str) -> dict:
-    """Fallback: convert local file to base64 source dict."""
-    data = resolved.read_bytes()
-    b64 = base64.b64encode(data).decode("ascii")
-    mime, _ = mimetypes.guess_type(str(resolved))
-    if not mime:
-        ext = resolved.suffix.lower()
-        mime = f"{mime_prefix}/{ext.lstrip('.')}"
-    return {"type": "base64", "media_type": mime, "data": b64}
-
-
-async def _resolve_media_source(resolved: Path, mime_prefix: str) -> dict:
-    """Get media source — prefer signed URL, fallback to base64 for images only.  # noqa: E501
-
-    Videos never use base64 (too large, blows up context). Instead extract
-    keyframes and return as images.
-    """
-    signed_url = await _get_signed_url(resolved)
-    if signed_url:
-        return {"type": "url", "url": signed_url}
-    # For images: base64 is fine (usually < 5MB)
-    if mime_prefix == "image":
-        return _local_to_base64_source(resolved, mime_prefix)
-    # For videos: no base64 fallback
-    return None
-
-
-def _extract_keyframes(resolved: Path, max_frames: int = 4) -> list:
-    """Extract keyframes from video using ffmpeg.
-
-    Returns list of (ImageBlock, TextBlock) pairs for each frame.
-    """
-    import subprocess
-    import tempfile
-
-    duration_cmd = [
-        "ffprobe",
-        "-v",
-        "quiet",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "csv=p=0",
-        str(resolved),
-    ]
-    try:
-        duration = float(
-            subprocess.check_output(duration_cmd, timeout=5).decode().strip(),
-        )
-    except Exception:
-        duration = 60.0  # assume 1 min if probe fails
-
-    # Extract frames at evenly spaced intervals
-    interval = max(duration / (max_frames + 1), 1.0)
-    frames = []
-    tmpdir = tempfile.mkdtemp(prefix="qwenpaw_frames_")
-
-    for i in range(max_frames):
-        ts = interval * (i + 1)
-        if ts >= duration:
-            break
-        out_path = Path(tmpdir) / f"frame_{i:02d}.jpg"
-        cmd = [
-            "ffmpeg",
-            "-ss",
-            f"{ts:.1f}",
-            "-i",
-            str(resolved),
-            "-vframes",
-            "1",
-            "-vf",
-            "scale=480:-1",
-            "-q:v",
-            "8",
-            "-y",
-            str(out_path),
-        ]
-        try:
-            subprocess.run(cmd, capture_output=True, timeout=10)
-            if out_path.exists():
-                frames.append((out_path, f"{ts:.1f}s"))
-        except Exception:
-            pass
-
-    return frames
-
-
-def _model_supports_video() -> bool:
-    """Check if the active LLM model supports video input."""
-    import logging
-
-    _log = logging.getLogger(__name__)
     try:
         from ..prompt import _get_active_model_info
+        from ...providers.provider_manager import ProviderManager
 
-        model_info, model_name = _get_active_model_info()
-        if model_info is None:
-            _log.warning(
-                "view_media: model_info is None, assuming no video support",
+        model_info, _ = _get_active_model_info()
+        if model_info is None or model_info.supports_multimodal is not None:
+            return None
+
+        # Resolve agent-specific active model (mirrors _get_active_model_info)
+        manager = ProviderManager.get_instance()
+        active = None
+        try:
+            from ...app.agent_context import get_current_agent_id
+            from ...config.config import load_agent_config
+
+            agent_id = get_current_agent_id()
+            agent_config = load_agent_config(agent_id)
+            if agent_config.active_model:
+                active = agent_config.active_model
+        except Exception:
+            pass
+        if not active:
+            active = manager.get_active_model()
+        if not active:
+            return None
+
+        if media_type == "image":
+            logger.info(
+                "Multimodal capability unknown for %s/%s — "
+                "running image-only probe...",
+                active.provider_id,
+                active.model,
             )
-            return False
-        result = bool(getattr(model_info, "supports_video", False))
-        _log.info("view_media: model=%s supports_video=%s", model_name, result)
-        return result
+            result = await manager.probe_model_multimodal(
+                active.provider_id,
+                active.model,
+                image_only=True,
+            )
+            supports = result.get("supports_image", False)
+            logger.info(
+                "Image probe completed for %s/%s: supports_image=%s",
+                active.provider_id,
+                active.model,
+                supports,
+            )
+            # Fire full probe in background to persist video support too
+            import asyncio
+
+            asyncio.create_task(
+                manager.probe_model_multimodal(
+                    active.provider_id,
+                    active.model,
+                ),
+            )
+        else:
+            # video: must run full probe to get video result
+            logger.info(
+                "Multimodal capability unknown for %s/%s — "
+                "running full probe for video support...",
+                active.provider_id,
+                active.model,
+            )
+            result = await manager.probe_model_multimodal(
+                active.provider_id,
+                active.model,
+            )
+            supports = result.get("supports_video", False)
+            logger.info(
+                "Full probe completed for %s/%s: supports_video=%s",
+                active.provider_id,
+                active.model,
+                supports,
+            )
+        return supports
     except Exception as e:
-        _log.warning("view_media: _model_supports_video failed: %s", e)
-        return False
+        logger.warning("Auto-probe in view_media failed: %s", e)
+        return None
 
 
-def _model_supports_image() -> bool:
-    """Check if the active LLM model supports image input."""
+def _check_multimodal_support(media_type: str = "image") -> bool:
+    """Check whether the active model supports the given media type (sync).
+
+    For ``image``: returns True when supports_image or supports_multimodal
+    is explicitly True.
+    For ``video``: returns True only when supports_video is explicitly True.
+
+    Returns False for unknown (None) or explicitly unsupported (False).
+    The tool is still *registered*; the async probe path handles the
+    probe-on-demand logic.
+    """
     try:
         from ..prompt import _get_active_model_info
 
         model_info, _ = _get_active_model_info()
         if model_info is None:
-            return True  # assume yes for images (most models do)
-        return bool(getattr(model_info, "supports_image", True))
+            return True
+        if media_type == "video":
+            return model_info.supports_video is True
+        # image: True if supports_image or the combined supports_multimodal
+        return (
+            model_info.supports_image is True
+            or model_info.supports_multimodal is True
+        )
     except Exception:
         return True
+
+
+def _get_multimodal_fallback_hint(media_type: str, path: str) -> str:
+    """Build a text hint for the model when multimodal is not available.
+
+    The actual media block is still included in the response so the
+    frontend/user can see it; the hint tells the agent it cannot perceive
+    the media itself.
+    """
+    try:
+        from ..prompt import get_active_model_multimodal_raw
+
+        raw = get_active_model_multimodal_raw()
+    except Exception:
+        raw = None
+
+    if raw is None:
+        logger.warning(
+            "view_%s was called but multimodal capability has not been "
+            "confirmed for the active model. The %s at '%s' will be "
+            "shown to the user but the model cannot see it. "
+            "To fix, set supports_multimodal=true in provider settings.",
+            media_type,
+            media_type,
+            path,
+        )
+        return (
+            f"[Note: this model does not appear to support multimodal "
+            f"input — no multimodal capability was detected. You cannot "
+            f"see this {media_type}, but it has been shown to the user. "
+            f"Inform the user that you cannot analyze the {media_type} "
+            f"content. If they believe this model supports vision, they "
+            f"can override this in provider settings by setting "
+            f"`supports_multimodal: true`, then retry.]"
+        )
+
+    logger.warning(
+        "view_%s was called but the active model explicitly does not "
+        "support multimodal input. The %s at '%s' will be shown to "
+        "the user but the model cannot see it.",
+        media_type,
+        media_type,
+        path,
+    )
+    return (
+        f"[Note: the current model does not support multimodal input — "
+        f"you cannot see this {media_type}, but it has been shown to "
+        f"the user. Inform the user that you cannot analyze the "
+        f"{media_type} content. If they believe this model actually "
+        f"supports vision, they can override `supports_multimodal: true` "
+        f"in the provider settings, or switch to a vision-capable model.]"
+    )
 
 
 async def view_image(image_path: str) -> ToolResponse:
@@ -395,6 +302,12 @@ async def view_image(image_path: str) -> ToolResponse:
     online images — the URL is passed directly to the model without
     downloading.
 
+    When the model does not support multimodal, the image is still
+    returned (so the user/frontend can see it) along with a text hint
+    telling the agent it cannot perceive the image. The downstream
+    media-stripping pipeline will remove the ImageBlock before sending
+    to the model.
+
     Args:
         image_path (`str`):
             Local path or HTTP(S) URL of the image to view.
@@ -403,6 +316,13 @@ async def view_image(image_path: str) -> ToolResponse:
         `ToolResponse`:
             An ImageBlock the model can inspect, or an error message.
     """
+    # Determine whether we need a fallback hint
+    fallback_hint: str | None = None
+    if not _check_multimodal_support("image"):
+        probe_result = await _probe_multimodal_if_needed("image")
+        if probe_result is not True:
+            fallback_hint = _get_multimodal_fallback_hint("image", image_path)
+
     if _is_url(image_path):
         err = _validate_url_extension(
             image_path,
@@ -411,16 +331,18 @@ async def view_image(image_path: str) -> ToolResponse:
         )
         if err is not None:
             return err
+        text_msg = (
+            fallback_hint
+            if fallback_hint
+            else f"Image loaded from URL: {image_path}"
+        )
         return ToolResponse(
             content=[
                 ImageBlock(
                     type="image",
                     source={"type": "url", "url": image_path},
                 ),
-                TextBlock(
-                    type="text",
-                    text=f"Image loaded from URL: {image_path}",
-                ),
+                TextBlock(type="text", text=text_msg),
             ],
         )
 
@@ -432,16 +354,16 @@ async def view_image(image_path: str) -> ToolResponse:
     if err is not None:
         return err
 
+    text_msg = (
+        fallback_hint if fallback_hint else f"Image loaded: {resolved.name}"
+    )
     return ToolResponse(
         content=[
             ImageBlock(
                 type="image",
-                source=await _resolve_media_source(resolved, "image"),
+                source={"type": "url", "url": str(resolved)},
             ),
-            TextBlock(
-                type="text",
-                text=f"Image loaded: {resolved.name}",
-            ),
+            TextBlock(type="text", text=text_msg),
         ],
     )
 
@@ -453,6 +375,10 @@ async def view_video(video_path: str) -> ToolResponse:
     tool produces a video file path.  Also accepts an HTTP(S) URL —
     the URL is passed directly to the model without downloading.
 
+    When the model does not support multimodal, the video is still
+    returned (so the user/frontend can see it) along with a text hint
+    telling the agent it cannot perceive the video.
+
     Args:
         video_path (`str`):
             Local path or HTTP(S) URL of the video to view.
@@ -461,6 +387,12 @@ async def view_video(video_path: str) -> ToolResponse:
         `ToolResponse`:
             A VideoBlock the model can inspect, or an error message.
     """
+    fallback_hint: str | None = None
+    if not _check_multimodal_support("video"):
+        probe_result = await _probe_multimodal_if_needed("video")
+        if probe_result is not True:
+            fallback_hint = _get_multimodal_fallback_hint("video", video_path)
+
     if _is_url(video_path):
         err = _validate_url_extension(
             video_path,
@@ -469,16 +401,18 @@ async def view_video(video_path: str) -> ToolResponse:
         )
         if err is not None:
             return err
+        text_msg = (
+            fallback_hint
+            if fallback_hint
+            else f"Video loaded from URL: {video_path}"
+        )
         return ToolResponse(
             content=[
                 VideoBlock(
                     type="video",
                     source={"type": "url", "url": video_path},
                 ),
-                TextBlock(
-                    type="text",
-                    text=f"Video loaded from URL: {video_path}",
-                ),
+                TextBlock(type="text", text=text_msg),
             ],
         )
 
@@ -490,133 +424,15 @@ async def view_video(video_path: str) -> ToolResponse:
     if err is not None:
         return err
 
-    # Check if model supports video — if not, always use keyframes
-    if not _model_supports_video():
-        frames = await asyncio.to_thread(_extract_keyframes, resolved)
-        if frames:
-            content = [
-                TextBlock(
-                    type="text",
-                    text=f"Video: {resolved.name} — model does not support video, "  # noqa: E501
-                    f"extracted {len(frames)} keyframes",
-                ),
-            ]
-            for frame_path, timestamp in frames:
-                content.append(
-                    ImageBlock(
-                        type="image",
-                        source=await _resolve_media_source(
-                            frame_path,
-                            "image",
-                        ),
-                    ),
-                )
-                content.append(
-                    TextBlock(type="text", text=f"Frame at {timestamp}"),
-                )
-            return ToolResponse(content=content)
-        return ToolResponse(
-            content=[
-                TextBlock(
-                    type="text",
-                    text=f"Error: Model does not support video and keyframe extraction failed for {resolved.name}.",  # noqa: E501
-                ),
-            ],
-        )
-
-    # Auto-downgrade large videos to keyframes even if model supports video.
-    # LLM API servers have buffer limits (~50MB) and will reject large files.
-    _cfg = _get_media_config()
-    _VIDEO_SIZE_LIMIT = _cfg["max_size_mb"] * 1024 * 1024
-    if resolved.stat().st_size > _VIDEO_SIZE_LIMIT:
-        import logging
-
-        logging.getLogger(__name__).info(
-            "view_media: video %s is %.1fMB (>%dMB), auto-downgrading to keyframes",  # noqa: E501
-            resolved.name,
-            resolved.stat().st_size / 1e6,
-            _VIDEO_SIZE_LIMIT // (1024 * 1024),
-        )
-        frames = await asyncio.to_thread(_extract_keyframes, resolved)
-        if frames:
-            content = [
-                TextBlock(
-                    type="text",
-                    text=f"Video: {resolved.name} — too large for direct API ({resolved.stat().st_size / 1e6:.1f}MB), "  # noqa: E501
-                    f"extracted {len(frames)} keyframes",
-                ),
-            ]
-            for frame_path, timestamp in frames:
-                frame_source = await _resolve_media_source(frame_path, "image")
-                content.append(ImageBlock(type="image", source=frame_source))
-                content.append(
-                    TextBlock(type="text", text=f"Frame at {timestamp}"),
-                )
-            return ToolResponse(content=content)
-
-    source = await _resolve_media_source(resolved, "video")
-    if source is not None:
-        import logging as _log
-
-        _logger = _log.getLogger(__name__)
-        _logger.info(
-            "view_media: VIDEO BLOCK SENT TO LLM — source.type=%s url=%s file=%s size=%s",  # noqa: E501
-            source.get("type", "?"),
-            str(source.get("url", ""))[:200],
-            resolved.name,
-            resolved.stat().st_size,
-        )
-        return ToolResponse(
-            content=[
-                VideoBlock(
-                    type="video",
-                    source=source,
-                ),
-                TextBlock(
-                    type="text",
-                    text=f"Video loaded: {resolved.name}",
-                ),
-            ],
-        )
-
-    # No signed URL available — extract keyframes instead
-    import logging as _log6
-
-    _log6.getLogger(__name__).warning(
-        "view_media: model supports video but media server is off/unreachable "
-        "for %s — falling back to keyframes",
-        resolved.name,
+    text_msg = (
+        fallback_hint if fallback_hint else f"Video loaded: {resolved.name}"
     )
-    frames = await asyncio.to_thread(_extract_keyframes, resolved)
-    if not frames:
-        return ToolResponse(
-            content=[
-                TextBlock(
-                    type="text",
-                    text=f"Error: Cannot serve {resolved.name} — "
-                    "media server not configured and frame extraction failed. "
-                    "Enable media server in Agent Config or compress the video.",  # noqa: E501
-                ),
-            ],
-        )
-
-    content = [
-        TextBlock(
-            type="text",
-            text=f"Video: {resolved.name} ({len(frames)} keyframes extracted)",
-        ),
-    ]
-    for frame_path, timestamp in frames:
-        content.append(
-            ImageBlock(
-                type="image",
-                source=await _resolve_media_source(frame_path, "image"),
+    return ToolResponse(
+        content=[
+            VideoBlock(
+                type="video",
+                source={"type": "url", "url": str(resolved)},
             ),
-        )
-        content.append(
-            TextBlock(
-                type="text",
-                text=f"Frame at {timestamp}",
-            ),
-        )
-    return ToolResponse(content=content)
+            TextBlock(type="text", text=text_msg),
+        ],
+    )

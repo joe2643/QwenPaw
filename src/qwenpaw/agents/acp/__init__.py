@@ -12,20 +12,22 @@ actually run the ACP agent see the ImportError.
 """
 
 from .core import (
-    ACPAgentConfig,
-    ACPConfig,
     ACPConfigurationError,
     ACPProtocolError,
     ACPSessionError,
     ACPTransportError,
     ACPErrors,
-    PermissionResolution,
     SuspendedPermission,
 )
 
 try:
     from .server import QwenPawACPAgent, run_qwenpaw_agent
-    from .service import ACPService, get_acp_service, init_acp_service
+    from .service import (
+        ACPService,
+        close_acp_service,
+        get_acp_service,
+        init_acp_service,
+    )
 
     _ACP_AVAILABLE = True
 except ImportError as _exc:  # pragma: no cover - optional dep
@@ -45,13 +47,11 @@ except ImportError as _exc:  # pragma: no cover - optional dep
     QwenPawACPAgent = _ACPMissing  # type: ignore[assignment,misc]
     run_qwenpaw_agent = _ACPMissing  # type: ignore[assignment]
     ACPService = _ACPMissing  # type: ignore[assignment,misc]
+    close_acp_service = _ACPMissing  # type: ignore[assignment]
     get_acp_service = _ACPMissing  # type: ignore[assignment]
     init_acp_service = _ACPMissing  # type: ignore[assignment]
 
-
 __all__ = [
-    "ACPAgentConfig",
-    "ACPConfig",
     "ACPErrors",
     "ACPConfigurationError",
     "ACPProtocolError",
@@ -59,9 +59,9 @@ __all__ = [
     "ACPTransportError",
     "ACPService",
     "QwenPawACPAgent",
+    "close_acp_service",
     "get_acp_service",
     "init_acp_service",
-    "PermissionResolution",
     "run_qwenpaw_agent",
     "SuspendedPermission",
 ]

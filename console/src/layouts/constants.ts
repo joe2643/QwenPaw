@@ -23,12 +23,11 @@ export const KEY_TO_PATH: Record<string, string> = {
   sessions: "/sessions",
   "cron-jobs": "/cron-jobs",
   heartbeat: "/heartbeat",
-  "media-server": "/media-server",
   skills: "/skills",
   "skill-pool": "/skill-pool",
   tools: "/tools",
   mcp: "/mcp",
-  mempalace: "/mempalace",
+  acp: "/acp",
   workspace: "/workspace",
   agents: "/agents",
   models: "/models",
@@ -36,8 +35,10 @@ export const KEY_TO_PATH: Record<string, string> = {
   "agent-config": "/agent-config",
   security: "/security",
   "token-usage": "/token-usage",
+  "agent-stats": "/agent-stats",
   "voice-transcription": "/voice-transcription",
   debug: "/debug",
+  backups: "/backups",
 };
 
 export const KEY_TO_LABEL: Record<string, string> = {
@@ -46,12 +47,11 @@ export const KEY_TO_LABEL: Record<string, string> = {
   sessions: "nav.sessions",
   "cron-jobs": "nav.cronJobs",
   heartbeat: "nav.heartbeat",
-  "media-server": "nav.mediaServer",
   skills: "nav.skills",
   "skill-pool": "nav.skillPool",
   tools: "nav.tools",
   mcp: "nav.mcp",
-  mempalace: "nav.mempalace",
+  acp: "nav.acp",
   "agent-config": "nav.agentConfig",
   workspace: "nav.workspace",
   models: "nav.models",
@@ -60,6 +60,7 @@ export const KEY_TO_LABEL: Record<string, string> = {
   "token-usage": "nav.tokenUsage",
   agents: "nav.agents",
   debug: "nav.debug",
+  backups: "nav.backups",
 };
 
 // ── URL helpers ───────────────────────────────────────────────────────────
