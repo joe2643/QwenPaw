@@ -494,6 +494,34 @@ def _restore_video_blocks(
                 msg.content[i] = video_subs[blk["text"]]
 
 
+def _video_url_expired(url: str) -> bool:
+    """Return True if a signed video URL's ``exp=`` timestamp is in the past."""
+    import time
+    import urllib.parse
+
+    try:
+        qs = urllib.parse.urlparse(url).query
+        exp = urllib.parse.parse_qs(qs).get("exp", [None])[0]
+        if exp is None:
+            return False
+        return int(exp) < int(time.time())
+    except Exception:
+        return False
+
+
+def _video_dedup_key(url: str) -> str:
+    """Stable identity key for a video, independent of its signature/exp."""
+    import urllib.parse
+
+    try:
+        p = urllib.parse.urlparse(url)
+        qs = urllib.parse.parse_qs(p.query)
+        t = qs.get("t", [""])[0]
+        return f"{p.scheme}://{p.netloc}{p.path}?t={t}" if t else url.split("?")[0]
+    except Exception:
+        return url
+
+
 def _promote_tool_result_videos(
     msgs: list,
     messages: list[dict],
@@ -502,6 +530,10 @@ def _promote_tool_result_videos(
 
     Mirrors the image promotion that agentscope's formatter does
     for ``promote_tool_result_images``, but for video blocks.
+
+    Expired signed URLs and duplicates of previously promoted videos are
+    replaced with a text placeholder so DashScope doesn't reject the whole
+    request when trying to re-download stale content.
     """
     promotions: dict[str, tuple[str, list]] = {}
     for msg in msgs:
@@ -528,6 +560,7 @@ def _promote_tool_result_videos(
     if not promotions:
         return messages
 
+    seen_keys: set[str] = set()
     new_messages: list[dict] = []
     for fmt_msg in messages:
         new_messages.append(fmt_msg)
@@ -544,6 +577,22 @@ def _promote_tool_result_videos(
             },
         ]
         for url, vid_block in videos:
+            key = _video_dedup_key(url)
+            if _video_url_expired(url):
+                promoted.append({
+                    "type": "text",
+                    "text": f"\n- [Video from '{url}' expired — "
+                    "signed URL is no longer downloadable]",
+                })
+                continue
+            if key in seen_keys:
+                promoted.append({
+                    "type": "text",
+                    "text": f"\n- [Video from '{url}' omitted — "
+                    "same video already visible above]",
+                })
+                continue
+            seen_keys.add(key)
             promoted.append(
                 {
                     "type": "text",
