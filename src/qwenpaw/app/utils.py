@@ -3,6 +3,8 @@
 
 import asyncio
 import logging
+import traceback
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -32,6 +34,28 @@ def schedule_agent_reload(request: "Request", agent_id: str) -> None:
         >>> save_agent_config(workspace.agent_id, agent_config)
         >>> schedule_agent_reload(request, workspace.agent_id)
     """
+    # Caller diagnostic: reload storms are hard to trace because the trigger
+    # runs in the background — log the caller frame at schedule time so the
+    # source is visible even if the actual reload logs later.
+    if logger.isEnabledFor(logging.INFO):
+        caller_frame = traceback.extract_stack()[-2]
+        endpoint = ""
+        try:
+            url = getattr(request, "url", None)
+            method = getattr(request, "method", None)
+            if url is not None and method is not None:
+                endpoint = f"{method} {url.path}"
+        except Exception:  # pragma: no cover - defensive
+            pass
+        logger.info(
+            "schedule_agent_reload: agent=%s endpoint=%r caller=%s:%d in %s",
+            agent_id,
+            endpoint,
+            Path(caller_frame.filename).name,
+            caller_frame.lineno,
+            caller_frame.name,
+        )
+
     # Extract manager before creating background task (defensive)
     manager: "MultiAgentManager" = getattr(
         request.app.state,

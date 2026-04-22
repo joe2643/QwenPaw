@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
+import logging
 import os
 import json
 import re
+import traceback
 from pathlib import Path
 from typing import Optional, Union, Dict, List, Literal, Any, Set
+
+_log = logging.getLogger(__name__)
 
 from pydantic import (
     BaseModel,
@@ -1671,6 +1675,26 @@ def save_agent_config(
         ValueError: If agent ID not found in root config
     """
     from .utils import load_config
+
+    # Diagnostic: trace every writer. Reload storms are triggered when this
+    # is called silently from e.g. MCP tools or skills — capture the caller
+    # frame so we can identify the source from the log.
+    if _log.isEnabledFor(logging.INFO):
+        caller = traceback.extract_stack()[-2]
+        active_model = agent_config.active_model
+        active_model_str = (
+            f"{active_model.provider_id}/{active_model.model}"
+            if active_model is not None
+            else "None"
+        )
+        _log.info(
+            "save_agent_config: agent=%s active_model=%s caller=%s:%d in %s",
+            agent_id,
+            active_model_str,
+            Path(caller.filename).name,
+            caller.lineno,
+            caller.name,
+        )
 
     config = load_config()
 

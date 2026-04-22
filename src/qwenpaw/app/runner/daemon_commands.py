@@ -130,19 +130,31 @@ async def run_daemon_restart(context: DaemonContext) -> str:
     """Trigger zero-downtime agent reload or instruct user."""
     if context.manager is not None and context.agent_id is not None:
         try:
-            success = await context.manager.reload_agent(context.agent_id)
-            if success:
+            from ..multi_agent_manager import ReloadResult
+
+            result = await context.manager.reload_agent(context.agent_id)
+            if result is ReloadResult.RELOADED:
                 return (
                     "**Restart completed**\n\n"
                     "- Agent reloaded with zero-downtime "
                     "(channels, cron, MCP)."
                 )
-            else:
-                return (
-                    "**Restart skipped**\n\n"
-                    "- Agent not currently loaded. "
-                    "Will reload on next request."
+            if result is ReloadResult.SKIPPED_COOLDOWN:
+                cooldown = getattr(
+                    context.manager,
+                    "RELOAD_COOLDOWN_SECONDS",
+                    0,
                 )
+                return (
+                    "**Restart skipped (cooldown)**\n\n"
+                    f"- Another reload completed within the last "
+                    f"{cooldown:.0f}s. Try again in a moment."
+                )
+            return (
+                "**Restart skipped**\n\n"
+                "- Agent not currently loaded. "
+                "Will reload on next request."
+            )
         except Exception as e:
             return f"**Restart failed**\n\n- {e}"
     return (

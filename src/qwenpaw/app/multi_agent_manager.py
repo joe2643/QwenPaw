@@ -5,7 +5,9 @@ Provides centralized management for multiple Workspace objects,
 including lazy loading, lifecycle management, and hot reloading.
 """
 import asyncio
+import enum
 import logging
+import os
 import time
 from typing import Dict, Set
 
@@ -19,6 +21,38 @@ from ..config.utils import load_config
 logger = logging.getLogger(__name__)
 
 
+class ReloadResult(str, enum.Enum):
+    """Outcome of :meth:`MultiAgentManager.reload_agent`.
+
+    Subclasses ``str`` so legacy truthiness checks keep working:
+    ``RELOADED`` → truthy, ``NOT_RUNNING`` / ``SKIPPED_COOLDOWN`` → falsy.
+    """
+
+    RELOADED = "reloaded"
+    NOT_RUNNING = "not_running"
+    SKIPPED_COOLDOWN = "skipped_cooldown"
+
+    def __bool__(self) -> bool:
+        return self is ReloadResult.RELOADED
+
+
+def _cooldown_seconds_from_env(default: float = 30.0) -> float:
+    """Read reload cooldown from ``COPAW_RELOAD_COOLDOWN_SECONDS`` env var."""
+    raw = os.environ.get("COPAW_RELOAD_COOLDOWN_SECONDS", "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid COPAW_RELOAD_COOLDOWN_SECONDS=%r; using default %.1fs",
+            raw,
+            default,
+        )
+        return default
+    return max(0.0, value)
+
+
 class MultiAgentManager:
     """Manages multiple agent workspaces.
 
@@ -29,7 +63,24 @@ class MultiAgentManager:
     - Hot reload: Reload individual workspaces without affecting others
     - Parallel startup: Multiple agents start concurrently via
       fine-grained locking (lock released during slow workspace init)
+
+    Reload cooldown
+    ---------------
+    ``reload_agent`` skips a reload when another one completed within the
+    last ``RELOAD_COOLDOWN_SECONDS`` seconds for the same agent. This is a
+    back-stop against silent ``agent.json`` writer storms (e.g. from MCP
+    tools, skills, or misbehaving routes). The skipped write is NOT lost —
+    it will be picked up by the next eligible reload or by the per-agent
+    ``AgentConfigWatcher`` which reloads channels/heartbeat/memory jobs
+    independently on a 2 s poll.
+
+    Override via env var ``COPAW_RELOAD_COOLDOWN_SECONDS`` (e.g. ``0`` to
+    disable the guard during local development).
     """
+
+    #: Minimum seconds between successive zero-downtime reloads of the same
+    #: agent. Overridable via the ``COPAW_RELOAD_COOLDOWN_SECONDS`` env var.
+    RELOAD_COOLDOWN_SECONDS: float = _cooldown_seconds_from_env()
 
     def __init__(self):
         """Initialize multi-agent manager."""
@@ -37,6 +88,12 @@ class MultiAgentManager:
         self._lock = asyncio.Lock()
         self._pending_starts: Dict[str, asyncio.Event] = {}
         self._cleanup_tasks: Set[asyncio.Task] = set()
+        #: Wall-clock time of the last successful reload per agent_id.
+        self._last_reload_at: Dict[str, float] = {}
+        #: Counter: how many times the cooldown guard skipped a reload.
+        #: Useful for detecting ongoing storms even when individual log
+        #: lines get lost in the noise.
+        self._reload_skip_count: Dict[str, int] = {}
         logger.debug("MultiAgentManager initialized")
 
     async def get_agent(self, agent_id: str) -> Workspace:
@@ -252,7 +309,7 @@ class MultiAgentManager:
             logger.info(f"Agent stopped and removed: {agent_id}")
             return True
 
-    async def reload_agent(self, agent_id: str) -> bool:
+    async def reload_agent(self, agent_id: str) -> ReloadResult:
         """Reload a specific agent instance with zero-downtime.
 
         This method performs a seamless reload by:
@@ -276,7 +333,17 @@ class MultiAgentManager:
             agent_id: Agent ID to reload
 
         Returns:
-            bool: True if agent was reloaded, False if not running
+            :class:`ReloadResult`. The enum subclasses ``str`` and its
+            ``__bool__`` is ``True`` only for ``RELOADED``, so existing
+            truthiness checks keep working. Possible values:
+
+            * ``RELOADED`` — the swap completed successfully.
+            * ``NOT_RUNNING`` — agent is not registered or the new
+              workspace failed to start; the caller should prompt the
+              user to trigger a lazy-load via a normal request.
+            * ``SKIPPED_COOLDOWN`` — another reload completed within the
+              last :attr:`RELOAD_COOLDOWN_SECONDS`; the change will be
+              picked up on the next eligible reload.
         """
         # Step 1: Check if agent exists (quick check with lock)
         async with self._lock:
@@ -285,8 +352,48 @@ class MultiAgentManager:
                     f"Agent not running, will be loaded on next "
                     f"request: {agent_id}",
                 )
-                return False
+                return ReloadResult.NOT_RUNNING
             old_instance = self.agents[agent_id]
+
+            # Cooldown guard: skip reload if another one started very
+            # recently for this agent. A silent writer storm (MCP tool,
+            # skill script, runaway loop) can otherwise trigger a reload
+            # every few seconds, which in turn re-fires the agent's last
+            # session message and produces duplicate channel sends.
+            #
+            # We claim the cooldown slot *optimistically* — the timestamp
+            # is bumped the moment we decide to proceed, NOT after the
+            # swap completes. This closes a race where many concurrent
+            # callers all read a stale timestamp and slip past the guard
+            # in parallel. A failed reload still holds the slot for the
+            # full cooldown window, which is the desired behaviour: rapid
+            # retries of a failing reload don't help either.
+            last_at = self._last_reload_at.get(agent_id, 0.0)
+            elapsed = time.monotonic() - last_at
+            if (
+                self.RELOAD_COOLDOWN_SECONDS > 0
+                and elapsed < self.RELOAD_COOLDOWN_SECONDS
+            ):
+                skip_count = self._reload_skip_count.get(agent_id, 0) + 1
+                self._reload_skip_count[agent_id] = skip_count
+                log_fn = (
+                    logger.error if skip_count >= 10 else logger.warning
+                )
+                log_fn(
+                    "reload_agent skipped for %s: only %.1fs since last "
+                    "reload (cooldown=%.0fs, skip_count=%d). Likely a "
+                    "silent agent.json writer triggering a storm — check "
+                    "save_agent_config callers.",
+                    agent_id,
+                    elapsed,
+                    self.RELOAD_COOLDOWN_SECONDS,
+                    skip_count,
+                )
+                return ReloadResult.SKIPPED_COOLDOWN
+
+            # Cooldown passed — claim the slot and reset the skip counter.
+            self._last_reload_at[agent_id] = time.monotonic()
+            self._reload_skip_count.pop(agent_id, None)
 
         logger.info(f"Reloading agent (zero-downtime): {agent_id}")
 
@@ -297,7 +404,7 @@ class MultiAgentManager:
                 f"Agent '{agent_id}' not found in configuration "
                 f"during reload",
             )
-            return False
+            return ReloadResult.NOT_RUNNING
 
         agent_ref = config.agents.profiles[agent_id]
 
@@ -340,7 +447,7 @@ class MultiAgentManager:
             except Exception:
                 pass  # Best effort cleanup
             # Old instance is still running and serving requests
-            return False
+            return ReloadResult.NOT_RUNNING
 
         # Step 4: Atomic swap (minimal lock time)
         # From this point, reload is considered successful
@@ -352,9 +459,10 @@ class MultiAgentManager:
                     f"stopping new instance",
                 )
                 await new_instance.stop()
-                return False
+                return ReloadResult.NOT_RUNNING
 
-            # Swap instances atomically
+            # Swap instances atomically. The cooldown timestamp was
+            # already claimed when we passed the guard in Step 1.
             old_instance = self.agents[agent_id]
             self.agents[agent_id] = new_instance
             logger.info(f"Workspace instance replaced: {agent_id}")
@@ -363,7 +471,7 @@ class MultiAgentManager:
         # Delegates to helper method to avoid too-many-statements
         await self._graceful_stop_old_instance(old_instance, agent_id)
 
-        return True
+        return ReloadResult.RELOADED
 
     async def cancel_all_cleanup_tasks(self) -> None:
         """Cancel and await all pending delayed cleanup tasks.
