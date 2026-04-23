@@ -435,6 +435,64 @@ DEEPSEEK_MODELS: List[ModelInfo] = [
 
 ANTHROPIC_MODELS: List[ModelInfo] = []
 
+# Models that Claude Code OAuth (subscription-metered) will accept.
+# Aligned with openclaw's allowlist plus a few current dated IDs; users
+# can add more via the UI (extra_models) if Anthropic unlocks others
+# for their subscription tier.  ``max_tokens`` is set per-model to the
+# model's server-side output ceiling so large tool-call arguments
+# (``write_file`` with multi-line content, ``execute_shell_command``
+# with heredocs) don't get truncated mid-stream.
+CLAUDE_OAUTH_MODELS: List[ModelInfo] = [
+    ModelInfo(
+        id="claude-opus-4-7",
+        name="Claude Opus 4.7",
+        supports_image=True,
+        supports_video=False,
+        probe_source="documentation",
+        generate_kwargs={"max_tokens": 32000},
+    ),
+    ModelInfo(
+        id="claude-sonnet-4-6",
+        name="Claude Sonnet 4.6",
+        supports_image=True,
+        supports_video=False,
+        probe_source="documentation",
+        generate_kwargs={"max_tokens": 16000},
+    ),
+    ModelInfo(
+        id="claude-opus-4-6",
+        name="Claude Opus 4.6",
+        supports_image=True,
+        supports_video=False,
+        probe_source="documentation",
+        generate_kwargs={"max_tokens": 32000},
+    ),
+    ModelInfo(
+        id="claude-opus-4-5",
+        name="Claude Opus 4.5",
+        supports_image=True,
+        supports_video=False,
+        probe_source="documentation",
+        generate_kwargs={"max_tokens": 16000},
+    ),
+    ModelInfo(
+        id="claude-sonnet-4-5",
+        name="Claude Sonnet 4.5",
+        supports_image=True,
+        supports_video=False,
+        probe_source="documentation",
+        generate_kwargs={"max_tokens": 8192},
+    ),
+    ModelInfo(
+        id="claude-haiku-4-5",
+        name="Claude Haiku 4.5",
+        supports_image=True,
+        supports_video=False,
+        probe_source="documentation",
+        generate_kwargs={"max_tokens": 8192},
+    ),
+]
+
 GEMINI_MODELS: List[ModelInfo] = [
     ModelInfo(
         id="gemini-3.1-pro-preview",
@@ -657,6 +715,36 @@ PROVIDER_ANTHROPIC = AnthropicProvider(
     freeze_url=True,
 )
 
+# Claude Code OAuth — authenticates against Anthropic's ``/v1/messages``
+# using the access_token stored in ``~/.claude/.credentials.json`` by
+# the official ``claude`` CLI.  Users don't type an API key; the
+# literal ``"oauth"`` sentinel tells AnthropicProvider to switch modes
+# (see ``OAUTH_API_KEY_SENTINEL`` in anthropic_provider.py).
+PROVIDER_CLAUDE_OAUTH = AnthropicProvider(
+    id="claude-oauth",
+    name="Claude Code (OAuth)",
+    base_url="https://api.anthropic.com",
+    api_key="oauth",
+    api_key_prefix="",
+    require_api_key=False,
+    models=CLAUDE_OAUTH_MODELS,
+    chat_model="AnthropicChatModel",
+    freeze_url=True,
+    # Raise the output floor — agentscope defaults to 2048 which
+    # truncates mid-stream for long tool-call arguments (``write_file``
+    # with multi-line content, ``execute_shell_command`` with large
+    # heredocs).  Per-model ``generate_kwargs`` above override this
+    # with each model's real ceiling; this 8K default is the safety
+    # floor for any extra_model a user adds later.
+    generate_kwargs={"max_tokens": 8192},
+    meta={
+        "api_key_hint": (
+            "No API key required — run `claude login` once to populate "
+            "~/.claude/.credentials.json."
+        ),
+    },
+)
+
 PROVIDER_GEMINI = GeminiProvider(
     id="gemini",
     name="Google Gemini",
@@ -770,6 +858,7 @@ class ProviderManager:  # pylint: disable=too-many-public-methods
         self._add_builtin(PROVIDER_OPENAI)
         self._add_builtin(PROVIDER_AZURE_OPENAI)
         self._add_builtin(PROVIDER_ANTHROPIC)
+        self._add_builtin(PROVIDER_CLAUDE_OAUTH)
         self._add_builtin(PROVIDER_GEMINI)
         self._add_builtin(PROVIDER_DEEPSEEK)
         self._add_builtin(PROVIDER_KIMI_CN)

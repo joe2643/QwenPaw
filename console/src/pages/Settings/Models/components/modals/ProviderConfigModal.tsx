@@ -1,9 +1,34 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import type { KeyboardEvent, ReactNode, UIEvent } from "react";
-import { Form, Input, Modal, Button, Select } from "@agentscope-ai/design";
+import {
+  Form,
+  Input,
+  InputNumber,
+  Modal,
+  Button,
+  Select,
+} from "@agentscope-ai/design";
+import {
+  EFFORT_LEVELS,
+  THINKING_DISPLAYS,
+  fromGenerateKwargs,
+  toGenerateKwargs,
+  type ReasoningFormValue,
+} from "./reasoningConfig";
 import { useAppMessage } from "../../../../../hooks/useAppMessage";
-import { ApiOutlined, DownOutlined, RightOutlined } from "@ant-design/icons";
-import type { ProviderConfigRequest } from "../../../../../api/types";
+import {
+  ApiOutlined,
+  DownOutlined,
+  RightOutlined,
+  CheckCircleFilled,
+  CloseCircleFilled,
+  CopyOutlined,
+  ReloadOutlined,
+} from "@ant-design/icons";
+import type {
+  ClaudeOAuthStatus,
+  ProviderConfigRequest,
+} from "../../../../../api/types";
 import api from "../../../../../api";
 import { useTranslation } from "react-i18next";
 import { getLocalizedTestConnectionMessage } from "./testConnectionMessage";
@@ -236,6 +261,246 @@ function JsonCodeEditor({
   );
 }
 
+function formatExpiresIn(seconds: number | null | undefined): string {
+  if (seconds == null) return "—";
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  const rem = m % 60;
+  return rem ? `${h}h ${rem}m` : `${h}h`;
+}
+
+interface ClaudeOAuthStatusPanelProps {
+  status: ClaudeOAuthStatus | null;
+  loading: boolean;
+  onRefresh: () => void;
+  onCopyLogin: () => void;
+}
+
+function ClaudeOAuthStatusPanel({
+  status,
+  loading,
+  onRefresh,
+  onCopyLogin,
+}: ClaudeOAuthStatusPanelProps) {
+  const loggedIn = status?.logged_in === true;
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+        padding: "10px 12px",
+        border: "1px solid var(--ant-color-border, #d9d9d9)",
+        borderRadius: 6,
+        background: "var(--ant-color-fill-quaternary, #fafafa)",
+      }}
+    >
+      <div
+        style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}
+      >
+        {loggedIn ? (
+          <CheckCircleFilled style={{ color: "#52c41a" }} />
+        ) : (
+          <CloseCircleFilled style={{ color: "#ff4d4f" }} />
+        )}
+        <strong>{loggedIn ? "Logged in" : "Not logged in"}</strong>
+        {status?.subscription && (
+          <span style={{ opacity: 0.7 }}>
+            · plan: <code>{status.subscription}</code>
+          </span>
+        )}
+        {loggedIn && (
+          <span style={{ opacity: 0.7 }}>
+            · expires in {formatExpiresIn(status?.expires_in_s)}
+          </span>
+        )}
+        <Button
+          size="small"
+          icon={<ReloadOutlined />}
+          loading={loading}
+          onClick={onRefresh}
+          style={{ marginLeft: "auto" }}
+        >
+          Refresh
+        </Button>
+      </div>
+      {status?.error && (
+        <div style={{ color: "#ff4d4f", fontSize: 12 }}>{status.error}</div>
+      )}
+      {!loggedIn && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            fontSize: 12,
+            opacity: 0.85,
+          }}
+        >
+          <span>Run</span>
+          <code
+            style={{
+              padding: "2px 6px",
+              background: "var(--ant-color-fill-tertiary, #f0f0f0)",
+              borderRadius: 4,
+            }}
+          >
+            claude login
+          </code>
+          <Button size="small" icon={<CopyOutlined />} onClick={onCopyLogin}>
+            Copy
+          </Button>
+          <span>in a terminal, then click Refresh.</span>
+        </div>
+      )}
+      {status?.credentials_path && (
+        <div style={{ fontSize: 11, opacity: 0.55 }}>
+          <code>{status.credentials_path}</code>
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface ReasoningSectionProps {
+  value: ReasoningFormValue;
+  onChange: (patch: Partial<ReasoningFormValue>) => void;
+  /** When true, the provider's model list includes a haiku entry —
+   *  surface a one-liner warning that reasoning kwargs don't apply
+   *  to haiku (the backend strips them silently). */
+  haikuInList: boolean;
+}
+
+function ReasoningSection({
+  value,
+  onChange,
+  haikuInList,
+}: ReasoningSectionProps) {
+  const { thinking_mode, thinking_display, effort, max_tokens } = value;
+  const adaptiveOn = thinking_mode === "adaptive";
+  return (
+    <div
+      style={{
+        border: "1px solid var(--ant-color-border, #d9d9d9)",
+        borderRadius: 6,
+        padding: "12px 14px",
+        marginBottom: 14,
+        background: "var(--ant-color-fill-quaternary, #fafafa)",
+      }}
+    >
+      <div style={{ fontWeight: 600, marginBottom: 8 }}>
+        Reasoning (Anthropic adaptive thinking + effort)
+      </div>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+          gap: 12,
+        }}
+      >
+        <Form.Item
+          label="Thinking mode"
+          style={{ marginBottom: 0 }}
+          extra="Adaptive lets Claude decide when to think. Opus 4.7 accepts only adaptive."
+        >
+          <Select
+            value={thinking_mode}
+            onChange={(v) =>
+              onChange({ thinking_mode: v as "off" | "adaptive" })
+            }
+            options={[
+              { label: "Off (direct answer)", value: "off" },
+              { label: "Adaptive (Opus/Sonnet 4.6+)", value: "adaptive" },
+            ]}
+          />
+        </Form.Item>
+        <Form.Item
+          label="Thinking display"
+          style={{ marginBottom: 0 }}
+          extra="Opus 4.7 defaults to 'omitted' (no visible thinking text)."
+        >
+          <Select
+            value={thinking_display}
+            placeholder="(model default)"
+            allowClear
+            disabled={!adaptiveOn}
+            onChange={(v) =>
+              onChange({
+                thinking_display: (v ?? undefined) as
+                  | "summarized"
+                  | "omitted"
+                  | undefined,
+              })
+            }
+            options={THINKING_DISPLAYS.map((d) => ({ label: d, value: d }))}
+          />
+        </Form.Item>
+        <Form.Item
+          label="Effort"
+          style={{ marginBottom: 0 }}
+          extra="Soft budget for thinking + response. xhigh = Opus 4.7 only; max = Opus 4.6+."
+        >
+          <Select
+            value={effort}
+            placeholder="(model default = high)"
+            allowClear
+            onChange={(v) =>
+              onChange({
+                effort: (v ?? undefined) as
+                  | "low"
+                  | "medium"
+                  | "high"
+                  | "xhigh"
+                  | "max"
+                  | undefined,
+              })
+            }
+            options={EFFORT_LEVELS.map((e) => ({ label: e, value: e }))}
+          />
+        </Form.Item>
+        <Form.Item
+          label="Max output tokens"
+          style={{ marginBottom: 0 }}
+          extra="Hard cap on thinking + text. Raise if you see stop_reason=max_tokens."
+        >
+          <InputNumber
+            value={max_tokens ?? undefined}
+            min={256}
+            max={128000}
+            step={1024}
+            placeholder="(provider default)"
+            style={{ width: "100%" }}
+            onChange={(v) =>
+              onChange({
+                max_tokens:
+                  typeof v === "number" && Number.isFinite(v) && v > 0
+                    ? v
+                    : undefined,
+              })
+            }
+          />
+        </Form.Item>
+      </div>
+      {haikuInList && (
+        <div
+          style={{
+            marginTop: 10,
+            fontSize: 12,
+            opacity: 0.7,
+          }}
+        >
+          Note: Haiku models silently strip <code>thinking.adaptive</code> and
+          {" "}
+          <code>output_config.effort</code> server-side — these fields apply
+          only to Opus / Sonnet 4.6+ in this provider.
+        </div>
+      )}
+    </div>
+  );
+}
+
 interface ProviderConfigModalProps {
   provider: {
     id: string;
@@ -248,6 +513,8 @@ interface ProviderConfigModalProps {
     chat_model: string;
     support_connection_check: boolean;
     generate_kwargs: Record<string, unknown>;
+    require_api_key?: boolean;
+    meta?: Record<string, unknown>;
   };
   activeModels: any;
   open: boolean;
@@ -271,6 +538,91 @@ export function ProviderConfigModal({
   const { message } = useAppMessage();
   const selectedChatModel = Form.useWatch("chat_model", form);
   const canEditBaseUrl = !provider.freeze_url;
+
+  // Claude Code OAuth carries its credentials in an external store
+  // (``claude login`` writes to ~/.claude/.credentials.json).  For
+  // that specific provider we replace the API-key input with a login
+  // status panel; other ``require_api_key=false`` providers (opencode,
+  // ollama, lmstudio) keep the optional api_key input they had before.
+  const isClaudeOAuth = provider.id === "claude-oauth";
+  const apiKeyHint =
+    typeof provider.meta?.api_key_hint === "string"
+      ? (provider.meta!.api_key_hint as string)
+      : undefined;
+
+  const [claudeOAuthStatus, setClaudeOAuthStatus] =
+    useState<ClaudeOAuthStatus | null>(null);
+  const [claudeOAuthLoading, setClaudeOAuthLoading] = useState(false);
+
+  const refreshClaudeOAuthStatus = async () => {
+    if (!isClaudeOAuth) return;
+    setClaudeOAuthLoading(true);
+    try {
+      const status = await api.getClaudeOAuthStatus();
+      setClaudeOAuthStatus(status);
+    } catch (err) {
+      setClaudeOAuthStatus({
+        logged_in: false,
+        credentials_path: "~/.claude/.credentials.json",
+        expires_in_s: null,
+        scopes: [],
+        subscription: null,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setClaudeOAuthLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (open && isClaudeOAuth) {
+      void refreshClaudeOAuthStatus();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, isClaudeOAuth]);
+
+  // Reasoning controls — only meaningful for Anthropic-family providers.
+  // Two-way bind into the generate_kwargs JSON editor: reasoning fields
+  // are derived live from the JSON; edits on them re-serialize back.
+  // Single source of truth stays in ``generate_kwargs_text``.
+  const isAnthropicFamily =
+    (provider.is_custom ? selectedChatModel : provider.chat_model) ===
+    "AnthropicChatModel";
+  const watchedGenerateKwargsText = Form.useWatch(
+    "generate_kwargs_text",
+    form,
+  );
+  const parsedGenerateKwargs: Record<string, unknown> = useMemo(() => {
+    const text = watchedGenerateKwargsText?.trim();
+    if (!text) return {};
+    try {
+      const parsed = JSON.parse(text);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : {};
+    } catch {
+      return {};
+    }
+  }, [watchedGenerateKwargsText]);
+  const reasoning: ReasoningFormValue = useMemo(
+    () => fromGenerateKwargs(parsedGenerateKwargs),
+    [parsedGenerateKwargs],
+  );
+  const applyReasoningPatch = (patch: Partial<ReasoningFormValue>) => {
+    const next: ReasoningFormValue = { ...reasoning, ...patch };
+    // Normalise: turning thinking off drops display; clearing display
+    // stays at "off" implicit default.
+    if (next.thinking_mode === "off") {
+      next.thinking_display = undefined;
+    }
+    const merged = toGenerateKwargs(parsedGenerateKwargs, next);
+    const text =
+      Object.keys(merged).length > 0
+        ? JSON.stringify(merged, null, 2)
+        : undefined;
+    form.setFieldValue("generate_kwargs_text", text);
+    setFormDirty(true);
+  };
 
   const parseGenerateConfig = (value?: string) => {
     const trimmed = value?.trim();
@@ -507,7 +859,7 @@ export function ProviderConfigModal({
       footer={
         <div className={styles.modalFooter}>
           <div className={styles.modalFooterLeft}>
-            {provider.api_key && (
+            {provider.api_key && !isClaudeOAuth && (
               <Button danger size="small" onClick={handleRevoke}>
                 {t("models.revokeAuthorization")}
               </Button>
@@ -621,33 +973,56 @@ export function ProviderConfigModal({
           <Input placeholder={baseUrlPlaceholder} disabled={!canEditBaseUrl} />
         </Form.Item>
 
-        {/* API Key */}
-        <Form.Item
-          name="api_key"
-          label={t("models.apiKey")}
-          rules={[
-            {
-              validator: (_, value) => {
-                if (
-                  value &&
-                  provider.api_key_prefix &&
-                  !value.startsWith(provider.api_key_prefix)
-                ) {
-                  return Promise.reject(
-                    new Error(
-                      t("models.apiKeyShouldStart", {
-                        prefix: provider.api_key_prefix,
-                      }),
-                    ),
-                  );
-                }
-                return Promise.resolve();
+        {/* Claude Code OAuth login status (replaces API key input) */}
+        {isClaudeOAuth && (
+          <Form.Item
+            label={t("models.apiKey")}
+            extra={apiKeyHint}
+          >
+            <ClaudeOAuthStatusPanel
+              status={claudeOAuthStatus}
+              loading={claudeOAuthLoading}
+              onRefresh={refreshClaudeOAuthStatus}
+              onCopyLogin={() => {
+                void navigator.clipboard.writeText("claude login");
+                message.success("Copied");
+              }}
+            />
+          </Form.Item>
+        )}
+
+        {/* API Key — replaced by the status panel above for Claude
+            OAuth.  Other providers keep the input (optional for
+            opencode/ollama/lmstudio, required for the rest). */}
+        {!isClaudeOAuth && (
+          <Form.Item
+            name="api_key"
+            label={t("models.apiKey")}
+            extra={apiKeyHint}
+            rules={[
+              {
+                validator: (_, value) => {
+                  if (
+                    value &&
+                    provider.api_key_prefix &&
+                    !value.startsWith(provider.api_key_prefix)
+                  ) {
+                    return Promise.reject(
+                      new Error(
+                        t("models.apiKeyShouldStart", {
+                          prefix: provider.api_key_prefix,
+                        }),
+                      ),
+                    );
+                  }
+                  return Promise.resolve();
+                },
               },
-            },
-          ]}
-        >
-          <Input.Password placeholder={apiKeyPlaceholder} />
-        </Form.Item>
+            ]}
+          >
+            <Input.Password placeholder={apiKeyPlaceholder} />
+          </Form.Item>
+        )}
 
         <div className={styles.advancedConfigSection}>
           <button
@@ -660,6 +1035,17 @@ export function ProviderConfigModal({
               {t("models.advancedConfig")}
             </span>
           </button>
+
+          {isAnthropicFamily && advancedOpen && (
+            <ReasoningSection
+              value={reasoning}
+              onChange={applyReasoningPatch}
+              // These bound-model hints are advisory — the real strip
+              // happens server-side.  We surface them so users know
+              // the provider-level default won't take effect on Haiku.
+              haikuInList={provider.id === "claude-oauth"}
+            />
+          )}
 
           <Form.Item
             hidden={!advancedOpen}

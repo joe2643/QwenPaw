@@ -20,6 +20,7 @@ import type {
   DiscoverExtendedResponse,
   FilterModelsRequest,
   FilterModelsResponse,
+  ClaudeOAuthStatus,
 } from "../types";
 
 function buildActiveModelQuery(params?: GetActiveModelsRequest): string {
@@ -169,4 +170,9 @@ export const providerApi = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+
+  /* ---- Claude Code OAuth ---- */
+
+  getClaudeOAuthStatus: () =>
+    request<ClaudeOAuthStatus>("/models/claude-oauth/login-status"),
 };

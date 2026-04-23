@@ -3,12 +3,13 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import time
 from typing import Any, List
 
-from agentscope.model import ChatModelBase
+from agentscope.model import AnthropicChatModel, ChatModelBase
 import anthropic
 
 from qwenpaw.providers.multimodal_prober import (
@@ -25,15 +26,358 @@ logger = logging.getLogger(__name__)
 DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 CODING_DASHSCOPE_BASE_URL = "https://coding.dashscope.aliyuncs.com/v1"
 
+# Sentinel value in ``api_key`` that switches the provider into Claude
+# Code OAuth mode.  Chosen as a string (not a new pydantic field) so we
+# do not have to extend ``ProviderInfo`` and break every serialized
+# provider config — users just set the api_key to this literal.
+OAUTH_API_KEY_SENTINEL = "oauth"
+
+
+# Tool-name prefix required by Anthropic OAuth billing validation when
+# multiple tools are sent.  Claude Code's own tool catalogue uses
+# ``mcp_<FirstCharUpper><rest>`` (e.g. ``mcp_Bash``, ``mcp_Read``) and
+# Anthropic's validator rejects lowercase-first tool names in this
+# mode.  Convention — and opencode-claude-auth's on-the-wire transform
+# — is to prefix outbound and strip inbound symmetrically; see
+# ``transforms.ts:9-13, 225-269`` in that project.  Note this is NOT
+# PascalCase: only character 0 is upper-cased, underscores stay put.
+MCP_TOOL_PREFIX = "mcp_"
+
+
+def _prefix_tool_name(name: str) -> str:
+    if not isinstance(name, str) or not name:
+        return name
+    return f"{MCP_TOOL_PREFIX}{name[:1].upper()}{name[1:]}"
+
+
+def _unprefix_tool_name_heuristic(name: str) -> str:
+    """Heuristic reverse — lowercases the first char after the
+    ``mcp_`` prefix.  Correct for lowercase-first originals
+    (``"foo"`` → ``"mcp_Foo"`` → ``"foo"``) but LOSSY for
+    PascalCase-first originals (``"Edit"`` → ``"mcp_Edit"`` →
+    ``"edit"``).  Prefer the per-call forward map when available.
+    """
+    if not isinstance(name, str) or not name.startswith(MCP_TOOL_PREFIX):
+        return name
+    tail = name[len(MCP_TOOL_PREFIX):]
+    return f"{tail[:1].lower()}{tail[1:]}"
+
+
+# Per-call prefixed->original tool-name map.  ClaudeOAuthChatModel
+# populates it inside its overridden ``__call__`` so the inbound
+# strip pass gets a lossless round-trip even for originally
+# PascalCase-first names.  Kept as a ContextVar so concurrent agent
+# calls get independent maps.
+_TOOL_NAME_REVERSE_MAP: contextvars.ContextVar[dict[str, str] | None] = (
+    contextvars.ContextVar("claude_oauth_tool_name_reverse_map", default=None)
+)
+
+
+def _record_tool_name_mapping(original: str, prefixed: str) -> None:
+    reverse = _TOOL_NAME_REVERSE_MAP.get()
+    if reverse is not None:
+        reverse[prefixed] = original
+
+
+def _unprefix_tool_name(name: str, reverse: dict[str, str] | None) -> str:
+    """Prefer the exact reverse lookup; fall back to the heuristic."""
+    if reverse is not None and name in reverse:
+        return reverse[name]
+    return _unprefix_tool_name_heuristic(name)
+
+
+def _rewrite_history_tool_names_outbound(
+    messages: list[dict],
+) -> list[dict]:
+    """Walk every assistant-history ``tool_use`` block and rewrite its
+    ``name`` with the ``mcp_`` prefix so the whole conversation uses
+    the same wire names.  Also records original→prefixed mappings in
+    the current-call reverse map so response-side strip is lossless.
+    Returns a new list; does not mutate input.
+    """
+    out: list[dict] = []
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            out.append(msg)
+            continue
+        new_content: list = []
+        changed = False
+        for block in content:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_use"
+                and isinstance(block.get("name"), str)
+                and block["name"]
+                and not block["name"].startswith(MCP_TOOL_PREFIX)
+            ):
+                orig = block["name"]
+                prefixed = _prefix_tool_name(orig)
+                _record_tool_name_mapping(orig, prefixed)
+                new_content.append({**block, "name": prefixed})
+                changed = True
+            else:
+                new_content.append(block)
+        out.append({**msg, "content": new_content} if changed else msg)
+    return out
+
+
+def _strip_tool_use_names_inplace(
+    resp: Any,
+    reverse: dict[str, str] | None = None,
+) -> None:
+    content = getattr(resp, "content", None)
+    if not content:
+        return
+    for block in content:
+        # ChatResponse content blocks behave like dicts (TypedDict).
+        if (
+            isinstance(block, dict)
+            and block.get("type") == "tool_use"
+            and isinstance(block.get("name"), str)
+            and block["name"].startswith(MCP_TOOL_PREFIX)
+        ):
+            block["name"] = _unprefix_tool_name(block["name"], reverse)
+
+
+def _strip_haiku_incompatible_kwargs(call_kwargs: dict[str, Any]) -> None:
+    """Silently remove reasoning-related kwargs that Haiku rejects.
+
+    Anthropic's API rejects with 400 when:
+    * ``thinking.type == "adaptive"`` is sent to a Haiku model
+      (Haiku only supports manual ``thinking.type="enabled"`` with
+      ``budget_tokens``, per the adaptive-thinking docs);
+    * ``output_config.effort`` is set on a Haiku model (the effort
+      parameter is Opus/Sonnet 4.6+ only).
+
+    Letting those fields reach Haiku would break the UX when a user
+    configures reasoning at the *provider* level (via the console
+    UI) and then dispatches a call through a Haiku model in that
+    same provider.  We strip in place rather than raise so the rest
+    of the request (tools, messages, system) still goes through.
+    """
+    model = call_kwargs.get("model")
+    if not isinstance(model, str) or "haiku" not in model.lower():
+        return
+
+    thinking = call_kwargs.get("thinking")
+    if isinstance(thinking, dict) and thinking.get("type") == "adaptive":
+        # Drop the whole thinking block; converting adaptive to a
+        # manual ``budget_tokens`` value would require guessing the
+        # user's intent, and Haiku-on-by-default is the exception
+        # more than the rule.
+        call_kwargs.pop("thinking", None)
+    elif isinstance(thinking, dict) and "effort" in thinking:
+        cleaned = {k: v for k, v in thinking.items() if k != "effort"}
+        if cleaned:
+            call_kwargs["thinking"] = cleaned
+        else:
+            call_kwargs.pop("thinking", None)
+
+    oc = call_kwargs.get("output_config")
+    if isinstance(oc, dict) and "effort" in oc:
+        cleaned_oc = {k: v for k, v in oc.items() if k != "effort"}
+        if cleaned_oc:
+            call_kwargs["output_config"] = cleaned_oc
+        else:
+            call_kwargs.pop("output_config", None)
+
+
+def _inject_identity_system(system: Any, identity: str) -> list[dict]:
+    """Prepend the Claude Code identity as its own ``system`` content
+    block.  Anthropic validates byte-equality on this first block when
+    using OAuth auth — merging it into the caller's system string will
+    trigger a 400.
+    """
+    identity_block = {"type": "text", "text": identity}
+    if not system:
+        return [identity_block]
+    if isinstance(system, str):
+        return [identity_block, {"type": "text", "text": system}]
+    if isinstance(system, list):
+        # Idempotent: don't double-insert if caller already has it.
+        if (
+            system
+            and isinstance(system[0], dict)
+            and system[0].get("text") == identity
+        ):
+            return system
+        return [identity_block, *system]
+    return [identity_block, {"type": "text", "text": str(system)}]
+
+
+class ClaudeOAuthChatModel(AnthropicChatModel):
+    """Claude Code OAuth variant of :class:`AnthropicChatModel`.
+
+    Wraps the underlying anthropic SDK client so that every
+    ``messages.create`` call transparently:
+
+    * refreshes the OAuth access_token if it's near expiry and
+      updates the live client's ``auth_token`` attribute;
+    * prepends ``"You are Claude Code, ..."`` as the first ``system``
+      content block — Anthropic rejects OAuth requests that don't
+      include it.
+    """
+
+    def __init__(
+        self,
+        *,
+        auth: "object",   # ClaudeAuth — avoid hard import cycle at module load
+        identity: str,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._auth = auth
+        self._identity = identity
+        self._install_wrappers()
+
+    def _install_wrappers(self) -> None:
+        original_create = self.client.messages.create
+
+        async def _wrapped_create(**call_kwargs: Any) -> Any:
+            creds = await self._auth.ensure_fresh()
+            # Mutate the live client so in-flight refresh takes effect
+            # without rebuilding the HTTP connection pool.
+            self.client.auth_token = creds.access_token
+            call_kwargs["system"] = _inject_identity_system(
+                call_kwargs.get("system"),
+                self._identity,
+            )
+            _strip_haiku_incompatible_kwargs(call_kwargs)
+            return await original_create(**call_kwargs)
+
+        self.client.messages.create = _wrapped_create  # type: ignore[method-assign]
+
+    # ------------------------------------------------------------- #
+    # Tool-name prefix transform (see MCP_TOOL_PREFIX above)         #
+    # ------------------------------------------------------------- #
+
+    def _format_tools_json_schemas(
+        self,
+        schemas: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        formatted = super()._format_tools_json_schemas(schemas)
+        for tool in formatted:
+            name = tool.get("name")
+            if (
+                isinstance(name, str)
+                and name
+                and not name.startswith(MCP_TOOL_PREFIX)
+            ):
+                prefixed = _prefix_tool_name(name)
+                _record_tool_name_mapping(name, prefixed)
+                tool["name"] = prefixed
+        return formatted
+
+    def _format_tool_choice(self, tool_choice):  # type: ignore[override]
+        result = super()._format_tool_choice(tool_choice)
+        # Only rewrite the "specific tool" shape — "auto" / "none" /
+        # "any" choices carry no tool name.  Also handles the case
+        # where ``structured_model`` forces a specific tool name by
+        # pydantic class name.
+        if (
+            isinstance(result, dict)
+            and result.get("type") == "tool"
+            and isinstance(result.get("name"), str)
+            and result["name"]
+            and not result["name"].startswith(MCP_TOOL_PREFIX)
+        ):
+            orig = result["name"]
+            prefixed = _prefix_tool_name(orig)
+            _record_tool_name_mapping(orig, prefixed)
+            result["name"] = prefixed
+        return result
+
+    async def __call__(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict] | None = None,
+        tool_choice: Any = None,
+        structured_model: Any = None,
+        **generate_kwargs: Any,
+    ) -> Any:
+        # Per-call reverse map: ``mcp_PrefixedName`` → original name.
+        # Populated as we rewrite history/tools/tool_choice on the way
+        # out, consumed on the way back to give a lossless round-trip
+        # even for PascalCase-first tool names (which the heuristic
+        # strip can't recover unambiguously).
+        reverse_map: dict[str, str] = {}
+        token = _TOOL_NAME_REVERSE_MAP.set(reverse_map)
+        try:
+            messages = _rewrite_history_tool_names_outbound(messages)
+            result = await super().__call__(
+                messages,
+                tools=tools,
+                tool_choice=tool_choice,
+                structured_model=structured_model,
+                **generate_kwargs,
+            )
+        finally:
+            _TOOL_NAME_REVERSE_MAP.reset(token)
+
+        # Streaming case: close over the captured reverse_map so the
+        # generator stays correct even after the ContextVar is reset.
+        if self.stream:
+            return self._wrap_stream_strip(result, reverse_map)
+        _strip_tool_use_names_inplace(result, reverse_map)
+        return result
+
+    @staticmethod
+    async def _wrap_stream_strip(
+        gen: Any,
+        reverse_map: dict[str, str],
+    ) -> Any:
+        async for chunk in gen:
+            _strip_tool_use_names_inplace(chunk, reverse_map)
+            yield chunk
+
 
 class AnthropicProvider(Provider):
     """Provider implementation for Anthropic API."""
 
+    def _get_oauth(self) -> "Any":
+        """Build a fresh :class:`ClaudeAuth` instance — cheap (reads
+        one small file) and bypasses the need to stash a non-field
+        attribute on a pydantic model.  Each call re-reads the
+        credentials file, which is what we want when another process
+        (the ``claude`` CLI) may have rotated tokens on disk.
+        Raises ``FileNotFoundError`` when ``claude login`` has not run.
+        """
+        from qwenpaw.providers.claude_auth import ClaudeAuth
+
+        return ClaudeAuth()
+
+    @property
+    def _is_oauth(self) -> bool:
+        return self.api_key == OAUTH_API_KEY_SENTINEL
+
     def _client(self, timeout: float = 5) -> anthropic.AsyncAnthropic:
+        """Build a non-OAuth sync-constructed async client (the common
+        path).  OAuth callers must use :meth:`_async_client` instead,
+        since the token must be refreshed before the client is used.
+        """
         return anthropic.AsyncAnthropic(
             api_key=self.api_key,
             base_url=self.base_url,
             timeout=timeout,
+        )
+
+    async def _async_client(self, timeout: float = 5) -> anthropic.AsyncAnthropic:
+        """Build an async client, refreshing the OAuth token first
+        when in OAuth mode."""
+        if not self._is_oauth:
+            return self._client(timeout=timeout)
+
+        from qwenpaw.providers.claude_auth import ClaudeAuth  # noqa: F401
+
+        auth = self._get_oauth()
+        creds = await auth.ensure_fresh()
+        return anthropic.AsyncAnthropic(
+            api_key=None,
+            auth_token=creds.access_token,
+            base_url=self.base_url,
+            timeout=timeout,
+            default_headers=auth.default_headers(),
         )
 
     @staticmethod
@@ -68,9 +412,21 @@ class AnthropicProvider(Provider):
     async def check_connection(self, timeout: float = 5) -> tuple[bool, str]:
         """Check if Anthropic provider is reachable."""
         try:
+            if self._is_oauth:
+                # OAuth: we don't need to round-trip to /v1/models; a
+                # successful credential read + (if needed) refresh
+                # against auth.claude.ai is proof enough that the
+                # subscription is live.  Calling /v1/models with an
+                # OAuth token may 401 on accounts whose scope set
+                # doesn't include model discovery.
+                auth = self._get_oauth()
+                await auth.ensure_fresh()
+                return True, ""
             client = self._client(timeout=timeout)
             await client.models.list()
             return True, ""
+        except FileNotFoundError as e:
+            return False, f"Claude Code OAuth not set up: {e}"
         except anthropic.APIError:
             return False, "Anthropic API error"
         except Exception:
@@ -81,6 +437,13 @@ class AnthropicProvider(Provider):
 
     async def fetch_models(self, timeout: float = 5) -> List[ModelInfo]:
         """Fetch available models."""
+        if self._is_oauth:
+            # Upstream ``GET /v1/models`` with OAuth auth is gated
+            # behind ``user:profile`` scope on some subscriptions and
+            # returns 403 otherwise.  Returning an empty list signals
+            # "discovery unsupported — use the configured model list"
+            # which is what openclaw and opencode-claude-auth do.
+            return []
         client = self._client(timeout=timeout)
         payload = await client.models.list()
         models = self._normalize_models_payload(payload)
@@ -96,7 +459,7 @@ class AnthropicProvider(Provider):
         if not target:
             return False, "Empty model ID"
 
-        body = {
+        body: dict[str, Any] = {
             "model": target,
             "max_tokens": 1,
             "messages": [
@@ -112,13 +475,19 @@ class AnthropicProvider(Provider):
             ],
             "stream": True,
         }
+        if self._is_oauth:
+            from qwenpaw.providers.claude_auth import CLAUDE_CODE_IDENTITY
+
+            body["system"] = _inject_identity_system(None, CLAUDE_CODE_IDENTITY)
         try:
-            client = self._client(timeout=timeout)
+            client = await self._async_client(timeout=timeout)
             resp = await client.messages.create(**body)
             # consume the stream to ensure the model is actually responsive
             async for _ in resp:
                 break
             return True, ""
+        except FileNotFoundError as e:
+            return False, f"Claude Code OAuth not set up: {e}"
         except anthropic.APIError:
             return False, f"Model '{model_id}' is not reachable or usable"
         except Exception:
@@ -128,9 +497,7 @@ class AnthropicProvider(Provider):
             )
 
     def get_chat_model_instance(self, model_id: str) -> ChatModelBase:
-        from agentscope.model import AnthropicChatModel
-
-        client_kwargs = {"base_url": self.base_url}
+        client_kwargs: dict[str, Any] = {"base_url": self.base_url}
         if self.base_url == DASHSCOPE_BASE_URL:
             client_kwargs["default_headers"] = {
                 "x-dashscope-agentapp": json.dumps(
@@ -155,6 +522,36 @@ class AnthropicProvider(Provider):
                     ensure_ascii=False,
                 ),
             }
+
+        if self._is_oauth:
+            from qwenpaw.providers.claude_auth import (
+                CLAUDE_CODE_IDENTITY,
+            )
+
+            auth = self._get_oauth()
+            # Seed the SDK client with the currently-cached access
+            # token; ClaudeOAuthChatModel's wrapper keeps it fresh on
+            # every ``messages.create`` call.
+            creds = auth._creds  # type: ignore[attr-defined]
+            if creds is None:
+                raise RuntimeError(
+                    "ClaudeAuth loaded but credentials are empty — "
+                    "run `claude login`.",
+                )
+            client_kwargs["auth_token"] = creds.access_token
+            merged_headers = dict(client_kwargs.get("default_headers") or {})
+            merged_headers.update(auth.default_headers())
+            client_kwargs["default_headers"] = merged_headers
+            return ClaudeOAuthChatModel(
+                auth=auth,
+                identity=CLAUDE_CODE_IDENTITY,
+                model_name=model_id,
+                stream=True,
+                api_key=None,
+                stream_tool_parsing=False,
+                client_kwargs=client_kwargs,
+                generate_kwargs=self.get_effective_generate_kwargs(model_id),
+            )
 
         return AnthropicChatModel(
             model_name=model_id,
@@ -210,9 +607,9 @@ class AnthropicProvider(Provider):
             self.base_url,
         )
         start_time = time.monotonic()
-        client = self._client(timeout=timeout)
         try:
-            resp = await client.messages.create(
+            client = await self._async_client(timeout=timeout)
+            create_kwargs: dict[str, Any] = dict(
                 model=model_id,
                 max_tokens=200,
                 messages=[
@@ -235,6 +632,14 @@ class AnthropicProvider(Provider):
                     },
                 ],
             )
+            if self._is_oauth:
+                from qwenpaw.providers.claude_auth import CLAUDE_CODE_IDENTITY
+
+                create_kwargs["system"] = _inject_identity_system(
+                    None,
+                    CLAUDE_CODE_IDENTITY,
+                )
+            resp = await client.messages.create(**create_kwargs)
             answer = ""
             for block in resp.content:
                 if hasattr(block, "text"):

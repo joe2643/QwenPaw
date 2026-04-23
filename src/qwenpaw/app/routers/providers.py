@@ -176,6 +176,64 @@ async def list_all_providers(
     return await manager.list_provider_info()
 
 
+class ClaudeOAuthStatus(BaseModel):
+    """Status of the Claude Code OAuth credentials managed by the
+    local ``claude`` CLI.  A zero-arg endpoint because the credentials
+    file is per-user, not per-provider-config."""
+
+    logged_in: bool = Field(..., description="Whether a usable OAuth "
+                            "token is present on disk")
+    credentials_path: str = Field(..., description="Expected path of "
+                                  "the credentials file")
+    expires_in_s: Optional[int] = Field(None, description="Seconds "
+                                        "until access_token expiry")
+    scopes: List[str] = Field(default_factory=list)
+    subscription: Optional[str] = Field(None)
+    error: Optional[str] = Field(None, description="Reason credentials "
+                                 "could not be loaded, if any")
+
+
+@router.get(
+    "/claude-oauth/login-status",
+    response_model=ClaudeOAuthStatus,
+    summary="Claude Code OAuth login status",
+)
+async def claude_oauth_login_status() -> ClaudeOAuthStatus:
+    """Surface enough state for the UI to show whether the user has
+    completed ``claude login`` and whether the stored access_token is
+    still valid.  Does NOT trigger a refresh — it just reports.
+    """
+    from ...providers.claude_auth import (
+        ClaudeAuth,
+        _resolve_credentials_path,
+    )
+
+    path = _resolve_credentials_path()
+    try:
+        auth = ClaudeAuth()
+        creds = auth._creds  # populated synchronously by ClaudeAuth.__init__
+        assert creds is not None
+        return ClaudeOAuthStatus(
+            logged_in=True,
+            credentials_path=str(creds.credentials_path),
+            expires_in_s=creds.seconds_until_expiry,
+            scopes=list(creds.scopes),
+            subscription=creds.subscription_type,
+        )
+    except FileNotFoundError as e:
+        return ClaudeOAuthStatus(
+            logged_in=False,
+            credentials_path=str(path),
+            error=str(e),
+        )
+    except Exception as e:
+        return ClaudeOAuthStatus(
+            logged_in=False,
+            credentials_path=str(path),
+            error=f"{type(e).__name__}: {e}",
+        )
+
+
 @router.put(
     "/{provider_id}/config",
     response_model=ProviderInfo,

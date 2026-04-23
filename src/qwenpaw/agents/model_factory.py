@@ -442,16 +442,25 @@ def _get_formatter_for_chat_model(
 ) -> Type[FormatterBase]:
     """Get the appropriate formatter class for a chat model.
 
+    Walks the MRO so subclasses inherit the registered formatter of
+    their parent — e.g. ``ClaudeOAuthChatModel`` (a subclass of
+    ``AnthropicChatModel``) needs ``AnthropicChatFormatter`` so
+    ``target_family`` resolves to ``"anthropic"``.  Without this
+    walk, the map's exact-type ``.get`` returns the OpenAI default
+    for any subclass, and messages leave CoPaw in OpenAI shape
+    (``role: "tool"``) which Anthropic's API rejects 400.
+
     Args:
         chat_model_class: The chat model class
 
     Returns:
         Corresponding formatter class, defaults to OpenAIChatFormatter
     """
-    return _CHAT_MODEL_FORMATTER_MAP.get(
-        chat_model_class,
-        OpenAIChatFormatter,
-    )
+    for base in chat_model_class.__mro__:
+        formatter = _CHAT_MODEL_FORMATTER_MAP.get(base)
+        if formatter is not None:
+            return formatter
+    return OpenAIChatFormatter
 
 
 def _substitute_video_blocks(

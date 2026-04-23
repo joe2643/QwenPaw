@@ -31,6 +31,19 @@ export interface ProviderInfo {
   api_key: string;
   base_url: string;
   generate_kwargs: Record<string, unknown>;
+  /** Provider-specific metadata (e.g. api_key_hint, api_key_url). */
+  meta?: Record<string, unknown>;
+}
+
+/* ---- Claude Code OAuth ---- */
+
+export interface ClaudeOAuthStatus {
+  logged_in: boolean;
+  credentials_path: string;
+  expires_in_s: number | null;
+  scopes: string[];
+  subscription: string | null;
+  error: string | null;
 }
 
 export interface ProviderConfigRequest {
