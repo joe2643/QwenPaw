@@ -146,6 +146,27 @@ async def test_no_fallback_configured_yields_generic_hint(
 
 
 @pytest.mark.asyncio
+async def test_no_fallback_keeps_videoblock_for_user_display(
+    tmp_video: Path,
+) -> None:
+    # The VideoBlock stays in the ToolResponse so the user / frontend
+    # can play the video.  Protection from the 413 ``Request Too
+    # Large`` observed on Claude OAuth now lives in the message
+    # normalizer (per-media-type strip with path-preserving
+    # placeholder) — not in view_video itself.
+    with patch.object(vm, "_check_multimodal_support", return_value=False), \
+         patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
+         patch.object(vm, "_resolve_fallback_video_model", return_value=None):
+        resp = await view_video(str(tmp_video))
+    block_types = [b.get("type") for b in resp.content]
+    assert "video" in block_types
+    texts = [
+        b.get("text", "") for b in resp.content if b.get("type") == "text"
+    ]
+    assert any("multimodal" in t.lower() for t in texts)
+
+
+@pytest.mark.asyncio
 async def test_delegates_with_user_prompt(
     tmp_video: Path,
 ) -> None:

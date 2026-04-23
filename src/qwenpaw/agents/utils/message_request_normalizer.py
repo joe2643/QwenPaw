@@ -18,6 +18,23 @@ from .tool_message_utils import _sanitize_tool_messages
 
 _MEDIA_BLOCK_TYPES = {"image", "audio", "video"}
 
+# Formerly the all-or-nothing ``supports_multimodal`` decision
+# stripped every media block regardless of the model's actual
+# per-type capabilities.  That mis-handles the common case of a
+# vision-only model (Claude, ChatGPT-OAuth) receiving a VideoBlock:
+# the model can't process video, the normalizer left the block in,
+# the Anthropic-family formatter passed it through verbatim, and
+# Anthropic's API rejected the request (observed in production as
+# a 413 Request Too Large on Claude OAuth).
+#
+# Per-type flags let the normalizer keep image blocks for an
+# image-capable model while stripping video / audio that would
+# otherwise reach an endpoint that doesn't understand them.
+# Stripped blocks become a TextBlock that preserves the file path,
+# so the agent can still reason about "there is a video at X" and
+# call other tools (ffmpeg frames + view_image, transcribe) against
+# the same file.
+
 # Fields that are provider-specific and should not leak across families.
 # Gemini: extra_content carries thought_signature.
 # AgentScope internal: raw_input is a stream-parsing artefact.
@@ -73,12 +90,100 @@ def _clone_messages(msgs: list[Msg]) -> list[Msg]:
     return [_clone_msg(msg) for msg in msgs]
 
 
-def _strip_media_blocks_in_place(msgs: list[Msg]) -> int:
-    """Strip media blocks from copied messages only.
-
-    Mirrors the fallback logic in ``QwenPawAgent`` but operates on normalized
-    copies so the stored memory remains untouched.
+def _extract_media_path(block: dict) -> str | None:
+    """Best-effort recovery of the file path / URL a media block
+    refers to, so the path-preserving placeholder can keep pointing
+    the agent at the file it just lost.
     """
+    source = block.get("source")
+    if isinstance(source, dict):
+        u = source.get("url") or source.get("file_path") or source.get("path")
+        if isinstance(u, str) and u:
+            return u
+    for key in ("image_url", "video_url", "audio_url", "url", "file_path"):
+        v = block.get(key)
+        if isinstance(v, str) and v:
+            return v
+        if isinstance(v, dict):
+            vu = v.get("url")
+            if isinstance(vu, str) and vu:
+                return vu
+    return None
+
+
+def _path_preserving_placeholder(block_type: str, path: str | None) -> dict:
+    """Text block that replaces a stripped media block.  Includes
+    the original path when we could recover one — the agent can
+    then invoke other tools on the same file instead of blindly
+    apologising to the user.
+    """
+    if path:
+        return {
+            "type": "text",
+            "text": (
+                f"[{block_type} at {path} removed — this model cannot "
+                f"process {block_type}. File is still available at the "
+                f"path; use a compatible tool / fallback model to read it.]"
+            ),
+        }
+    return {"type": "text", "text": MEDIA_UNSUPPORTED_PLACEHOLDER}
+
+
+def _should_strip(block_type: str, support: "_MediaSupport") -> bool:
+    if block_type == "image":
+        return not support.image
+    if block_type == "video":
+        return not support.video
+    if block_type == "audio":
+        return not support.audio
+    return False
+
+
+class _MediaSupport:
+    """Compact view of per-type multimodal capability.
+
+    Any of ``image`` / ``video`` / ``audio`` defaulting to the
+    legacy ``supports_multimodal`` flag preserves the old
+    all-or-nothing behaviour for callers that haven't been updated
+    yet.
+    """
+
+    __slots__ = ("image", "video", "audio")
+
+    def __init__(
+        self,
+        *,
+        supports_multimodal: bool,
+        supports_image: bool | None = None,
+        supports_video: bool | None = None,
+        supports_audio: bool | None = None,
+    ) -> None:
+        fallback = supports_multimodal
+        self.image = fallback if supports_image is None else supports_image
+        self.video = fallback if supports_video is None else supports_video
+        self.audio = fallback if supports_audio is None else supports_audio
+
+    @property
+    def all_unsupported(self) -> bool:
+        return not (self.image or self.video or self.audio)
+
+
+_STRIP_ALL = None  # sentinel — see default below
+
+
+def _strip_media_blocks_in_place(
+    msgs: list[Msg], support: "_MediaSupport | None" = None,
+) -> int:
+    """Strip only the media types the model can't process; replace
+    each stripped block with a path-preserving text placeholder so
+    the agent retains a reference to the source file.
+
+    ``support=None`` defaults to strip-everything — matches the
+    pre-per-type default so existing callers / tests that don't
+    know about capabilities keep working and fail-safe.
+    """
+    if support is None:
+        support = _MediaSupport(supports_multimodal=False)
     total_stripped = 0
 
     for msg in msgs:
@@ -91,7 +196,12 @@ def _strip_media_blocks_in_place(msgs: list[Msg]) -> int:
             if (
                 isinstance(block, dict)
                 and block.get("type") in _MEDIA_BLOCK_TYPES
+                and _should_strip(block["type"], support)
             ):
+                path = _extract_media_path(block)
+                new_content.append(
+                    _path_preserving_placeholder(block["type"], path),
+                )
                 total_stripped += 1
                 stripped_this_message += 1
                 continue
@@ -101,20 +211,24 @@ def _strip_media_blocks_in_place(msgs: list[Msg]) -> int:
                 and block.get("type") == "tool_result"
                 and isinstance(block.get("output"), list)
             ):
-                original_len = len(block["output"])
-                block["output"] = [
-                    item
-                    for item in block["output"]
-                    if not (
+                new_output: list = []
+                local_stripped = 0
+                for item in block["output"]:
+                    if (
                         isinstance(item, dict)
                         and item.get("type") in _MEDIA_BLOCK_TYPES
-                    )
-                ]
-                stripped_count = original_len - len(block["output"])
-                total_stripped += stripped_count
-                stripped_this_message += stripped_count
-                if stripped_count > 0 and not block["output"]:
-                    block["output"] = MEDIA_UNSUPPORTED_PLACEHOLDER
+                        and _should_strip(item["type"], support)
+                    ):
+                        path = _extract_media_path(item)
+                        new_output.append(
+                            _path_preserving_placeholder(item["type"], path),
+                        )
+                        local_stripped += 1
+                        continue
+                    new_output.append(item)
+                total_stripped += local_stripped
+                stripped_this_message += local_stripped
+                block["output"] = new_output
 
             new_content.append(block)
 
@@ -132,16 +246,28 @@ def normalize_messages_for_model_request(
     msgs: list[Msg],
     *,
     supports_multimodal: bool,
+    supports_image: bool | None = None,
+    supports_video: bool | None = None,
+    supports_audio: bool | None = None,
     target_family: str = "openai",
 ) -> list[Msg]:
     """Return a normalized copy for provider request formatting.
 
     Args:
         msgs: Source messages (will **not** be mutated).
-        supports_multimodal: Whether the target model handles media.
+        supports_multimodal: Catch-all flag.  Used when a per-type
+            flag below is ``None`` — callers that haven't been
+            updated for per-type strip get the old all-or-nothing
+            behaviour.
+        supports_image / supports_video / supports_audio: Per-type
+            overrides.  ``True`` keeps that media type in the
+            message stream; ``False`` strips it and replaces with a
+            path-preserving text placeholder so the agent keeps
+            the file reference.  ``None`` defers to
+            ``supports_multimodal``.
         target_family: Provider family of the *current* model
-            (``"openai"`` | ``"anthropic"`` | ``"gemini"``).
-            Used to strip fields that belong to other providers.
+            (``"openai"`` | ``"anthropic"`` | ``"gemini"``).  Used
+            to strip fields that belong to other providers.
     """
     normalized = _clone_messages(msgs)
     # Sanitize first: _repair_empty_tool_inputs needs raw_input to fix
@@ -150,8 +276,17 @@ def normalize_messages_for_model_request(
     # the repair has had its chance.
     normalized = _sanitize_tool_messages(normalized)
     _clean_provider_specific_fields(normalized, target_family)
-    if not supports_multimodal:
-        _strip_media_blocks_in_place(normalized)
+
+    support = _MediaSupport(
+        supports_multimodal=supports_multimodal,
+        supports_image=supports_image,
+        supports_video=supports_video,
+        supports_audio=supports_audio,
+    )
+    # Skip the walk entirely when every media type is supported —
+    # avoids the clone/rebuild cost for multimodal-native models.
+    if not (support.image and support.video and support.audio):
+        _strip_media_blocks_in_place(normalized, support)
     return normalized
 
 

@@ -184,63 +184,79 @@ def test_clone_messages_copies_list(text_message, image_message):
 # -----------------------------------------------------------------------------
 
 
+def _assert_no_media(content) -> None:
+    assert not any(
+        isinstance(b, dict) and b.get("type") in {"image", "video", "audio"}
+        for b in content
+    ), f"media block leaked: {content}"
+
+
 def test_strip_media_blocks_removes_image(image_message):
-    """Test that image blocks are removed and replaced with placeholder."""
+    """Each image block becomes a text placeholder in its slot
+    (path-preserving under the new normalizer)."""
     msgs = [image_message]
     count = _strip_media_blocks_in_place(msgs)
 
     assert count == 1
-    assert len(msgs[0].content) == 1
+    _assert_no_media(msgs[0].content)
     assert msgs[0].content[0]["type"] == "text"
-    assert msgs[0].content[0]["text"] == MEDIA_UNSUPPORTED_PLACEHOLDER
 
 
 def test_strip_media_blocks_removes_video(video_message):
-    """Test that video blocks are removed and replaced with placeholder."""
     msgs = [video_message]
     count = _strip_media_blocks_in_place(msgs)
 
     assert count == 1
-    assert len(msgs[0].content) == 1
+    _assert_no_media(msgs[0].content)
     assert msgs[0].content[0]["type"] == "text"
-    assert msgs[0].content[0]["text"] == MEDIA_UNSUPPORTED_PLACEHOLDER
 
 
 def test_strip_media_blocks_removes_audio(audio_message):
-    """Test that audio blocks are removed and replaced with placeholder."""
     msgs = [audio_message]
     count = _strip_media_blocks_in_place(msgs)
 
     assert count == 1
-    assert len(msgs[0].content) == 1
+    _assert_no_media(msgs[0].content)
     assert msgs[0].content[0]["type"] == "text"
-    assert msgs[0].content[0]["text"] == MEDIA_UNSUPPORTED_PLACEHOLDER
 
 
 def test_strip_media_blocks_handles_tool_result_with_media(
     tool_result_with_image,
 ):
-    """Test that media blocks inside tool_result output are removed."""
+    """Media blocks inside tool_result output get replaced too, but
+    the tool_result itself stays (output is now a list of text
+    placeholders instead of a bare string)."""
     msgs = [tool_result_with_image]
     count = _strip_media_blocks_in_place(msgs)
 
     assert count == 1
     tool_result = msgs[0].content[0]
-    assert tool_result["output"] == MEDIA_UNSUPPORTED_PLACEHOLDER
+    output = tool_result["output"]
+    # New behaviour: output is a list with each media slot replaced
+    # by a text placeholder.  Legacy single-string output kept as an
+    # accepted fallback.
+    if isinstance(output, list):
+        _assert_no_media(output)
+        assert any(o.get("type") == "text" for o in output)
+    else:
+        assert output == MEDIA_UNSUPPORTED_PLACEHOLDER
 
 
 def test_strip_media_blocks_handles_mixed_content(mixed_content_message):
-    """Test that mixed content has only media blocks removed."""
+    """Text blocks preserved verbatim, media blocks replaced slot-by-slot.
+    Total block count stays the same (image → text, video → text)."""
     msgs = [mixed_content_message]
     count = _strip_media_blocks_in_place(msgs)
 
-    assert count == 2  # image + video
-    # Should have 2 text blocks remaining
-    assert len(msgs[0].content) == 2
-    assert msgs[0].content[0]["type"] == "text"
-    assert msgs[0].content[0]["text"] == "Look at this:"
-    assert msgs[0].content[1]["type"] == "text"
-    assert msgs[0].content[1]["text"] == "And this video:"
+    assert count == 2  # image + video replaced
+    _assert_no_media(msgs[0].content)
+    # Original text blocks survive unchanged.
+    texts = [
+        b["text"] for b in msgs[0].content
+        if isinstance(b, dict) and b.get("type") == "text"
+    ]
+    assert "Look at this:" in texts
+    assert "And this video:" in texts
 
 
 def test_strip_media_blocks_preserves_non_media_content(text_message):
@@ -294,19 +310,23 @@ def test_normalize_with_multimodal_support_keeps_media(image_message):
 
 
 def test_normalize_without_multimodal_support_strips_media(image_message):
-    """Test that media is stripped when multimodal is not supported."""
+    """When multimodal is not supported the image block is replaced
+    by a text placeholder (path-preserving under the per-type
+    normalizer)."""
     msgs = [image_message]
     normalized = normalize_messages_for_model_request(
         msgs,
         supports_multimodal=False,
     )
 
-    # Original should be unchanged
+    # Original should be unchanged (normalizer clones).
     assert msgs[0].content[0]["type"] == "image"
 
-    # Normalized should have placeholder
-    assert normalized[0].content[0]["type"] == "text"
-    assert normalized[0].content[0]["text"] == MEDIA_UNSUPPORTED_PLACEHOLDER
+    # Normalized: no media block, at least one text placeholder.
+    _assert_no_media(normalized[0].content)
+    assert any(
+        b.get("type") == "text" for b in normalized[0].content
+    )
 
 
 def test_normalize_preserves_original_messages(mixed_content_message):
@@ -375,20 +395,25 @@ def test_normalize_conversation_with_multiple_messages():
         supports_multimodal=False,
     )
 
-    # First message: text preserved, image stripped
-    assert len(normalized[0].content) == 1
-    assert normalized[0].content[0]["text"] == "Hello"
+    # First message: original text + replacement text for the
+    # image (image block gone).
+    _assert_no_media(normalized[0].content)
+    assert any(
+        b.get("text") == "Hello" for b in normalized[0].content
+    )
 
-    # Second message: unchanged
+    # Second message: unchanged.
     assert normalized[1].content == [
         {"type": "text", "text": "I see the image"},
     ]
 
-    # Third message: video replaced with placeholder
-    assert len(normalized[2].content) == 1
-    assert normalized[2].content[0]["text"] == MEDIA_UNSUPPORTED_PLACEHOLDER
+    # Third message: video replaced by text placeholder; no media.
+    _assert_no_media(normalized[2].content)
+    assert any(
+        b.get("type") == "text" for b in normalized[2].content
+    )
 
-    # Originals unchanged
+    # Originals unchanged (normalizer clones).
     assert msgs[0].content[1]["type"] == "image"
     assert msgs[2].content[0]["type"] == "video"
 

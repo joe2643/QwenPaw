@@ -388,9 +388,13 @@ def _resolve_fallback_video_model() -> (
     / user-facing hints.
     """
     try:
-        from ..app.agent_context import get_current_agent_id
-        from ..config.config import load_agent_config
-        from ..providers.provider_manager import ProviderManager
+        # Three dots: view_media lives at ``agents/tools/view_media.py``
+        # so ``...app`` resolves to ``qwenpaw/app`` (not
+        # ``qwenpaw/agents/app`` which doesn't exist).  Paired with
+        # ``...config`` / ``...providers``.
+        from ...app.agent_context import get_current_agent_id
+        from ...config.config import load_agent_config
+        from ...providers.provider_manager import ProviderManager
 
         try:
             agent_id = get_current_agent_id()
@@ -580,6 +584,13 @@ async def view_video(
         # Fallback failed — fall through to the generic hint below.
 
     # Step 4: no fallback (or fallback itself failed) → generic hint.
+    # The VideoBlock stays in the response so the user / frontend can
+    # still see the video.  The normalizer (see
+    # ``message_request_normalizer``) now strips video per-type when
+    # the outgoing model can't process it and replaces the block with
+    # a path-preserving text placeholder, so we don't need to drop
+    # the block here to avoid the 413 ``Request Too Large`` that
+    # used to fire on Claude OAuth.
     fallback_hint = _get_multimodal_fallback_hint("video", video_path)
     return ToolResponse(
         content=[

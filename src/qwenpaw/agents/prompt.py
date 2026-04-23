@@ -412,6 +412,38 @@ def get_active_model_supports_multimodal() -> bool:
     return bool(model_info.supports_multimodal)
 
 
+def get_active_model_media_support() -> dict:
+    """Return the active model's per-media-type capability signals.
+
+    ``image``, ``video``, ``audio`` each map to ``True`` / ``False`` /
+    ``None``:
+
+    * ``True``  — the model confirms support for this type.
+    * ``False`` — the model explicitly does not.
+    * ``None``  — capability hasn't been probed / declared yet; the
+      caller should fall back to the ``multimodal`` catch-all below.
+
+    Using per-type flags instead of a single ``supports_multimodal``
+    lets the normalizer keep ``image`` for a vision-only model
+    (Claude, ChatGPT-OAuth) while stripping ``video`` that would
+    otherwise bloat or 400 the upstream request.
+    """
+    model_info, _ = _get_active_model_info()
+    if model_info is None:
+        return {
+            "image": None,
+            "video": None,
+            "audio": None,
+            "multimodal": False,
+        }
+    return {
+        "image": model_info.supports_image,
+        "video": model_info.supports_video,
+        "audio": getattr(model_info, "supports_audio", None),
+        "multimodal": bool(model_info.supports_multimodal),
+    }
+
+
 def get_active_model_multimodal_raw() -> bool | None:
     """Return the effective multimodal capability flag for the active model.
 

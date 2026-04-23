@@ -121,9 +121,35 @@ def _normalize_messages_for_formatter(
     else:
         target_family = "openai"
 
+    # Per-media-type capability.  Anthropic's /v1/messages API does
+    # not accept video or audio blocks at all, only images — even on
+    # the models that have ``supports_image=True``.  Thread
+    # per-type flags so the normalizer can strip video/audio while
+    # keeping image.  ``None`` falls back to ``supports_multimodal``
+    # inside the normalizer (legacy all-or-nothing behaviour).
+    from .prompt import get_active_model_media_support
+
+    if not supports_multimodal:
+        # Kill-switch: supports_multimodal=False (either really
+        # probed as False, or ``_qwenpaw_force_strip_media`` forced
+        # it).  Strip every media type — do not let per-type probes
+        # sneak anything through.
+        media = {"image": False, "video": False, "audio": False,
+                 "multimodal": False}
+    else:
+        media = get_active_model_media_support()
+        # Hard per-target-family cap: Anthropic's /v1/messages API
+        # rejects video and audio outright, regardless of whatever
+        # CoPaw probed.  Image stays driven by the probed signal.
+        if is_anthropic_formatter:
+            media = {**media, "video": False, "audio": False}
+
     normalized_msgs = normalize_messages_for_model_request(
         msgs,
         supports_multimodal=supports_multimodal,
+        supports_image=media["image"],
+        supports_video=media["video"],
+        supports_audio=media["audio"],
         target_family=target_family,
     )
 
