@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
+import signal
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal, Optional
@@ -99,6 +101,16 @@ class CloudflareTunnelDriver:
         """
         if self._process and self._process.returncode is None:
             await self.stop()
+
+        # Clean up any orphan cloudflared instance that survived a previous
+        # crash.  Our own ``stop()`` only touches ``self._process``, so if
+        # the parent CoPaw was killed ungracefully (SIGKILL, uncaught
+        # exception), the child cloudflared is re-parented to init (PPID=1)
+        # and keeps serving the tunnel.  When CoPaw restarts and spawns a
+        # new cloudflared for the same named tunnel, Cloudflare ends up
+        # with two concurrent edge connections for one tunnel — wastes
+        # quota and causes subtle routing flaps.
+        await self._kill_orphans(local_port)
 
         binary = await self._binary_mgr.get_binary_path()
 
@@ -198,6 +210,97 @@ class CloudflareTunnelDriver:
                 await self._process.wait()
         self._process = None
         self._info = None
+
+    async def _kill_orphans(self, local_port: int) -> None:
+        """Terminate any stale cloudflared process that is already serving
+        this tunnel identity.
+
+        Matches by the argv we build ourselves (``--url http://localhost:<port>``
+        plus, for named tunnels, the tunnel name or config file).  That is
+        precise enough to avoid touching unrelated cloudflared instances the
+        user may be running for other tunnels.
+        """
+        # Unique-to-us argv tokens.  Every orphan launched by this driver
+        # will have them all; any hit on a subset is still safe because we
+        # require *all* the tokens to match.
+        port_token = f"http://localhost:{local_port}"
+        match_tokens: list[str] = [port_token]
+        if self._mode == "named" and self._tunnel_name:
+            match_tokens.append(self._tunnel_name)
+        elif self._mode == "named" and self._config_file:
+            match_tokens.append(self._config_file)
+
+        try:
+            import psutil  # type: ignore
+        except ImportError:
+            psutil = None  # type: ignore
+
+        my_pid = self._process.pid if self._process else os.getpid()
+        killed: list[int] = []
+
+        if psutil is not None:
+            for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+                try:
+                    if proc.info["pid"] == my_pid:
+                        continue
+                    name = (proc.info["name"] or "").lower()
+                    if "cloudflared" not in name:
+                        continue
+                    cmdline = " ".join(proc.info["cmdline"] or [])
+                    if all(tok in cmdline for tok in match_tokens):
+                        logger.warning(
+                            "Cleaning up orphan cloudflared pid=%d (%s)",
+                            proc.info["pid"],
+                            cmdline[:120],
+                        )
+                        proc.terminate()
+                        killed.append(proc.info["pid"])
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            # Give terminate() a moment, then force anything still alive.
+            if killed:
+                _, still = psutil.wait_procs(
+                    [psutil.Process(p) for p in killed if psutil.pid_exists(p)],
+                    timeout=3,
+                )
+                for proc in still:
+                    try:
+                        proc.kill()
+                    except psutil.NoSuchProcess:
+                        pass
+            return
+
+        # Fallback: pgrep + kill if psutil isn't available.
+        try:
+            pattern = "cloudflared.*" + ".*".join(
+                tok.replace("/", r"\/") for tok in match_tokens
+            )
+            proc = await asyncio.create_subprocess_exec(
+                "pgrep", "-f", pattern,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await proc.communicate()
+            pids = [
+                int(p) for p in out.decode().split()
+                if p.isdigit() and int(p) != my_pid
+            ]
+            for pid in pids:
+                logger.warning("Cleaning up orphan cloudflared pid=%d", pid)
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            # Short grace period before force-kill
+            if pids:
+                await asyncio.sleep(2)
+                for pid in pids:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+        except Exception as exc:
+            logger.warning("orphan cloudflared cleanup failed: %s", exc)
 
     async def health_check(self) -> bool:
         """Return True if the tunnel process is running."""
