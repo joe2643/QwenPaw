@@ -84,6 +84,17 @@ class _FakeChunk:
         self.content = content
 
 
+class _FakeChatClient:
+    """OpenAI-SDK-ish ``.client`` stub that the Qwen-family bypass
+    reads ``base_url`` / ``api_key`` from.  The bypass never
+    actually calls any method on the client; the real HTTP call
+    goes through a patched ``httpx.AsyncClient``."""
+
+    def __init__(self, base_url: str, api_key: str) -> None:
+        self.base_url = base_url
+        self.api_key = api_key
+
+
 class _FakeChatModel:
     """Records the prompt it was called with and returns a canned
     description (or raises when ``fail=True``)."""
@@ -92,12 +103,48 @@ class _FakeChatModel:
         self.description = description
         self.fail = fail
         self.last_messages: list[dict] | None = None
+        # Populate enough fields for both the agentscope code path
+        # (non-Qwen providers) and the Qwen-family httpx bypass.
+        self.client = _FakeChatClient(
+            base_url="http://127.0.0.1:30000/v1",
+            api_key="sk-test",
+        )
 
     async def __call__(self, messages: list[dict]) -> Any:
         self.last_messages = messages
         if self.fail:
             raise RuntimeError("simulated fallback API error")
         return _FakeStreamResponse(self.description)
+
+
+class _FakeHttpxClient:
+    """Context-manager stand-in used to intercept the Qwen-family
+    httpx POST in tests.  ``response`` is what every ``.post()``
+    call returns; ``last_call`` lets tests inspect the request."""
+
+    def __init__(self, response: "_FakeHttpxResponse") -> None:
+        self._response = response
+        self.last_call: dict | None = None
+
+    async def __aenter__(self) -> "_FakeHttpxClient":
+        return self
+
+    async def __aexit__(self, *_exc) -> None:
+        return None
+
+    async def post(self, url: str, json: dict, headers: dict):
+        self.last_call = {"url": url, "json": json, "headers": headers}
+        return self._response
+
+
+class _FakeHttpxResponse:
+    def __init__(self, status_code: int, body: dict) -> None:
+        self.status_code = status_code
+        self._body = body
+        self.text = str(body)
+
+    def json(self) -> dict:
+        return self._body
 
 
 @pytest.fixture
@@ -306,21 +353,30 @@ async def test_url_video_uses_url_source(
 
 
 @pytest.mark.asyncio
-async def test_qwen_family_gets_signed_url_and_list_shape(
+async def test_qwen_family_gets_signed_url_and_video_url_shape(
     tmp_video: Path,
 ) -> None:
-    # When the fallback is a Qwen-family provider (Aliyun Bailian /
-    # DashScope / Kimi / etc.), view_video must:
-    #   1. sign the local path via the media server (public URL)
-    #   2. pass the URL inside ``{"type":"video","video":[url]}``
-    # Neither the ``source`` shape nor raw local paths reach the
-    # upstream API.
+    # Qwen-family path posts OpenAI-compat chat/completions directly
+    # via httpx (agentscope's formatter would drop ``video_url``
+    # blocks as "unsupported block type").  The request must carry:
+    #   1. a signed public URL from the media server
+    #   2. the single-video shape ``{"type":"video_url","video_url":{"url":...}}``
+    #   3. a text prompt block
+    # And Authorization header from the chat_model's stored api_key.
     signed = "https://media.example.com/media?path=...&sig=abc"
     fake = _FakeChatModel(description="desc")
+    http = _FakeHttpxClient(
+        _FakeHttpxResponse(
+            200,
+            {"choices": [{"message": {"content": "video description text"}}]},
+        ),
+    )
 
     async def _fake_sign(path: str) -> str:
         assert path == str(tmp_video)
         return signed
+
+    import httpx as _real_httpx
 
     with patch.object(vm, "_check_multimodal_support", return_value=False), \
          patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
@@ -330,26 +386,31 @@ async def test_qwen_family_gets_signed_url_and_list_shape(
                  fake, "bailian-via-skillclaw", "qwen3.6-plus",
              ),
          ), \
-         patch("qwenpaw.app.channels.media_utils.resolve_media_url", _fake_sign):
+         patch("qwenpaw.app.channels.media_utils.resolve_media_url", _fake_sign), \
+         patch.object(_real_httpx, "AsyncClient", lambda *a, **kw: http):
         resp = await view_video(str(tmp_video), prompt="what happens?")
 
-    content = fake.last_messages[0]["content"]
-    # Single-video shape — ``type: video_url`` with ``video_url: {url}``.
-    # NOT ``type: video`` + list (that's the frame-list mode, which
-    # Qwen rejects with "sequence images should be (4, 8000)" when
-    # it contains only one URL).
+    # HTTPX post was the actual upstream call (bypassing agentscope).
+    assert http.last_call is not None, "httpx POST should have been made"
+    body = http.last_call["json"]
+    assert body["model"] == "qwen3.6-plus"
+    content = body["messages"][0]["content"]
     video_block = content[0]
     assert video_block["type"] == "video_url"
     assert video_block["video_url"] == {"url": signed}
-    # No ``source`` leakage / no list wrapping.
+    # No ``source`` leakage / no list wrapping / no legacy shape.
     assert "source" not in video_block
     assert "video" not in video_block
     # Prompt block follows.
     assert content[1]["type"] == "text"
     assert content[1]["text"] == "what happens?"
-    # Response text was assembled.
+    # Auth header carried through from client.api_key.
+    assert http.last_call["headers"]["Authorization"] == "Bearer sk-test"
+    # URL composed correctly: base_url + /chat/completions.
+    assert http.last_call["url"].endswith("/chat/completions")
+    # Response text reached the ToolResponse.
     texts = [b.get("text", "") for b in resp.content if b.get("type") == "text"]
-    assert any("desc" in t for t in texts)
+    assert any("video description text" in t for t in texts)
 
 
 @pytest.mark.asyncio
@@ -357,14 +418,16 @@ async def test_qwen_family_http_url_reaches_upstream_unchanged(
     tmp_video: Path,
 ) -> None:
     # A video already at an HTTP(S) URL must land in the Qwen
-    # request unchanged.  ``resolve_media_url`` short-circuits for
-    # URLs internally, but the contract view_video cares about is
-    # "the URL I gave you is the URL the upstream sees."
+    # request unchanged.
     fake = _FakeChatModel()
+    http = _FakeHttpxClient(
+        _FakeHttpxResponse(200, {"choices": [{"message": {"content": "ok"}}]}),
+    )
 
-    # Emulate ``resolve_media_url``'s real passthrough for URLs.
     async def _passthrough(path: str) -> str:
         return path
+
+    import httpx as _real_httpx
 
     with patch.object(vm, "_check_multimodal_support", return_value=False), \
          patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
@@ -372,10 +435,12 @@ async def test_qwen_family_http_url_reaches_upstream_unchanged(
              vm, "_resolve_fallback_video_model",
              return_value=(fake, "bailian", "qwen3.6-plus"),
          ), \
-         patch("qwenpaw.app.channels.media_utils.resolve_media_url", _passthrough):
+         patch("qwenpaw.app.channels.media_utils.resolve_media_url", _passthrough), \
+         patch.object(_real_httpx, "AsyncClient", lambda *a, **kw: http):
         await view_video("https://ex.com/clip.mp4", prompt="p")
 
-    video_block = fake.last_messages[0]["content"][0]
+    body = http.last_call["json"]
+    video_block = body["messages"][0]["content"][0]
     assert video_block["type"] == "video_url"
     assert video_block["video_url"] == {"url": "https://ex.com/clip.mp4"}
 

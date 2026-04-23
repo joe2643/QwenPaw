@@ -513,6 +513,73 @@ def _resolve_fallback_video_model() -> (
         return None
 
 
+async def _describe_video_via_qwen_family_httpx(
+    messages: list[dict],
+    chat_model: "object",
+    model_id: str,
+) -> str | None:
+    """Bypass agentscope's ``OpenAIChatFormatter`` and POST the
+    OpenAI-compat chat/completions request directly.
+
+    agentscope's formatter only understands a short list of content
+    block types (text / image / input_audio / tool_use / tool_result).
+    Our Qwen-family video path uses ``{"type": "video_url", ...}`` —
+    not on that list — so the formatter silently *drops* the block
+    (``Unsupported block type video_url ... skipped.``) and Qwen
+    receives only the text prompt, returning an empty / generic reply
+    with no video_tokens used.  We call the upstream HTTP endpoint
+    directly here to preserve the shape curl-tested against
+    ``qwen3.6-plus``: 190k+ video_tokens, full description returned.
+    """
+    import httpx
+
+    client = getattr(chat_model, "client", None)
+    base_url = str(getattr(client, "base_url", "")).rstrip("/")
+    api_key = getattr(client, "api_key", None) or ""
+    if not base_url:
+        logger.warning(
+            "view_video: Qwen-family fallback %s has no base_url; "
+            "cannot dispatch directly",
+            model_id,
+        )
+        return None
+    # The base_url typically already includes ``/v1``; don't double it.
+    url = (
+        f"{base_url}/chat/completions"
+        if "/chat/completions" not in base_url
+        else base_url
+    )
+    body = {"model": model_id, "messages": messages, "stream": False}
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=30)) as hc:
+            resp = await hc.post(url, json=body, headers=headers)
+        if resp.status_code != 200:
+            logger.warning(
+                "view_video: Qwen fallback HTTP %d: %s",
+                resp.status_code, resp.text[:400],
+            )
+            return None
+        j = resp.json()
+        choices = j.get("choices") or []
+        if not choices:
+            logger.warning(
+                "view_video: Qwen fallback response missing choices: %s",
+                str(j)[:400],
+            )
+            return None
+        msg = (choices[0] or {}).get("message") or {}
+        text = msg.get("content") or ""
+        return str(text).strip() or None
+    except Exception as e:
+        logger.warning(
+            "view_video: Qwen fallback httpx call failed: %s", e,
+        )
+        return None
+
+
 async def _describe_video_via_fallback(
     video_block: VideoBlock,
     prompt: str,
@@ -539,26 +606,55 @@ async def _describe_video_via_fallback(
             "view_video: delegating to fallback %s/%s (prompt len=%d)",
             provider_id, model_id, len(prompt),
         )
+        # Qwen-family providers need ``video_url`` content blocks
+        # that agentscope's OpenAIChatFormatter doesn't understand.
+        # Route around the formatter for those — every other
+        # provider still goes through agentscope so its native
+        # formatter (Gemini etc.) handles translation.
+        if _is_qwen_family(provider_id):
+            return await _describe_video_via_qwen_family_httpx(
+                messages, chat_model, model_id,
+            )
         response = await chat_model(messages)
         # Agentscope chat models can stream (AsyncGenerator) or return
         # a single ChatResponse depending on the ``stream`` init flag.
         # ``get_chat_model_instance`` defaults to ``stream=True``, so
         # we iterate and keep the final cumulative text.
         final_text = ""
+        chunk_count = 0
+        seen_block_types: set[str] = set()
         if hasattr(response, "__aiter__"):
             async for chunk in response:
+                chunk_count += 1
                 for block in getattr(chunk, "content", None) or []:
-                    if (
-                        isinstance(block, dict)
-                        and block.get("type") == "text"
-                    ):
-                        # Streamed text blocks are cumulative in agentscope.
-                        final_text = str(block.get("text") or final_text)
+                    if isinstance(block, dict):
+                        seen_block_types.add(str(block.get("type", "?")))
+                        if block.get("type") == "text":
+                            # Streamed text blocks are cumulative in agentscope.
+                            final_text = str(
+                                block.get("text") or final_text,
+                            )
         else:
             for block in getattr(response, "content", None) or []:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    final_text = str(block.get("text") or final_text)
-        return final_text.strip() or None
+                if isinstance(block, dict):
+                    seen_block_types.add(str(block.get("type", "?")))
+                    if block.get("type") == "text":
+                        final_text = str(block.get("text") or final_text)
+
+        result = final_text.strip() or None
+        if not result:
+            # Silent empty response is the trickiest failure mode —
+            # no exception, no text, just a blank from the upstream.
+            # Log enough to differentiate it from a real answer being
+            # dropped later in the pipeline.
+            logger.warning(
+                "view_video: fallback %s/%s returned empty "
+                "(chunks=%d, block_types=%s) — model may not "
+                "actually support video despite supports_video=True",
+                provider_id, model_id, chunk_count,
+                sorted(seen_block_types),
+            )
+        return result
     except Exception as e:
         logger.warning(
             "view_video: fallback %s/%s failed: %s",
