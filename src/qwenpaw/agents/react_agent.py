@@ -492,18 +492,28 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
         else:
             logger.debug("MemPalace hooks disabled")
 
-        # Session WAL — write-ahead log for crash recovery
+        # Session WAL — write-ahead log for crash recovery.  Scoped by
+        # session_id so a crashed tool on one channel/chat can't
+        # trigger recovery on an unrelated channel/chat for the same
+        # agent (see the docstring in ``tool_wal.py`` for the failure
+        # mode this prevents).
         wal_enabled = mp_cfg.session_wal if (mp_cfg and mp_cfg.enabled) else False
         if wal_enabled:
             try:
                 from .hooks.tool_wal import (
                     SessionWAL, ToolWALPreActingHook, ToolWALPostActingHook, ReasoningWALHook,
                 )
-                wal = SessionWAL(working_dir=working_dir)
+                wal = SessionWAL(
+                    working_dir=working_dir,
+                    session_id=_session_id,
+                )
                 self.register_instance_hook(hook_type="pre_acting", hook_name="wal_pre_acting", hook=ToolWALPreActingHook(wal).__call__)
                 self.register_instance_hook(hook_type="post_acting", hook_name="wal_post_acting", hook=ToolWALPostActingHook(wal).__call__)
                 self.register_instance_hook(hook_type="post_reasoning", hook_name="wal_post_reasoning", hook=ReasoningWALHook(wal).__call__)
-                logger.info("Session WAL hooks registered")
+                logger.info(
+                    "Session WAL hooks registered (session=%s)",
+                    _session_id,
+                )
             except ImportError as e:
                 logger.warning(f"Session WAL hooks not available: {e}")
 

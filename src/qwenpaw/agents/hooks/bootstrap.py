@@ -186,11 +186,20 @@ class BootstrapHook:
             except Exception as e:
                 logger.warning("MemPalace wake-up skipped: %s", e)
 
-            # Check WAL for crash recovery (runs every session, not just first)
+            # Check WAL for crash recovery (runs every session, not
+            # just first).  Critically, scope by the agent's current
+            # request session_id so a crashed tool_start from another
+            # channel/chat can't bleed into this session's recovery
+            # prompt — see the cross-channel bug mode called out in
+            # ``tool_wal.py``'s module docstring.
             try:
                 from .tool_wal import SessionWAL
 
-                crash_report = SessionWAL.get_crash_report(self.working_dir)
+                _ctx = getattr(agent, "_request_context", None) or {}
+                _sid = _ctx.get("session_id") or None
+                crash_report = SessionWAL.get_crash_report(
+                    self.working_dir, session_id=_sid,
+                )
                 if crash_report:
                     logger.warning(f"WAL crash detected: {crash_report[:200]}")
                     messages = await agent.memory.get_memory()
