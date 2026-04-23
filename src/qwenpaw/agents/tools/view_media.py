@@ -553,6 +553,19 @@ async def _describe_video_via_qwen_family_httpx(
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+    logger.info(
+        "view_video: Qwen httpx POST → %s (model=%s, video_url=%s)",
+        url, model_id,
+        # Extract the URL the server will actually fetch, for debug.
+        next(
+            (
+                (c.get("video_url") or {}).get("url", "?")
+                for c in (messages[0].get("content") or [])
+                if isinstance(c, dict) and c.get("type") == "video_url"
+            ),
+            "?",
+        )[:120],
+    )
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=30)) as hc:
             resp = await hc.post(url, json=body, headers=headers)
@@ -572,7 +585,12 @@ async def _describe_video_via_qwen_family_httpx(
             return None
         msg = (choices[0] or {}).get("message") or {}
         text = msg.get("content") or ""
-        return str(text).strip() or None
+        result = str(text).strip() or None
+        logger.info(
+            "view_video: Qwen fallback returned %d chars (usage=%s)",
+            len(result or ""), j.get("usage"),
+        )
+        return result
     except Exception as e:
         logger.warning(
             "view_video: Qwen fallback httpx call failed: %s", e,
