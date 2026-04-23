@@ -376,6 +376,84 @@ _DEFAULT_VIDEO_FALLBACK_PROMPT = (
     "description alone."
 )
 
+# Provider id prefixes that are OpenAI-chat-compat but expect Qwen's
+# multimodal shape (``{"type":"video","video":[url]}`` — video is a
+# list, not a ``source`` sub-object).  Seen across Aliyun Bailian,
+# DashScope coding plan, Kimi, ModelScope, mimo, and the SkillClaw
+# proxy that fronts Bailian locally.
+_QWEN_FAMILY_PREFIXES = (
+    "aliyun-",
+    "bailian",
+    "kimi-",
+    "modelscope",
+    "mimo",
+)
+
+
+def _is_qwen_family(provider_id: str) -> bool:
+    p = (provider_id or "").lower()
+    return any(p.startswith(x) for x in _QWEN_FAMILY_PREFIXES)
+
+
+async def _build_fallback_video_messages(
+    video_block: VideoBlock,
+    prompt: str,
+    provider_id: str,
+) -> list[dict] | None:
+    """Format ``messages`` for the fallback chat model in its native
+    multimodal shape.  Returns ``None`` when we don't know how to
+    shape the call for the target provider — the caller will fall
+    through to the generic placeholder hint.
+
+    Qwen-family providers need ``{"type":"video","video":[url]}``
+    with a URL the upstream can actually fetch — tens of MB of
+    base64 in the request body would 413 or time out.  We route
+    through the shared :func:`resolve_media_url` so local files
+    become signed media-server URLs (public via the Cloudflare
+    tunnel when one is configured, loopback otherwise).  If the
+    media server is unreachable / refuses the path, we skip the
+    delegation and let the caller fall through to the placeholder
+    hint — sending a local path to a cloud endpoint is guaranteed
+    to fail.
+
+    For providers we don't recognise (including Gemini, which has
+    its own SDK video path via agentscope), we pass the VideoBlock
+    as-is and rely on the upstream formatter to handle it.
+    """
+    from ...app.channels.media_utils import resolve_media_url
+
+    source = video_block.get("source") or {}
+    url = source.get("url") or ""
+
+    if _is_qwen_family(provider_id):
+        resolved = await resolve_media_url(url) if url else ""
+        # Must be a URL the cloud endpoint can fetch — reject
+        # anything that still looks like a raw local path.
+        if not resolved.startswith(("http://", "https://", "data:")):
+            return None
+        return [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "video", "video": [resolved]},
+                    {"type": "text", "text": prompt},
+                ],
+            },
+        ]
+
+    # Unknown provider: pass agentscope-style VideoBlock and hope
+    # the chat model's formatter translates it (agentscope's
+    # Gemini path does; OpenAI's does not).
+    return [
+        {
+            "role": "user",
+            "content": [
+                video_block,
+                TextBlock(type="text", text=prompt),
+            ],
+        },
+    ]
+
 
 def _resolve_fallback_video_model() -> (
     "tuple[object, str, str] | None"
@@ -433,15 +511,17 @@ async def _describe_video_via_fallback(
     """
     chat_model, provider_id, model_id = fallback
     try:
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    video_block,
-                    TextBlock(type="text", text=prompt),
-                ],
-            },
-        ]
+        messages = await _build_fallback_video_messages(
+            video_block, prompt, provider_id,
+        )
+        if messages is None:
+            logger.warning(
+                "view_video: cannot format video call for %s/%s "
+                "(unknown shape or media-server signing failed); "
+                "falling back to generic hint",
+                provider_id, model_id,
+            )
+            return None
         logger.info(
             "view_video: delegating to fallback %s/%s (prompt len=%d)",
             provider_id, model_id, len(prompt),

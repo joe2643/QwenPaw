@@ -298,3 +298,141 @@ async def test_url_video_uses_url_source(
     # at the original URL, not a downloaded path.
     content = fake.last_messages[0]["content"]
     assert content[0]["source"]["url"] == "https://example.com/clip.mp4"
+
+
+# ---------------------------------------------------------------- #
+# Qwen-family shape + media-server signing                         #
+# ---------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_qwen_family_gets_signed_url_and_list_shape(
+    tmp_video: Path,
+) -> None:
+    # When the fallback is a Qwen-family provider (Aliyun Bailian /
+    # DashScope / Kimi / etc.), view_video must:
+    #   1. sign the local path via the media server (public URL)
+    #   2. pass the URL inside ``{"type":"video","video":[url]}``
+    # Neither the ``source`` shape nor raw local paths reach the
+    # upstream API.
+    signed = "https://media.example.com/media?path=...&sig=abc"
+    fake = _FakeChatModel(description="desc")
+
+    async def _fake_sign(path: str) -> str:
+        assert path == str(tmp_video)
+        return signed
+
+    with patch.object(vm, "_check_multimodal_support", return_value=False), \
+         patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
+         patch.object(
+             vm, "_resolve_fallback_video_model",
+             return_value=(
+                 fake, "bailian-via-skillclaw", "qwen3.6-plus",
+             ),
+         ), \
+         patch("qwenpaw.app.channels.media_utils.resolve_media_url", _fake_sign):
+        resp = await view_video(str(tmp_video), prompt="what happens?")
+
+    content = fake.last_messages[0]["content"]
+    # Exactly the Qwen shape — ``video`` is a LIST of URLs.
+    video_block = content[0]
+    assert video_block["type"] == "video"
+    assert video_block["video"] == [signed]
+    # No ``source`` leakage.
+    assert "source" not in video_block
+    # Prompt block follows.
+    assert content[1]["type"] == "text"
+    assert content[1]["text"] == "what happens?"
+    # Response text was assembled.
+    texts = [b.get("text", "") for b in resp.content if b.get("type") == "text"]
+    assert any("desc" in t for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_qwen_family_http_url_reaches_upstream_unchanged(
+    tmp_video: Path,
+) -> None:
+    # A video already at an HTTP(S) URL must land in the Qwen
+    # request unchanged.  ``resolve_media_url`` short-circuits for
+    # URLs internally, but the contract view_video cares about is
+    # "the URL I gave you is the URL the upstream sees."
+    fake = _FakeChatModel()
+
+    # Emulate ``resolve_media_url``'s real passthrough for URLs.
+    async def _passthrough(path: str) -> str:
+        return path
+
+    with patch.object(vm, "_check_multimodal_support", return_value=False), \
+         patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
+         patch.object(
+             vm, "_resolve_fallback_video_model",
+             return_value=(fake, "bailian", "qwen3.6-plus"),
+         ), \
+         patch("qwenpaw.app.channels.media_utils.resolve_media_url", _passthrough):
+        await view_video("https://ex.com/clip.mp4", prompt="p")
+
+    video_block = fake.last_messages[0]["content"][0]
+    assert video_block["video"] == ["https://ex.com/clip.mp4"]
+
+
+@pytest.mark.asyncio
+async def test_qwen_family_sign_failure_yields_generic_hint(
+    tmp_video: Path,
+) -> None:
+    # When the media server is unreachable or refuses the path
+    # (outside allowed dirs), the Qwen path returns None messages
+    # and view_video falls through to the placeholder hint instead
+    # of calling the fallback with a broken payload.
+    fake = _FakeChatModel()
+
+    async def _fake_sign(path: str) -> str:
+        # Mimic real resolve_media_url's failure mode: returns the
+        # raw local path verbatim when the media server is
+        # unreachable / refuses the file.  The Qwen branch treats
+        # that as "can't send to cloud" and bails.
+        return path
+
+    with patch.object(vm, "_check_multimodal_support", return_value=False), \
+         patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
+         patch.object(
+             vm, "_resolve_fallback_video_model",
+             return_value=(fake, "aliyun-codingplan", "qwen3.6-plus"),
+         ), \
+         patch("qwenpaw.app.channels.media_utils.resolve_media_url", _fake_sign):
+        resp = await view_video(str(tmp_video))
+
+    # Fallback NOT called (no messages recorded).
+    assert fake.last_messages is None
+    # Placeholder hint surfaces instead.
+    texts = [b.get("text", "") for b in resp.content if b.get("type") == "text"]
+    assert any("multimodal" in t.lower() for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_non_qwen_family_uses_original_shape(
+    tmp_video: Path,
+) -> None:
+    # Gemini / unknown providers keep the agentscope VideoBlock as-
+    # is; the chat model's own formatter handles translation.
+    fake = _FakeChatModel()
+    sign_called = {"n": 0}
+
+    async def _fake_sign(path: str):
+        sign_called["n"] += 1
+        return None
+
+    with patch.object(vm, "_check_multimodal_support", return_value=False), \
+         patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
+         patch.object(
+             vm, "_resolve_fallback_video_model",
+             return_value=(fake, "gemini", "gemini-2.5-pro"),
+         ), \
+         patch("qwenpaw.app.channels.media_utils.resolve_media_url", _fake_sign):
+        await view_video(str(tmp_video))
+
+    # Gemini path doesn't sign.
+    assert sign_called["n"] == 0
+    video_block = fake.last_messages[0]["content"][0]
+    assert video_block["type"] == "video"
+    # agentscope-style ``source`` wrapper is preserved.
+    assert video_block.get("source", {}).get("url") == str(tmp_video)
