@@ -35,7 +35,7 @@ export interface ProviderInfo {
   meta?: Record<string, unknown>;
 }
 
-/* ---- Claude Code OAuth ---- */
+/* ---- OAuth provider status ---- */
 
 export interface ClaudeOAuthStatus {
   logged_in: boolean;
@@ -43,6 +43,15 @@ export interface ClaudeOAuthStatus {
   expires_in_s: number | null;
   scopes: string[];
   subscription: string | null;
+  error: string | null;
+}
+
+export interface CodexOAuthStatus {
+  logged_in: boolean;
+  credentials_path: string;
+  expires_in_s: number | null;
+  auth_mode: string | null;
+  account_id: string | null;
   error: string | null;
 }
 

@@ -27,6 +27,7 @@ import {
 } from "@ant-design/icons";
 import type {
   ClaudeOAuthStatus,
+  CodexOAuthStatus,
   ProviderConfigRequest,
 } from "../../../../../api/types";
 import api from "../../../../../api";
@@ -271,19 +272,35 @@ function formatExpiresIn(seconds: number | null | undefined): string {
   return rem ? `${h}h ${rem}m` : `${h}h`;
 }
 
-interface ClaudeOAuthStatusPanelProps {
-  status: ClaudeOAuthStatus | null;
+interface OAuthStatusLike {
+  logged_in: boolean;
+  credentials_path: string;
+  expires_in_s: number | null;
+  error: string | null;
+}
+
+interface OAuthLoginStatusPanelProps {
+  status: OAuthStatusLike | null;
   loading: boolean;
+  /** The CLI command users run to log in — e.g. ``claude login`` or
+   *  ``codex login``. */
+  loginCommand: string;
+  /** Optional status badges shown next to "Logged in" — used to
+   *  surface provider-specific fields (Claude: subscription plan,
+   *  Codex: auth_mode). */
+  extraBadges?: { label: string; value: string }[];
   onRefresh: () => void;
   onCopyLogin: () => void;
 }
 
-function ClaudeOAuthStatusPanel({
+function OAuthLoginStatusPanel({
   status,
   loading,
+  loginCommand,
+  extraBadges,
   onRefresh,
   onCopyLogin,
-}: ClaudeOAuthStatusPanelProps) {
+}: OAuthLoginStatusPanelProps) {
   const loggedIn = status?.logged_in === true;
   return (
     <div
@@ -298,7 +315,12 @@ function ClaudeOAuthStatusPanel({
       }}
     >
       <div
-        style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          flexWrap: "wrap",
+        }}
       >
         {loggedIn ? (
           <CheckCircleFilled style={{ color: "#52c41a" }} />
@@ -306,11 +328,12 @@ function ClaudeOAuthStatusPanel({
           <CloseCircleFilled style={{ color: "#ff4d4f" }} />
         )}
         <strong>{loggedIn ? "Logged in" : "Not logged in"}</strong>
-        {status?.subscription && (
-          <span style={{ opacity: 0.7 }}>
-            · plan: <code>{status.subscription}</code>
-          </span>
-        )}
+        {loggedIn &&
+          extraBadges?.map((b) => (
+            <span key={b.label} style={{ opacity: 0.7 }}>
+              · {b.label}: <code>{b.value}</code>
+            </span>
+          ))}
         {loggedIn && (
           <span style={{ opacity: 0.7 }}>
             · expires in {formatExpiresIn(status?.expires_in_s)}
@@ -347,7 +370,7 @@ function ClaudeOAuthStatusPanel({
               borderRadius: 4,
             }}
           >
-            claude login
+            {loginCommand}
           </code>
           <Button size="small" icon={<CopyOutlined />} onClick={onCopyLogin}>
             Copy
@@ -539,12 +562,15 @@ export function ProviderConfigModal({
   const selectedChatModel = Form.useWatch("chat_model", form);
   const canEditBaseUrl = !provider.freeze_url;
 
-  // Claude Code OAuth carries its credentials in an external store
-  // (``claude login`` writes to ~/.claude/.credentials.json).  For
-  // that specific provider we replace the API-key input with a login
-  // status panel; other ``require_api_key=false`` providers (opencode,
-  // ollama, lmstudio) keep the optional api_key input they had before.
+  // Both Claude Code OAuth and Codex (ChatGPT) OAuth carry their
+  // credentials in external files managed by their respective CLIs
+  // (``claude login`` / ``codex login``).  For those providers the
+  // API-key input is replaced with a login-status panel; other
+  // ``require_api_key=false`` providers (opencode, ollama, lmstudio)
+  // keep their existing optional api_key input.
   const isClaudeOAuth = provider.id === "claude-oauth";
+  const isCodexOAuth = provider.id === "codex-oauth";
+  const isOAuthProvider = isClaudeOAuth || isCodexOAuth;
   const apiKeyHint =
     typeof provider.meta?.api_key_hint === "string"
       ? (provider.meta!.api_key_hint as string)
@@ -552,34 +578,51 @@ export function ProviderConfigModal({
 
   const [claudeOAuthStatus, setClaudeOAuthStatus] =
     useState<ClaudeOAuthStatus | null>(null);
-  const [claudeOAuthLoading, setClaudeOAuthLoading] = useState(false);
+  const [codexOAuthStatus, setCodexOAuthStatus] =
+    useState<CodexOAuthStatus | null>(null);
+  const [oauthLoading, setOauthLoading] = useState(false);
 
-  const refreshClaudeOAuthStatus = async () => {
-    if (!isClaudeOAuth) return;
-    setClaudeOAuthLoading(true);
+  const refreshOAuthStatus = async () => {
+    if (!isOAuthProvider) return;
+    setOauthLoading(true);
     try {
-      const status = await api.getClaudeOAuthStatus();
-      setClaudeOAuthStatus(status);
+      if (isClaudeOAuth) {
+        setClaudeOAuthStatus(await api.getClaudeOAuthStatus());
+      } else if (isCodexOAuth) {
+        setCodexOAuthStatus(await api.getCodexOAuthStatus());
+      }
     } catch (err) {
-      setClaudeOAuthStatus({
-        logged_in: false,
-        credentials_path: "~/.claude/.credentials.json",
-        expires_in_s: null,
-        scopes: [],
-        subscription: null,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (isClaudeOAuth) {
+        setClaudeOAuthStatus({
+          logged_in: false,
+          credentials_path: "~/.claude/.credentials.json",
+          expires_in_s: null,
+          scopes: [],
+          subscription: null,
+          error: errMsg,
+        });
+      } else if (isCodexOAuth) {
+        setCodexOAuthStatus({
+          logged_in: false,
+          credentials_path: "~/.codex/auth.json",
+          expires_in_s: null,
+          auth_mode: null,
+          account_id: null,
+          error: errMsg,
+        });
+      }
     } finally {
-      setClaudeOAuthLoading(false);
+      setOauthLoading(false);
     }
   };
 
   useEffect(() => {
-    if (open && isClaudeOAuth) {
-      void refreshClaudeOAuthStatus();
+    if (open && isOAuthProvider) {
+      void refreshOAuthStatus();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, isClaudeOAuth]);
+  }, [open, isOAuthProvider]);
 
   // Reasoning controls — only meaningful for Anthropic-family providers.
   // Two-way bind into the generate_kwargs JSON editor: reasoning fields
@@ -859,7 +902,7 @@ export function ProviderConfigModal({
       footer={
         <div className={styles.modalFooter}>
           <div className={styles.modalFooterLeft}>
-            {provider.api_key && !isClaudeOAuth && (
+            {provider.api_key && !isOAuthProvider && (
               <Button danger size="small" onClick={handleRevoke}>
                 {t("models.revokeAuthorization")}
               </Button>
@@ -973,28 +1016,56 @@ export function ProviderConfigModal({
           <Input placeholder={baseUrlPlaceholder} disabled={!canEditBaseUrl} />
         </Form.Item>
 
-        {/* Claude Code OAuth login status (replaces API key input) */}
-        {isClaudeOAuth && (
-          <Form.Item
-            label={t("models.apiKey")}
-            extra={apiKeyHint}
-          >
-            <ClaudeOAuthStatusPanel
-              status={claudeOAuthStatus}
-              loading={claudeOAuthLoading}
-              onRefresh={refreshClaudeOAuthStatus}
-              onCopyLogin={() => {
-                void navigator.clipboard.writeText("claude login");
-                message.success("Copied");
-              }}
-            />
+        {/* OAuth-provider login-status panel replaces the API key
+            input for claude-oauth / codex-oauth. */}
+        {isOAuthProvider && (
+          <Form.Item label={t("models.apiKey")} extra={apiKeyHint}>
+            {isClaudeOAuth && (
+              <OAuthLoginStatusPanel
+                status={claudeOAuthStatus}
+                loading={oauthLoading}
+                loginCommand="claude login"
+                extraBadges={
+                  claudeOAuthStatus?.subscription
+                    ? [
+                        {
+                          label: "plan",
+                          value: claudeOAuthStatus.subscription,
+                        },
+                      ]
+                    : []
+                }
+                onRefresh={refreshOAuthStatus}
+                onCopyLogin={() => {
+                  void navigator.clipboard.writeText("claude login");
+                  message.success("Copied");
+                }}
+              />
+            )}
+            {isCodexOAuth && (
+              <OAuthLoginStatusPanel
+                status={codexOAuthStatus}
+                loading={oauthLoading}
+                loginCommand="codex login"
+                extraBadges={
+                  codexOAuthStatus?.auth_mode
+                    ? [{ label: "mode", value: codexOAuthStatus.auth_mode }]
+                    : []
+                }
+                onRefresh={refreshOAuthStatus}
+                onCopyLogin={() => {
+                  void navigator.clipboard.writeText("codex login");
+                  message.success("Copied");
+                }}
+              />
+            )}
           </Form.Item>
         )}
 
-        {/* API Key — replaced by the status panel above for Claude
-            OAuth.  Other providers keep the input (optional for
+        {/* API Key — replaced by the status panel above for OAuth
+            providers.  Other providers keep the input (optional for
             opencode/ollama/lmstudio, required for the rest). */}
-        {!isClaudeOAuth && (
+        {!isOAuthProvider && (
           <Form.Item
             name="api_key"
             label={t("models.apiKey")}

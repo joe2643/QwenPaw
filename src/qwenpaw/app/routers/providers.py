@@ -193,6 +193,62 @@ class ClaudeOAuthStatus(BaseModel):
                                  "could not be loaded, if any")
 
 
+class CodexOAuthStatus(BaseModel):
+    """Status of the Codex/ChatGPT OAuth credentials managed by the
+    local ``codex`` CLI.  Read-only; does not trigger a refresh."""
+
+    logged_in: bool = Field(..., description="Whether a usable OAuth "
+                            "token is present on disk")
+    credentials_path: str = Field(..., description="Expected path of "
+                                  "the credentials file")
+    expires_in_s: Optional[int] = Field(None, description="Seconds "
+                                        "until access_token expiry")
+    auth_mode: Optional[str] = Field(None, description="'chatgpt' for "
+                                     "Plus/Pro OAuth, 'apikey' otherwise")
+    account_id: Optional[str] = Field(None)
+    error: Optional[str] = Field(None, description="Reason credentials "
+                                 "could not be loaded, if any")
+
+
+@router.get(
+    "/codex-oauth/login-status",
+    response_model=CodexOAuthStatus,
+    summary="Codex (ChatGPT) OAuth login status",
+)
+async def codex_oauth_login_status() -> CodexOAuthStatus:
+    """Surface enough state for the UI to show whether ``codex login``
+    has populated ``~/.codex/auth.json`` and whether the stored
+    access_token is still valid.  Symmetric with
+    ``claude_oauth_login_status``.
+    """
+    from ...providers.codex_auth import CodexAuth, _resolve_auth_path
+
+    path = _resolve_auth_path()
+    try:
+        auth = CodexAuth()
+        creds = auth._creds  # populated synchronously by __init__
+        assert creds is not None
+        return CodexOAuthStatus(
+            logged_in=True,
+            credentials_path=str(creds.auth_path),
+            expires_in_s=creds.seconds_until_expiry,
+            auth_mode=creds.auth_mode,
+            account_id=creds.account_id,
+        )
+    except FileNotFoundError as e:
+        return CodexOAuthStatus(
+            logged_in=False,
+            credentials_path=str(path),
+            error=str(e),
+        )
+    except Exception as e:
+        return CodexOAuthStatus(
+            logged_in=False,
+            credentials_path=str(path),
+            error=f"{type(e).__name__}: {e}",
+        )
+
+
 @router.get(
     "/claude-oauth/login-status",
     response_model=ClaudeOAuthStatus,

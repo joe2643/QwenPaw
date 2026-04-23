@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 CODING_DASHSCOPE_BASE_URL = "https://coding.dashscope.aliyuncs.com/v1"
 
+# Sentinel api_key value that switches the provider into Codex OAuth
+# mode.  Keeps the OAuth branch off every serialized ProviderInfo
+# (no new pydantic field) — users set api_key to this literal string.
+CODEX_OAUTH_API_KEY_SENTINEL = "oauth"
+
 if os.environ.get("LANGFUSE_SECRET_KEY") and importlib.util.find_spec(
     "langfuse",
 ):
@@ -38,6 +43,25 @@ else:
 
 class OpenAIProvider(Provider):
     """Provider implementation for OpenAI API and compatible endpoints."""
+
+    @property
+    def _is_codex_oauth(self) -> bool:
+        """Detect the Codex OAuth mode.  Guarded by provider id so
+        unrelated ``OpenAIProvider`` configs that happen to have
+        ``api_key="oauth"`` (eg. typos) don't route through the
+        ChatGPT backend."""
+        return (
+            self.id == "codex-oauth"
+            and self.api_key == CODEX_OAUTH_API_KEY_SENTINEL
+        )
+
+    def _get_codex_oauth(self) -> "Any":
+        """Build a fresh ``CodexAuth`` instance (reads ~/.codex/auth.json).
+        Raises ``FileNotFoundError`` when ``codex login`` has not run.
+        """
+        from qwenpaw.providers.codex_auth import CodexAuth
+
+        return CodexAuth()
 
     def _client(self, timeout: float = 5) -> AsyncOpenAI:
         return AsyncOpenAI(
@@ -70,6 +94,19 @@ class OpenAIProvider(Provider):
 
     async def check_connection(self, timeout: float = 5) -> tuple[bool, str]:
         """Check if OpenAI provider is reachable with current configuration."""
+        if self._is_codex_oauth:
+            # Credentials file + live refresh is proof enough for the
+            # ChatGPT-account path; /v1/models on that backend isn't
+            # accessible with a subscription-only OAuth token anyway.
+            try:
+                auth = self._get_codex_oauth()
+                await auth.ensure_fresh()
+                return True, ""
+            except FileNotFoundError as e:
+                return False, f"Codex OAuth not set up: {e}"
+            except Exception as e:
+                return False, f"Codex OAuth refresh failed: {e}"
+
         client = self._client()
         try:
             await client.models.list(timeout=timeout)
@@ -84,6 +121,11 @@ class OpenAIProvider(Provider):
 
     async def fetch_models(self, timeout: float = 5) -> List[ModelInfo]:
         """Fetch available models."""
+        if self._is_codex_oauth:
+            # Codex OAuth's allowed model set is a short hardcoded list
+            # — the ChatGPT backend rejects everything else server-side.
+            # Returning [] tells the UI "use configured models only".
+            return []
         try:
             client = self._client(timeout=timeout)
             payload = await client.models.list(timeout=timeout)
@@ -103,6 +145,40 @@ class OpenAIProvider(Provider):
         model_id = (model_id or "").strip()
         if not model_id:
             return False, "Empty model ID"
+
+        if self._is_codex_oauth:
+            # Spin up a CodexOAuthChatModel and do a 1-token ping —
+            # exercises the full OAuth refresh + Responses API
+            # translation path, so a green bar here means the end-to-
+            # end integration is healthy.
+            try:
+                from .codex_oauth_model import CodexOAuthChatModel
+
+                auth = self._get_codex_oauth()
+                await auth.ensure_fresh()
+                model = CodexOAuthChatModel(
+                    auth=auth,
+                    model_name=model_id,
+                    stream=True,
+                    api_key=None,
+                    stream_tool_parsing=False,
+                    client_kwargs={},
+                    generate_kwargs={},
+                )
+                res = await model.client.chat.completions.create(
+                    model=model_id,
+                    messages=[
+                        {"role": "user", "content": "ping"},
+                    ],
+                    stream=True,
+                )
+                async for _ in res:
+                    break
+                return True, ""
+            except FileNotFoundError as e:
+                return False, f"Codex OAuth not set up: {e}"
+            except Exception as e:
+                return False, f"Codex OAuth model check failed: {e}"
 
         try:
             client = self._client(timeout=timeout)
@@ -137,6 +213,25 @@ class OpenAIProvider(Provider):
 
     def get_chat_model_instance(self, model_id: str) -> ChatModelBase:
         from .openai_chat_model_compat import OpenAIChatModelCompat
+
+        if self._is_codex_oauth:
+            from .codex_oauth_model import CodexOAuthChatModel
+
+            auth = self._get_codex_oauth()
+            # CodexOAuthChatModel redirects every request to the
+            # ChatGPT backend URL hardcoded inside ``CodexAuth``
+            # (``base_url``), so ``base_url`` on this provider is
+            # ignored.  No ``api_key`` either — all auth flows
+            # through the OAuth bearer token on each call.
+            return CodexOAuthChatModel(
+                auth=auth,
+                model_name=model_id,
+                stream=True,
+                api_key=None,
+                stream_tool_parsing=False,
+                client_kwargs={},
+                generate_kwargs=self.get_effective_generate_kwargs(model_id),
+            )
 
         client_kwargs = {"base_url": self.base_url}
 

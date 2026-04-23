@@ -715,6 +715,49 @@ PROVIDER_ANTHROPIC = AnthropicProvider(
     freeze_url=True,
 )
 
+# Codex OAuth — authenticates against the ChatGPT backend Responses
+# API using the access_token stored in ``~/.codex/auth.json`` by the
+# official ``@openai/codex`` CLI.  The ``oauth`` sentinel tells
+# OpenAIProvider to route through ``CodexOAuthChatModel``, which
+# in-process translates chat/completions → Responses API.
+CODEX_OAUTH_MODELS: List[ModelInfo] = [
+    ModelInfo(
+        id="gpt-5.4",
+        name="GPT-5.4 (ChatGPT backend)",
+        supports_image=True,
+        supports_video=False,
+        probe_source="documentation",
+    ),
+    ModelInfo(
+        id="gpt-5.2",
+        name="GPT-5.2 (ChatGPT backend)",
+        supports_image=True,
+        supports_video=False,
+        probe_source="documentation",
+    ),
+]
+
+PROVIDER_CODEX_OAUTH = OpenAIProvider(
+    id="codex-oauth",
+    name="ChatGPT Codex (OAuth)",
+    # base_url is ignored — CodexOAuthChatModel hardcodes the ChatGPT
+    # backend URL from CodexAuth.base_url.  We surface something
+    # representative here so the UI shows users where requests go.
+    base_url="https://chatgpt.com/backend-api",
+    api_key="oauth",
+    api_key_prefix="",
+    require_api_key=False,
+    models=CODEX_OAUTH_MODELS,
+    chat_model="OpenAIChatModel",
+    freeze_url=True,
+    meta={
+        "api_key_hint": (
+            "No API key required — run `codex login` once to populate "
+            "~/.codex/auth.json."
+        ),
+    },
+)
+
 # Claude Code OAuth — authenticates against Anthropic's ``/v1/messages``
 # using the access_token stored in ``~/.claude/.credentials.json`` by
 # the official ``claude`` CLI.  Users don't type an API key; the
@@ -859,6 +902,7 @@ class ProviderManager:  # pylint: disable=too-many-public-methods
         self._add_builtin(PROVIDER_AZURE_OPENAI)
         self._add_builtin(PROVIDER_ANTHROPIC)
         self._add_builtin(PROVIDER_CLAUDE_OAUTH)
+        self._add_builtin(PROVIDER_CODEX_OAUTH)
         self._add_builtin(PROVIDER_GEMINI)
         self._add_builtin(PROVIDER_DEEPSEEK)
         self._add_builtin(PROVIDER_KIMI_CN)

@@ -21,6 +21,7 @@ import type {
   FilterModelsRequest,
   FilterModelsResponse,
   ClaudeOAuthStatus,
+  CodexOAuthStatus,
 } from "../types";
 
 function buildActiveModelQuery(params?: GetActiveModelsRequest): string {
@@ -175,4 +176,7 @@ export const providerApi = {
 
   getClaudeOAuthStatus: () =>
     request<ClaudeOAuthStatus>("/models/claude-oauth/login-status"),
+
+  getCodexOAuthStatus: () =>
+    request<CodexOAuthStatus>("/models/codex-oauth/login-status"),
 };
