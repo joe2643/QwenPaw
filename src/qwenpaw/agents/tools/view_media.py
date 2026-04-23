@@ -431,11 +431,24 @@ async def _build_fallback_video_messages(
         # anything that still looks like a raw local path.
         if not resolved.startswith(("http://", "https://", "data:")):
             return None
+        # DashScope / Qwen-VL has two video modes on their
+        # OpenAI-compat chat/completions endpoint:
+        #   * ``type: "video_url"`` + ``video_url: {url}`` — single
+        #     video file, Qwen samples frames server-side.
+        #   * ``type: "video"``     + ``video: [frame_urls...]`` —
+        #     pre-extracted frame list, must contain 4–8000 frames.
+        # We have exactly one video URL, so use the single-file
+        # mode.  Wrapping a single URL in the frame-list shape
+        # trips the ``"sequence images should be (4, 8000)"``
+        # validation server-side (seen in production).
         return [
             {
                 "role": "user",
                 "content": [
-                    {"type": "video", "video": [resolved]},
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": resolved},
+                    },
                     {"type": "text", "text": prompt},
                 ],
             },

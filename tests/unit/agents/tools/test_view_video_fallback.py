@@ -334,12 +334,16 @@ async def test_qwen_family_gets_signed_url_and_list_shape(
         resp = await view_video(str(tmp_video), prompt="what happens?")
 
     content = fake.last_messages[0]["content"]
-    # Exactly the Qwen shape — ``video`` is a LIST of URLs.
+    # Single-video shape — ``type: video_url`` with ``video_url: {url}``.
+    # NOT ``type: video`` + list (that's the frame-list mode, which
+    # Qwen rejects with "sequence images should be (4, 8000)" when
+    # it contains only one URL).
     video_block = content[0]
-    assert video_block["type"] == "video"
-    assert video_block["video"] == [signed]
-    # No ``source`` leakage.
+    assert video_block["type"] == "video_url"
+    assert video_block["video_url"] == {"url": signed}
+    # No ``source`` leakage / no list wrapping.
     assert "source" not in video_block
+    assert "video" not in video_block
     # Prompt block follows.
     assert content[1]["type"] == "text"
     assert content[1]["text"] == "what happens?"
@@ -372,7 +376,8 @@ async def test_qwen_family_http_url_reaches_upstream_unchanged(
         await view_video("https://ex.com/clip.mp4", prompt="p")
 
     video_block = fake.last_messages[0]["content"][0]
-    assert video_block["video"] == ["https://ex.com/clip.mp4"]
+    assert video_block["type"] == "video_url"
+    assert video_block["video_url"] == {"url": "https://ex.com/clip.mp4"}
 
 
 @pytest.mark.asyncio
