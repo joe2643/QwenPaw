@@ -246,10 +246,28 @@ class SignalChannel(BaseChannel):
         self._group_history: Dict[str, list] = {}
         self._group_history_limit = 50
         self._sender_names: Dict[str, str] = {}
+        # 8-char UUID prefix → full UUID. Populated every time we see a
+        # sender in a group so the outbound mention compiler can recover
+        # full UUIDs from truncated ``uuid:abc12345`` forms that still
+        # appear in older session state.
+        self._uuid_prefix_lookup: Dict[str, str] = {}
         self._workspace_dir = workspace_dir
         self._data_dir: Path = _resolve_signal_data_dir(
             data_dir, workspace_dir,
         )
+
+        # Mention detection regression guard: signal-cli emits structured
+        # mentions with the bot's ACI (``uuid`` field) but usually NOT the
+        # bot's phone number (privacy). If ``account_uuid`` is unset,
+        # ``_is_bot_mentioned`` cannot match ANY Signal-UI @bot tap — it
+        # falls back to plain-text regex which only catches manually typed
+        # ``@+<number>`` forms. Auto-populate from signal-cli's own
+        # ``<data_dir>/accounts.json`` so linked accounts always have a
+        # usable UUID.
+        if not self._account_uuid and account:
+            self._account_uuid = self._auto_discover_account_uuid(
+                account, self._data_dir,
+            )
 
         self.client = SignalSubprocessClient(
             account=account,
@@ -260,9 +278,48 @@ class SignalChannel(BaseChannel):
 
         if self.enabled:
             logger.info(
-                "signal: initialized (account=%s, signal_cli=%s, data_dir=%s)",
-                account, signal_cli_path, self._data_dir,
+                "signal: initialized (account=%s, uuid=%s, signal_cli=%s, "
+                "data_dir=%s)",
+                account,
+                self._account_uuid[:8] + "…" if self._account_uuid else "<unset>",
+                signal_cli_path,
+                self._data_dir,
             )
+
+    @staticmethod
+    def _auto_discover_account_uuid(account: str, data_dir: Path) -> str:
+        """Look up the bot's UUID in signal-cli's accounts.json.
+
+        Returns empty string if the file is missing, unreadable, or the
+        account is not listed — the caller will fall back to plain-text
+        mention detection, which still works for manually typed
+        ``@+<number>`` mentions.
+        """
+        try:
+            import json as _json
+
+            accounts_path = Path(data_dir) / "data" / "accounts.json"
+            if not accounts_path.is_file():
+                return ""
+            data = _json.loads(accounts_path.read_text(encoding="utf-8"))
+            for entry in data.get("accounts") or []:
+                if (
+                    isinstance(entry, dict)
+                    and entry.get("number") == account
+                    and entry.get("uuid")
+                ):
+                    uuid_value = str(entry["uuid"]).strip().lower()
+                    logger.info(
+                        "signal: auto-discovered account_uuid=%s… for %s "
+                        "(from %s)",
+                        uuid_value[:8], account, accounts_path,
+                    )
+                    return uuid_value
+        except Exception as e:  # pragma: no cover - best-effort discovery
+            logger.debug(
+                "signal: auto-discover account_uuid failed: %s", e,
+            )
+        return ""
 
     @classmethod
     def from_config(
@@ -699,12 +756,40 @@ class SignalChannel(BaseChannel):
         return False
 
     def _remember_sender(self, source: str, source_uuid: str, name: str) -> None:
+        # Name map is populated only when we know a human-friendly name, but
+        # UUID prefix → full UUID MUST be recorded unconditionally so that
+        # outbound mentions can resolve short-form uuids from older history.
+        if source_uuid:
+            self._uuid_prefix_lookup[source_uuid[:8].lower()] = (
+                source_uuid.lower()
+            )
         if not name or _looks_like_uuid(name):
             return
         if source:
             self._sender_names[source] = name
         if source_uuid:
             self._sender_names[source_uuid] = name
+
+    def _resolve_full_uuid(self, raw: str) -> str:
+        """Return a full Signal ACI for *raw* if it looks like a short prefix.
+
+        ``_expand_mentions`` used to truncate UUIDs to 8 chars when building
+        the text form the bot sees (``uuid:abc12345``), which meant the
+        outbound parser had only 8 chars to work with — too short for
+        signal-cli's ACI lookup, so the mention was silently dropped and
+        the recipient saw the raw UUID text instead of a styled @-mention.
+
+        We now emit the full UUID in the bot's view and keep this resolver
+        around for backward compatibility with historical session state
+        that still contains the truncated form.
+        """
+        key = (raw or "").strip().lower()
+        if not key:
+            return key
+        # Already looks full (has at least one hyphen and ≥ 36 chars)
+        if len(key) >= 36 and "-" in key:
+            return key
+        return self._uuid_prefix_lookup.get(key[:8], key)
 
     def _strip_bot_self_mention(self, text: str) -> str:
         if not text:
@@ -750,8 +835,9 @@ class SignalChannel(BaseChannel):
             return f"uuid:{source_uuid[:8]}"
         return "unknown"
 
-    @staticmethod
-    def _compile_outbound_mentions(text: str) -> tuple[str, List[Dict[str, Any]]]:
+    def _compile_outbound_mentions(
+        self, text: str,
+    ) -> tuple[str, List[Dict[str, Any]]]:
         pat = re.compile(
             r"@(?:[^@\s()]+\s*)?"
             r"(?:"
@@ -778,7 +864,11 @@ class SignalChannel(BaseChannel):
                 if phone:
                     entry["number"] = f"+{phone}"
                 else:
-                    entry["uuid"] = uuid_v
+                    # signal-cli requires a full ACI (36-char UUID).
+                    # Older session history may emit 8-char prefix
+                    # (uuid:abc12345) — resolve via per-channel map so
+                    # the mention actually renders in recipient client.
+                    entry["uuid"] = self._resolve_full_uuid(uuid_v)
                 mentions.append(entry)
                 out.append("\ufffc")
             else:
@@ -813,9 +903,13 @@ class SignalChannel(BaseChannel):
             if _looks_like_uuid(name):
                 name = ""
             # Format: @ID (Name) — ID-first so bot learns the mention syntax.
-            # Prefer phone over uuid for the id.
+            # Prefer phone over uuid for the id. Emit the FULL UUID (not an
+            # 8-char prefix) so the outbound parser can round-trip it back
+            # into a structured Signal mention: signal-cli needs a complete
+            # ACI to look up the contact, and a truncated prefix ended up
+            # as raw text in the recipient's view.
             phone_str = number if number.startswith("+") else f"+{number}" if number else ""
-            id_str = phone_str if phone_str else (f"uuid:{uuid_v[:8]}" if uuid_v else "")
+            id_str = phone_str if phone_str else (f"uuid:{uuid_v}" if uuid_v else "")
             if id_str and name:
                 token = f"@{id_str} ({name})"
             elif id_str:
@@ -1022,6 +1116,19 @@ class SignalChannel(BaseChannel):
 
             qt = meta.get("quote_timestamp", 0) if self._reply_to_trigger else 0
             qa = meta.get("quote_author", "") if self._reply_to_trigger else ""
+            # Diagnostic: snapshot outbound text + mention params so we
+            # can diff the "what the bot wrote" vs "what signal-cli got"
+            # when mentions fail to render in the recipient's client.
+            if chunk_mention_strs or "￼" in chunk:
+                logger.info(
+                    "signal: outbound chunk to %s chunk=%r mentions=%r "
+                    "ffc_count=%d prefix_map_size=%d",
+                    to_handle,
+                    chunk,
+                    chunk_mention_strs,
+                    chunk.count("￼"),
+                    len(self._uuid_prefix_lookup),
+                )
             await self.client.send_message(
                 to_handle,
                 chunk,

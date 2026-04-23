@@ -123,27 +123,55 @@ def test_markdown_monospace_and_italic() -> None:
 # ───────────────────────────── outbound mentions ─────────────────────
 
 def test_compile_outbound_mentions_phone_bare() -> None:
-    text, mentions = SignalChannel._compile_outbound_mentions(
-        "Ping @+85298765432 now",
-    )
+    ch = _make_channel()
+    text, mentions = ch._compile_outbound_mentions("Ping @+85298765432 now")
     assert text == "Ping \ufffc now"
     assert mentions == [{"start": 5, "length": 1, "number": "+85298765432"}]
 
 
 def test_compile_outbound_mentions_uuid_bare() -> None:
-    text, mentions = SignalChannel._compile_outbound_mentions(
+    ch = _make_channel()
+    text, mentions = ch._compile_outbound_mentions(
         "Hi @uuid:abc12345 there",
     )
     assert "\ufffc" in text
+    # Unknown short-prefix passes through unchanged (resolver falls back
+    # to the raw value when no prefix map entry exists).
     assert mentions and mentions[0]["uuid"].startswith("abc12345")
 
 
 def test_compile_outbound_mentions_name_with_phone_parens() -> None:
-    text, mentions = SignalChannel._compile_outbound_mentions(
+    ch = _make_channel()
+    text, mentions = ch._compile_outbound_mentions(
         "See @Joe (+85251159218)!",
     )
     assert text.count("\ufffc") == 1
     assert mentions == [{"start": 4, "length": 1, "number": "+85251159218"}]
+
+
+def test_compile_outbound_mentions_resolves_short_uuid_to_full() -> None:
+    """Short uuid:<8-char> prefix expands to full ACI via the channel's
+    prefix lookup, populated as senders appear in a group. Without this
+    outgoing mentions would ship to signal-cli with an 8-char ACI —
+    not a valid contact, so the mention silently fails and the
+    recipient sees raw UUID text."""
+    ch = _make_channel()
+    full = "82e0393a-4c79-4905-b84d-986298f4f8c5"
+    ch._remember_sender("", full, "Alice")
+    text, mentions = ch._compile_outbound_mentions(
+        f"Tag @Alice (uuid:{full[:8]}) please",
+    )
+    assert mentions and mentions[0]["uuid"] == full
+
+
+def test_compile_outbound_mentions_keeps_full_uuid_as_is() -> None:
+    """Full UUID already in text → pass through without resolver lookup."""
+    ch = _make_channel()
+    full = "1a2b3c4d-1111-2222-3333-444455556666"
+    text, mentions = ch._compile_outbound_mentions(
+        f"Heads-up @Bob (uuid:{full})",
+    )
+    assert mentions and mentions[0]["uuid"] == full
 
 
 # ───────────────────────────── outbound send ─────────────────────────
@@ -525,3 +553,164 @@ def test_get_signal_link_state_idempotent() -> None:
     # Same dict object — idempotent and preserves in-flight state.
     assert s1 is s2
     assert s1["status"] == "idle"
+
+
+# ───────────────────────────── auto-discover account_uuid ────────────
+# Signal-UI @bot taps emit structured mentions carrying only the bot's
+# ACI ``uuid`` (no phone, for privacy). If ``account_uuid`` is blank
+# ``_is_bot_mentioned`` can't match ANY Signal-UI tap — only manually
+# typed ``@+<number>`` forms. The channel now auto-populates
+# ``account_uuid`` from signal-cli's own ``accounts.json`` on startup.
+
+def test_auto_discover_account_uuid_from_accounts_json(tmp_path) -> None:
+    import json as _json
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "accounts.json").write_text(_json.dumps({
+        "accounts": [
+            {"number": "+85298349370",
+             "uuid": "447e962a-1f09-4a21-aef6-79617d8e8ad0",
+             "path": "750890"},
+        ],
+    }))
+    uuid = SignalChannel._auto_discover_account_uuid(
+        "+85298349370", tmp_path,
+    )
+    assert uuid == "447e962a-1f09-4a21-aef6-79617d8e8ad0"
+
+
+def test_auto_discover_account_uuid_lowercased(tmp_path) -> None:
+    """Mixed-case UUIDs from signal-cli are normalized to lowercase so the
+    equality check against structured mentions is case-insensitive."""
+    import json as _json
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "accounts.json").write_text(_json.dumps({
+        "accounts": [{"number": "+1", "uuid": "AB-CD-EF"}],
+    }))
+    assert (
+        SignalChannel._auto_discover_account_uuid("+1", tmp_path)
+        == "ab-cd-ef"
+    )
+
+
+def test_auto_discover_account_uuid_missing_file(tmp_path) -> None:
+    """Missing accounts.json → empty string (channel boots without UUID,
+    falls back to plain-text mention detection)."""
+    assert (
+        SignalChannel._auto_discover_account_uuid("+1", tmp_path) == ""
+    )
+
+
+def test_auto_discover_account_uuid_wrong_account(tmp_path) -> None:
+    """Account not listed → empty string (don't pick someone else's UUID)."""
+    import json as _json
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "accounts.json").write_text(_json.dumps({
+        "accounts": [{"number": "+111", "uuid": "not-ours"}],
+    }))
+    assert (
+        SignalChannel._auto_discover_account_uuid("+999", tmp_path) == ""
+    )
+
+
+def test_auto_discover_account_uuid_malformed_json(tmp_path) -> None:
+    """Corrupt accounts.json → empty string, no exception."""
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "accounts.json").write_text("garbage {{")
+    assert (
+        SignalChannel._auto_discover_account_uuid("+1", tmp_path) == ""
+    )
+
+
+def test_channel_auto_populates_account_uuid_when_unset(tmp_path) -> None:
+    """End-to-end: constructing a SignalChannel with account_uuid=""
+    pulls the UUID from data_dir/data/accounts.json."""
+    import json as _json
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "accounts.json").write_text(_json.dumps({
+        "accounts": [{"number": "+85298349370",
+                      "uuid": "447e962a-0000-0000-0000-000000000000"}],
+    }))
+    ch = _make_channel(
+        account="+85298349370",
+        account_uuid="",
+        data_dir=str(tmp_path),
+    )
+    assert ch._account_uuid == "447e962a-0000-0000-0000-000000000000"
+
+
+def test_channel_respects_explicit_account_uuid(tmp_path) -> None:
+    """If caller provides account_uuid, discovery does NOT override it."""
+    import json as _json
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "accounts.json").write_text(_json.dumps({
+        "accounts": [{"number": "+1", "uuid": "from-file"}],
+    }))
+    ch = _make_channel(
+        account="+1",
+        account_uuid="from-config",
+        data_dir=str(tmp_path),
+    )
+    assert ch._account_uuid == "from-config"
+
+
+def test_mention_detection_after_auto_discover_fixes_ui_tap(tmp_path) -> None:
+    """Regression: Signal-UI @bot tap (structured mention, UUID-only)
+    is now correctly recognised as a bot mention after auto-discovery.
+    Before the fix, ``account_uuid=""`` made the structured check
+    always fall through to plain-text, which missed UUID-only mentions
+    entirely."""
+    import json as _json
+    bot_uuid = "447e962a-1f09-4a21-aef6-79617d8e8ad0"
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "accounts.json").write_text(_json.dumps({
+        "accounts": [{"number": "+85298349370", "uuid": bot_uuid}],
+    }))
+    ch = _make_channel(
+        account="+85298349370",
+        account_uuid="",
+        data_dir=str(tmp_path),
+    )
+    # Typical UI-tap payload: structured mention carries ACI only.
+    data_message = {"mentions": [{"uuid": bot_uuid}]}
+    assert ch._is_bot_mentioned(data_message, "hello bot") is True
+
+
+# ───────────────────────────── _expand_mentions round-trip ───────────
+# _expand_mentions used to truncate UUIDs to 8 chars (``uuid:abc12345``)
+# for the bot's context — minor token saving but fatal on outbound:
+# the 8-char prefix is not a valid Signal ACI, so signal-cli could not
+# resolve the contact and the mention was dropped, leaving raw UUID text
+# in the recipient's view. We now emit the full UUID so the outbound
+# parser can round-trip the mention back into a proper structured form.
+
+def test_expand_mentions_uuid_only_emits_full_uuid() -> None:
+    """When signal-cli gives us a UUID-only mention (privacy: no phone),
+    ``_expand_mentions`` now emits ``uuid:<full>`` instead of the
+    truncated ``uuid:<8char>`` form, so outbound round-trip works."""
+    ch = _make_channel()
+    full = "82e0393a-4c79-4905-b84d-986298f4f8c5"
+    mentions = [
+        {"start": 0, "length": 1, "uuid": full, "name": "Alice"},
+    ]
+    body = "￼ hey"
+    expanded = ch._expand_mentions(body, mentions)
+    # Must contain the full UUID, not just the 8-char prefix.
+    assert full in expanded
+    # Format: "@uuid:<full> (Name) hey"
+    assert expanded.startswith(f"@uuid:{full}")
+
+
+def test_expand_mentions_prefers_phone_over_uuid() -> None:
+    """When a mention has both, the text form uses the phone number
+    (shorter and rounds-trips via the phone-bare regex)."""
+    ch = _make_channel()
+    mentions = [{
+        "start": 0, "length": 1,
+        "number": "+85251159218",
+        "uuid": "82e0393a-4c79-4905-b84d-986298f4f8c5",
+        "name": "Alice",
+    }]
+    expanded = ch._expand_mentions("￼ hi", mentions)
+    assert "+85251159218" in expanded
+    # UUID must NOT leak into the bot's view when phone is available.
+    assert "uuid:" not in expanded
