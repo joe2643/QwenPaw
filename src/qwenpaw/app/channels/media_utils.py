@@ -22,16 +22,54 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# Env override for atypical deploys / tests.  Defaults target the
+# Env overrides for atypical deploys / tests.  Defaults target the
 # local media server at its conventional port.
 _MEDIA_SERVER_URL_ENV = "QWENPAW_MEDIA_SERVER_URL"
 _MEDIA_SERVER_DEFAULT = "http://127.0.0.1:8089"
+_MEDIA_SECRET_ENV = "QWENPAW_MEDIA_SECRET"
 _DEFAULT_SIGN_TTL_S = 3600
 
 
 def _media_server_base() -> str:
-    return (os.environ.get(_MEDIA_SERVER_URL_ENV)
-            or _MEDIA_SERVER_DEFAULT).rstrip("/")
+    """Resolve the media-server origin for outbound ``/sign`` calls.
+
+    Priority: env override (tests / atypical deploys) → CoPaw's
+    loaded config (``media_server.server_url``) → hard-coded
+    loopback default.  Reading from config means the resolver
+    follows whatever port / host the operator configures without
+    code changes.
+    """
+    env = os.environ.get(_MEDIA_SERVER_URL_ENV)
+    if env:
+        return env.rstrip("/")
+    try:
+        from ...config import load_config, get_config_path
+
+        url = load_config(get_config_path()).media_server.server_url
+        if url:
+            return url.rstrip("/")
+    except Exception:
+        pass
+    return _MEDIA_SERVER_DEFAULT.rstrip("/")
+
+
+def _media_secret() -> str:
+    """Resolve the media server auth secret.
+
+    Priority: env override first (handy for tests), then whatever
+    CoPaw has in its loaded config (``media_server.media_secret``).
+    Empty string when unset — the server will reject but we still
+    attempt the call so the caller sees the real 403 in debug logs.
+    """
+    env = os.environ.get(_MEDIA_SECRET_ENV)
+    if env:
+        return env
+    try:
+        from ...config import load_config, get_config_path
+
+        return load_config(get_config_path()).media_server.media_secret or ""
+    except Exception:
+        return ""
 
 
 async def sign_media_path(
@@ -84,9 +122,10 @@ async def resolve_media_url(local_path: str) -> str:
 
     1. If the input already looks like an HTTP(S) or data URL, return
        it unchanged — nothing to sign.
-    2. Otherwise try :func:`sign_media_path`.  If the media server
-       returns a URL, use it (the server's tunnel config decides
-       whether it's public).
+    2. Otherwise try :func:`sign_media_path` with the auth secret
+       from CoPaw's loaded config.  If the media server returns a
+       URL, use it (the server's tunnel config decides whether it's
+       public vs loopback).
     3. On any failure, return the raw local path — maintains the
        pre-signing behaviour so existing callers don't regress.
 
@@ -110,5 +149,5 @@ async def resolve_media_url(local_path: str) -> str:
         logger.debug("resolve_media_url: path does not exist: %s", text)
         return text
 
-    signed = await sign_media_path(text)
+    signed = await sign_media_path(text, auth=_media_secret() or None)
     return signed or text
