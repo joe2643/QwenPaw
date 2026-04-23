@@ -10,7 +10,11 @@ from ...config import (
     save_config,
     AgentsRunningConfig,
 )
-from ...config.config import load_agent_config, save_agent_config
+from ...config.config import (
+    load_agent_config,
+    save_agent_config,
+    ModelSlotConfig,
+)
 from ...agents.memory.agent_md_manager import AgentMdManager
 from ...agents.templates import get_workspace_md_template_id
 from ...agents.utils import copy_workspace_md_files
@@ -496,3 +500,91 @@ async def put_system_prompt_files(
     schedule_agent_reload(request, workspace.agent_id)
 
     return files
+
+
+# -------------------------------------------------------------------------
+# Fallback video model
+#
+# ``view_video`` consults ``AgentProfileConfig.fallback_video_model`` when
+# the agent's primary model can't perceive video — it delegates the
+# VideoBlock + a caller-supplied prompt to the fallback and returns the
+# text description.  These two routes let the console read and set that
+# slot.  Clearing the slot via ``PUT`` with ``{"provider_id": null,
+# "model": null}`` restores the pre-fallback placeholder-hint behaviour.
+# -------------------------------------------------------------------------
+
+
+class _FallbackVideoModelBody(BaseModel):
+    """Request body for setting the fallback video model.
+
+    Both fields nullable so the client can clear the slot by sending
+    ``{"provider_id": null, "model": null}`` without a separate DELETE.
+    """
+
+    provider_id: str | None = Field(
+        default=None,
+        description="Provider id, e.g. 'gemini', 'claude-oauth'.  "
+        "null clears the slot.",
+    )
+    model: str | None = Field(
+        default=None,
+        description="Model id within the provider.  null clears the slot.",
+    )
+
+
+@router.get(
+    "/fallback-video-model",
+    response_model=_FallbackVideoModelBody,
+    summary="Get the agent's fallback video model",
+    description="Returns {provider_id, model} or nulls when unset.",
+)
+async def get_fallback_video_model(
+    request: Request,
+) -> _FallbackVideoModelBody:
+    workspace = await get_agent_for_request(request)
+    agent_config = load_agent_config(workspace.agent_id)
+    slot = agent_config.fallback_video_model
+    if slot is None:
+        return _FallbackVideoModelBody()
+    return _FallbackVideoModelBody(
+        provider_id=slot.provider_id,
+        model=slot.model,
+    )
+
+
+@router.put(
+    "/fallback-video-model",
+    response_model=_FallbackVideoModelBody,
+    summary="Set the agent's fallback video model",
+    description="Pass both fields to set; pass nulls to clear.",
+)
+async def put_fallback_video_model(
+    body: _FallbackVideoModelBody = Body(...),
+    request: Request = None,
+) -> _FallbackVideoModelBody:
+    workspace = await get_agent_for_request(request)
+    agent_config = load_agent_config(workspace.agent_id)
+
+    if body.provider_id and body.model:
+        agent_config.fallback_video_model = ModelSlotConfig(
+            provider_id=body.provider_id,
+            model=body.model,
+        )
+    elif not body.provider_id and not body.model:
+        agent_config.fallback_video_model = None
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "provider_id and model must both be set or both be null"
+            ),
+        )
+
+    save_agent_config(workspace.agent_id, agent_config)
+    schedule_agent_reload(request, workspace.agent_id)
+
+    slot = agent_config.fallback_video_model
+    return _FallbackVideoModelBody(
+        provider_id=slot.provider_id if slot else None,
+        model=slot.model if slot else None,
+    )

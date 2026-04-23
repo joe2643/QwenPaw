@@ -7,3 +7,4 @@ export { ToolResultCompactCard } from "./ToolResultCompactCard";
 export { MemorySummaryCard } from "./MemorySummaryCard";
 export { EmbeddingConfigCard } from "./EmbeddingConfigCard";
 export { MemPalaceCard } from "./MemPalaceCard";
+export { FallbackVideoModelCard } from "./FallbackVideoModelCard";

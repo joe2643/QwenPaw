@@ -11,6 +11,7 @@ import {
   MemorySummaryCard,
   EmbeddingConfigCard,
   MemPalaceCard,
+  FallbackVideoModelCard,
 } from "./components";
 import { PageHeader } from "@/components/PageHeader";
 import styles from "./index.module.less";
@@ -179,6 +180,24 @@ function AgentConfigPage() {
                   <div className={styles.tabContent}>
                     {/* MemPalace hooks — manages own state via API */}
                     <MemPalaceCard />
+                  </div>
+                ),
+              },
+              {
+                key: "fallbackVideoModel",
+                label: (
+                  <span className={styles.tabLabel}>
+                    {t(
+                      "agentConfig.fallbackVideoModelTab",
+                      "Fallback video",
+                    )}
+                  </span>
+                ),
+                children: (
+                  <div className={styles.tabContent}>
+                    {/* Manages own state — lives outside the
+                        AgentsRunningConfig form. */}
+                    <FallbackVideoModelCard />
                   </div>
                 ),
               },

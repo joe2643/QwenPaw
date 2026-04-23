@@ -1087,6 +1087,15 @@ class AgentProfileConfig(BaseModel):
         default=None,
         description="Active model for this agent (provider_id + model)",
     )
+    fallback_video_model: Optional["ModelSlotConfig"] = Field(
+        default=None,
+        description=(
+            "Fallback model for video understanding when the active "
+            "model does not support video input.  ``view_video`` "
+            "delegates to this model with the user-supplied prompt + "
+            "VideoBlock and returns the response as text."
+        ),
+    )
     language: str = Field(
         default="zh",
         description="Language setting for this agent",

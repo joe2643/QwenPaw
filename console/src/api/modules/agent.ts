@@ -82,4 +82,25 @@ export const agentApi = {
       ffmpeg_installed: boolean;
       whisper_installed: boolean;
     }>("/agent/local-whisper-status"),
+
+  /* ---- Fallback video model (per-agent) ---- */
+
+  getFallbackVideoModel: () =>
+    request<FallbackVideoModel>("/agent/fallback-video-model"),
+
+  updateFallbackVideoModel: (body: FallbackVideoModel) =>
+    request<FallbackVideoModel>("/agent/fallback-video-model", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
 };
+
+/**
+ * Per-agent fallback video model slot.  When both fields are non-null,
+ * ``view_video`` delegates to this model if the primary can't handle
+ * video.  ``{provider_id: null, model: null}`` clears the slot.
+ */
+export interface FallbackVideoModel {
+  provider_id: string | null;
+  model: string | null;
+}

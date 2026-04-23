@@ -368,31 +368,148 @@ async def view_image(image_path: str) -> ToolResponse:
     )
 
 
-async def view_video(video_path: str) -> ToolResponse:
+_DEFAULT_VIDEO_FALLBACK_PROMPT = (
+    "Describe this video in detail: what happens step by step, any "
+    "on-screen text or captions, distinctive objects / people / "
+    "locations, and the overall mood.  Be thorough so a model that "
+    "cannot see the video can still reason about it from your "
+    "description alone."
+)
+
+
+def _resolve_fallback_video_model() -> (
+    "tuple[object, str, str] | None"
+):
+    """Return a ready-to-call chat model instance for the agent's
+    configured ``fallback_video_model``, or ``None`` when none is set.
+
+    Returns a ``(chat_model, provider_id, model_id)`` tuple so the
+    caller can surface which fallback handled the request in logs
+    / user-facing hints.
+    """
+    try:
+        from ..app.agent_context import get_current_agent_id
+        from ..config.config import load_agent_config
+        from ..providers.provider_manager import ProviderManager
+
+        try:
+            agent_id = get_current_agent_id()
+        except Exception:
+            return None
+        agent_config = load_agent_config(agent_id)
+        fallback = getattr(agent_config, "fallback_video_model", None)
+        if not fallback or not fallback.provider_id or not fallback.model:
+            return None
+
+        manager = ProviderManager.get_instance()
+        provider = manager.get_provider(fallback.provider_id)
+        if provider is None:
+            logger.warning(
+                "view_video: fallback provider '%s' not found",
+                fallback.provider_id,
+            )
+            return None
+        chat_model = provider.get_chat_model_instance(fallback.model)
+        return chat_model, fallback.provider_id, fallback.model
+    except Exception as e:
+        logger.warning(
+            "view_video: fallback model resolution failed: %s", e,
+        )
+        return None
+
+
+async def _describe_video_via_fallback(
+    video_block: VideoBlock,
+    prompt: str,
+    fallback: "tuple[object, str, str]",
+) -> str | None:
+    """One-shot call to the fallback video model.  Returns the text
+    description, or ``None`` on failure (the caller substitutes the
+    generic multimodal hint in that case).
+    """
+    chat_model, provider_id, model_id = fallback
+    try:
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    video_block,
+                    TextBlock(type="text", text=prompt),
+                ],
+            },
+        ]
+        logger.info(
+            "view_video: delegating to fallback %s/%s (prompt len=%d)",
+            provider_id, model_id, len(prompt),
+        )
+        response = await chat_model(messages)
+        # Agentscope chat models can stream (AsyncGenerator) or return
+        # a single ChatResponse depending on the ``stream`` init flag.
+        # ``get_chat_model_instance`` defaults to ``stream=True``, so
+        # we iterate and keep the final cumulative text.
+        final_text = ""
+        if hasattr(response, "__aiter__"):
+            async for chunk in response:
+                for block in getattr(chunk, "content", None) or []:
+                    if (
+                        isinstance(block, dict)
+                        and block.get("type") == "text"
+                    ):
+                        # Streamed text blocks are cumulative in agentscope.
+                        final_text = str(block.get("text") or final_text)
+        else:
+            for block in getattr(response, "content", None) or []:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    final_text = str(block.get("text") or final_text)
+        return final_text.strip() or None
+    except Exception as e:
+        logger.warning(
+            "view_video: fallback %s/%s failed: %s",
+            provider_id, model_id, e,
+        )
+        return None
+
+
+async def view_video(
+    video_path: str,
+    prompt: str | None = None,
+) -> ToolResponse:
     """Load a video file into the LLM context so the model can see it.
 
     Use this when the user asks about a video file or when another
     tool produces a video file path.  Also accepts an HTTP(S) URL —
     the URL is passed directly to the model without downloading.
 
-    When the model does not support multimodal, the video is still
-    returned (so the user/frontend can see it) along with a text hint
-    telling the agent it cannot perceive the video.
+    When the active model does not support video AND the agent has a
+    ``fallback_video_model`` configured (Settings → Agent → Fallback
+    Video Model), this tool delegates the video to that model with
+    the supplied ``prompt`` (or a detailed default prompt when none
+    is given) and returns the description as text.  The primary
+    agent can then reason about the video's contents without
+    multimodal support itself.
+
+    When the active model does not support video and **no** fallback
+    is configured, the video is still returned (so the user / frontend
+    can see it) along with a text hint telling the agent it cannot
+    perceive the video.
 
     Args:
         video_path (`str`):
             Local path or HTTP(S) URL of the video to view.
+        prompt (`str | None`, optional):
+            Question / instruction the fallback model should answer
+            about the video.  Ignored when the active model itself
+            supports video (in that case the agent reasons directly
+            over the VideoBlock).  Defaults to a generic
+            describe-everything prompt.
 
     Returns:
         `ToolResponse`:
-            A VideoBlock the model can inspect, or an error message.
+            A VideoBlock the model can inspect, a fallback text
+            description, or an error message.
     """
-    fallback_hint: str | None = None
-    if not _check_multimodal_support("video"):
-        probe_result = await _probe_multimodal_if_needed("video")
-        if probe_result is not True:
-            fallback_hint = _get_multimodal_fallback_hint("video", video_path)
-
+    # Step 1: resolve media path / URL into a VideoBlock first, because
+    # both the native-model branch and the fallback branch need it.
     if _is_url(video_path):
         err = _validate_url_extension(
             video_path,
@@ -401,38 +518,72 @@ async def view_video(video_path: str) -> ToolResponse:
         )
         if err is not None:
             return err
-        text_msg = (
-            fallback_hint
-            if fallback_hint
-            else f"Video loaded from URL: {video_path}"
+        video_block = VideoBlock(
+            type="video",
+            source={"type": "url", "url": video_path},
         )
+        video_label = f"Video loaded from URL: {video_path}"
+    else:
+        resolved, err = _validate_media_path(
+            video_path,
+            _VIDEO_EXTENSIONS,
+            "video",
+        )
+        if err is not None:
+            return err
+        video_block = VideoBlock(
+            type="video",
+            source={"type": "url", "url": str(resolved)},
+        )
+        video_label = f"Video loaded: {resolved.name}"
+
+    # Step 2: check if the active model can see video natively.
+    primary_supports_video = _check_multimodal_support("video")
+    if not primary_supports_video:
+        probe_result = await _probe_multimodal_if_needed("video")
+        primary_supports_video = probe_result is True
+
+    if primary_supports_video:
+        # Active model handles video directly — return the block +
+        # a short confirmation line.
         return ToolResponse(
-            content=[
-                VideoBlock(
-                    type="video",
-                    source={"type": "url", "url": video_path},
-                ),
-                TextBlock(type="text", text=text_msg),
-            ],
+            content=[video_block, TextBlock(type="text", text=video_label)],
         )
 
-    resolved, err = _validate_media_path(
-        video_path,
-        _VIDEO_EXTENSIONS,
-        "video",
-    )
-    if err is not None:
-        return err
+    # Step 3: active model can't see video — try the configured fallback.
+    fallback = _resolve_fallback_video_model()
+    if fallback is not None:
+        effective_prompt = (
+            prompt.strip() if isinstance(prompt, str) and prompt.strip()
+            else _DEFAULT_VIDEO_FALLBACK_PROMPT
+        )
+        description = await _describe_video_via_fallback(
+            video_block, effective_prompt, fallback,
+        )
+        if description:
+            _, provider_id, model_id = fallback
+            # Keep the VideoBlock in the response so the user /
+            # frontend can still play the video; the primary model's
+            # media-stripping pipeline will drop the block before it
+            # reaches the model, leaving only the fallback's text.
+            header = (
+                f"[Video description from fallback model "
+                f"{provider_id}/{model_id}]"
+            )
+            return ToolResponse(
+                content=[
+                    video_block,
+                    TextBlock(type="text", text=header),
+                    TextBlock(type="text", text=description),
+                ],
+            )
+        # Fallback failed — fall through to the generic hint below.
 
-    text_msg = (
-        fallback_hint if fallback_hint else f"Video loaded: {resolved.name}"
-    )
+    # Step 4: no fallback (or fallback itself failed) → generic hint.
+    fallback_hint = _get_multimodal_fallback_hint("video", video_path)
     return ToolResponse(
         content=[
-            VideoBlock(
-                type="video",
-                source={"type": "url", "url": str(resolved)},
-            ),
-            TextBlock(type="text", text=text_msg),
+            video_block,
+            TextBlock(type="text", text=fallback_hint),
         ],
     )
