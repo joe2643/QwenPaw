@@ -773,19 +773,29 @@ async def view_video(
         )
         if description:
             _, provider_id, model_id = fallback
-            # Keep the VideoBlock in the response so the user /
-            # frontend can still play the video; the primary model's
-            # media-stripping pipeline will drop the block before it
-            # reaches the model, leaving only the fallback's text.
+            # ORDER MATTERS.  Agents skim tool_result.output
+            # top-to-bottom; if the VideoBlock (which the normalizer
+            # downstream replaces with a "[video at X removed —
+            # this model cannot process video]" placeholder) sits at
+            # index 0, Claude reads the scary placeholder first and
+            # concludes the tool failed, even though the real answer
+            # follows two slots down.  Observed in production:
+            # agent quoted the placeholder verbatim as "return 仲係同樣"
+            # despite a full 109-char Qwen description sitting just
+            # below it.
+            #
+            # So put the description FIRST — the agent reads a real
+            # answer up front, then the attribution, then (after
+            # normalization) a benign note about the raw video block.
             header = (
-                f"[Video description from fallback model "
-                f"{provider_id}/{model_id}]"
+                f"[Above description produced by fallback video "
+                f"model {provider_id}/{model_id}.]"
             )
             return ToolResponse(
                 content=[
-                    video_block,
-                    TextBlock(type="text", text=header),
                     TextBlock(type="text", text=description),
+                    TextBlock(type="text", text=header),
+                    video_block,
                 ],
             )
         # Fallback failed — fall through to the generic hint below.

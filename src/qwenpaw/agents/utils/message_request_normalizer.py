@@ -116,14 +116,25 @@ def _path_preserving_placeholder(block_type: str, path: str | None) -> dict:
     the original path when we could recover one — the agent can
     then invoke other tools on the same file instead of blindly
     apologising to the user.
+
+    **Wording is load-bearing.**  An earlier version led with
+    ``"removed — this model cannot process video"`` which agents
+    (Claude in particular) parsed as "the tool failed" and
+    quoted verbatim in their reply, even when sibling content
+    blocks carried a full description from a fallback model.
+    The neutral phrasing below reads as an *informational note*
+    and lets any actual description in adjacent blocks win.
     """
     if path:
         return {
             "type": "text",
             "text": (
-                f"[{block_type} at {path} removed — this model cannot "
-                f"process {block_type}. File is still available at the "
-                f"path; use a compatible tool / fallback model to read it.]"
+                f"[Note: raw {block_type} file at {path} isn't inlined "
+                f"in this turn — the current model doesn't decode "
+                f"{block_type} directly.  If another block carries a "
+                f"description or transcription, trust that; the file "
+                f"itself is still at the path and can be reopened with "
+                f"a compatible tool / fallback model.]"
             ),
         }
     return {"type": "text", "text": MEDIA_UNSUPPORTED_PLACEHOLDER}
