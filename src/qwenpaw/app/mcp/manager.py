@@ -239,6 +239,7 @@ class MCPClientManager:
             "args": list(client_config.args),
             "env": dict(client_config.env),
             "cwd": client_config.cwd or None,
+            "tool_call_timeout": client_config.tool_call_timeout,
         }
 
         if client_config.transport == "stdio":
@@ -248,6 +249,7 @@ class MCPClientManager:
                 args=client_config.args,
                 env=client_config.env,
                 cwd=client_config.cwd or None,
+                tool_call_timeout=client_config.tool_call_timeout,
             )
             setattr(client, "_qwenpaw_rebuild_info", rebuild_info)
             return client
@@ -261,6 +263,7 @@ class MCPClientManager:
             transport=client_config.transport,
             url=client_config.url,
             headers=headers or None,
+            tool_call_timeout=client_config.tool_call_timeout,
         )
         setattr(client, "_qwenpaw_rebuild_info", rebuild_info)
         return client

@@ -29,6 +29,7 @@ from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamable_http_client
 
 from agentscope.mcp import StatefulClientBase
+from agentscope.mcp._mcp_function import MCPToolFunction
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,7 @@ class StdIOStatefulClient(StatefulClientBase):
             "ignore",
             "replace",
         ] = "strict",
+        tool_call_timeout: float | None = None,
     ) -> None:
         """Initialize the StdIO MCP client.
 
@@ -75,6 +77,13 @@ class StdIOStatefulClient(StatefulClientBase):
             cwd: The working directory to use when spawning the process
             encoding: The text encoding used when sending/receiving messages
             encoding_error_handler: The text encoding error handler
+            tool_call_timeout: Per-call timeout (seconds).  ``None``
+                keeps the MCP library default (no timeout).  Forwarded
+                to ``mcp.ClientSession.call_tool``'s
+                ``read_timeout_seconds`` for both direct ``call_tool``
+                usage and the ``MCPToolFunction`` callables handed to
+                agentscope's Toolkit, so hung backends become
+                surfaced errors instead of silent forever-waits.
 
         Raises:
             TypeError: If name or command is not a string
@@ -95,6 +104,7 @@ class StdIOStatefulClient(StatefulClientBase):
             encoding=encoding,
             encoding_error_handler=encoding_error_handler,
         )
+        self._tool_call_timeout = tool_call_timeout
 
         # Lifecycle management
         self._lifecycle_task: asyncio.Task | None = None
@@ -295,10 +305,39 @@ class StdIOStatefulClient(StatefulClientBase):
 
         Raises:
             RuntimeError: If not connected
+            asyncio.TimeoutError: If ``tool_call_timeout`` was set and
+                the upstream didn't respond in time.
         """
         self._validate_connection()
 
-        return await self.session.call_tool(name, arguments or {})
+        return await _call_with_timeout(
+            self.session, name, arguments or {}, self._tool_call_timeout,
+        )
+
+    async def get_callable_function(
+        self,
+        func_name: str,
+        wrap_tool_result: bool = True,
+        execution_timeout: float | None = None,
+    ) -> MCPToolFunction:
+        """Override agentscope's default to inject our configured
+        ``tool_call_timeout`` when the caller doesn't specify one.
+
+        Toolkit.register_mcp_client builds each tool via
+        ``get_callable_function`` and passes ``execution_timeout=None``
+        by default; the timeout only reaches the MCP session if we
+        fill it in here.  Explicit callers can still override.
+        """
+        resolved_timeout = (
+            execution_timeout
+            if execution_timeout is not None
+            else self._tool_call_timeout
+        )
+        return await super().get_callable_function(
+            func_name=func_name,
+            wrap_tool_result=wrap_tool_result,
+            execution_timeout=resolved_timeout,
+        )
 
     def _validate_connection(self) -> None:
         """Validate the connection to the MCP server.
@@ -319,6 +358,29 @@ class StdIOStatefulClient(StatefulClientBase):
             )
 
 
+async def _call_with_timeout(
+    session: ClientSession,
+    name: str,
+    arguments: dict,
+    timeout: float | None,
+):
+    """Invoke ``session.call_tool`` with optional bounded wait.
+
+    When ``timeout`` is ``None`` we pass through to the library
+    default (no read timeout).  When ``timeout`` is set we forward
+    it as ``read_timeout_seconds`` — the mcp library converts this
+    into a JSON-RPC deadline and the call fails cleanly (rather than
+    blocking on a hung subprocess).  Either way the coroutine is a
+    proper ``await`` point, so ``task.cancel()`` from outside (e.g.
+    ``/stop``) unwinds the call immediately.
+    """
+    if timeout is None:
+        return await session.call_tool(name, arguments)
+    return await session.call_tool(
+        name, arguments, read_timeout_seconds=timedelta(seconds=timeout),
+    )
+
+
 class HttpStatefulClient(StatefulClientBase):
     """HTTP/SSE MCP client with proper cross-task lifecycle management.
 
@@ -337,6 +399,7 @@ class HttpStatefulClient(StatefulClientBase):
         headers: dict[str, str] | None = None,
         timeout: float = 30,
         sse_read_timeout: float = 60 * 5,
+        tool_call_timeout: float | None = None,
         **client_kwargs: Any,
     ) -> None:
         """Initialize the HTTP MCP client.
@@ -348,6 +411,8 @@ class HttpStatefulClient(StatefulClientBase):
             headers: Additional headers to include in the HTTP request
             timeout: The timeout for the HTTP request in seconds
             sse_read_timeout: The timeout for reading SSE in seconds
+            tool_call_timeout: Per-call tool timeout (seconds) — see
+                :class:`StdIOStatefulClient` for full semantics.
             **client_kwargs: Additional keyword arguments for the client
 
         Raises:
@@ -375,6 +440,7 @@ class HttpStatefulClient(StatefulClientBase):
         self.timeout = timeout
         self.sse_read_timeout = sse_read_timeout
         self.client_kwargs = client_kwargs
+        self._tool_call_timeout = tool_call_timeout
 
         # Lifecycle management
         self._lifecycle_task: asyncio.Task | None = None
@@ -575,10 +641,32 @@ class HttpStatefulClient(StatefulClientBase):
 
         Raises:
             RuntimeError: If not connected
+            asyncio.TimeoutError: If ``tool_call_timeout`` was set and
+                the upstream didn't respond in time.
         """
         self._validate_connection()
 
-        return await self.session.call_tool(name, arguments or {})
+        return await _call_with_timeout(
+            self.session, name, arguments or {}, self._tool_call_timeout,
+        )
+
+    async def get_callable_function(
+        self,
+        func_name: str,
+        wrap_tool_result: bool = True,
+        execution_timeout: float | None = None,
+    ) -> MCPToolFunction:
+        """See :meth:`StdIOStatefulClient.get_callable_function`."""
+        resolved_timeout = (
+            execution_timeout
+            if execution_timeout is not None
+            else self._tool_call_timeout
+        )
+        return await super().get_callable_function(
+            func_name=func_name,
+            wrap_tool_result=wrap_tool_result,
+            execution_timeout=resolved_timeout,
+        )
 
     def _validate_connection(self) -> None:
         """Validate the connection to the MCP server.

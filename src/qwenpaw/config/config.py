@@ -1221,6 +1221,17 @@ class MCPClientConfig(BaseModel):
     args: List[str] = Field(default_factory=list)
     env: Dict[str, str] = Field(default_factory=dict)
     cwd: str = ""
+    tool_call_timeout: Optional[float] = Field(
+        default=None,
+        description=(
+            "Per-call timeout in seconds for every tool invocation on "
+            "this MCP client.  ``None`` keeps the library default (no "
+            "timeout).  Set this to cap tools whose backend can hang "
+            "— e.g. a vision-analysis stdio subprocess that retries a "
+            "dead HTTPS endpoint forever.  Forwarded verbatim to "
+            "``mcp.ClientSession.call_tool``'s ``read_timeout_seconds``."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod

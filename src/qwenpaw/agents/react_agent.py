@@ -701,6 +701,7 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                     args=rebuild_info.get("args", []),
                     env=rebuild_info.get("env", {}),
                     cwd=rebuild_info.get("cwd"),
+                    tool_call_timeout=rebuild_info.get("tool_call_timeout"),
                 )
                 setattr(rebuilt_client, "_qwenpaw_rebuild_info", rebuild_info)
                 return rebuilt_client
@@ -716,6 +717,7 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                 transport=transport,
                 url=rebuild_info.get("url"),
                 headers=headers,
+                tool_call_timeout=rebuild_info.get("tool_call_timeout"),
             )
             setattr(rebuilt_client, "_qwenpaw_rebuild_info", rebuild_info)
             return rebuilt_client
