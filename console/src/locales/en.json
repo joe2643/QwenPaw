@@ -15,6 +15,7 @@
     "enabled": "Enabled",
     "disabled": "Disabled",
     "preview": "Preview",
+    "view": "View",
     "content": "Content",
     "loading": "Loading...",
     "copy": "Copy",
@@ -114,6 +115,8 @@
     "stdioBufferLimitHelp": "Maximum stdio line buffer size in bytes for the ACP subprocess.",
     "stdioBufferLimitRequired": "Please enter a stdio buffer limit",
     "stdioBufferLimitMin": "Stdio buffer limit must be at least 1 byte",
+    "docs": "Setup Docs",
+    "docsHelp": "Open the ACP integration docs and jump to the \"How to configure external runners\" section",
     "notSet": "Not set",
     "configSaved": "ACP configuration saved",
     "configFailed": "Failed to save ACP configuration"
@@ -121,7 +124,6 @@
   "voiceTranscription": {
     "title": "Voice Transcription",
     "description": "Configure how incoming audio and voice messages are handled.",
-    "loadFailed": "Failed to load audio mode settings",
     "saveSuccess": "Audio mode saved",
     "saveFailed": "Failed to save audio mode",
     "audioModeLabel": "Audio Mode",
@@ -351,7 +353,12 @@
     "selectBuiltin": "Builtin",
     "selectNone": "None",
     "noPoolSkills": "No skills available in pool",
-    "addSkillsToAgent": "Add Skills"
+    "addSkillsToAgent": "Add Skills",
+    "model": "Model",
+    "modelHelp": "Assign a specific LLM model to this agent. Leave empty to use the global default.",
+    "modelPlaceholder": "Use global default",
+    "noConfiguredModels": "No configured models",
+    "modelColumn": "Model"
   },
   "skills": {
     "title": "Skills",
@@ -782,6 +789,24 @@
     "wecomAuthFailed": "Authorization failed: {{msg}}",
     "voiceSetupGuide": "Set up a Twilio account, purchase a phone number, then enter your credentials below. Find your Account SID and Auth Token on the Twilio Console dashboard. The Phone Number SID is listed under Phone Numbers → Active Numbers.",
     "voiceSetupLink": "Open Twilio Console",
+    "sipSetupGuide": "Configure a SIP registrar (e.g. Asterisk, FreeSWITCH) and enter your SIP credentials below. In Dev mode, pyVoIP handles SIP/RTP locally. In Production mode, LiveKit SIP Server is used.",
+    "sipMode": "SIP Mode",
+    "sipModeTooltip": "Dev: pure-Python pyVoIP for local testing. Production: LiveKit SIP Server for high concurrency.",
+    "sipServer": "SIP Server",
+    "sipServerPlaceholder": "Leave empty to use built-in registrar",
+    "sipServerPlaceholderLivekit": "Not needed for LiveKit mode",
+    "sipUsername": "SIP Username",
+    "sipPassword": "SIP Password",
+    "sipPort": "SIP Port",
+    "sipTransport": "Transport",
+    "sipDashscopeApiKey": "DashScope API Key",
+    "sipDashscopeApiKeyTooltip": "API key for Aliyun DashScope STT/TTS. If empty, falls back to the DASHSCOPE_API_KEY environment variable.",
+    "livekitUrl": "LiveKit URL",
+    "livekitApiKey": "LiveKit API Key",
+    "livekitApiSecret": "LiveKit API Secret",
+    "livekitSipTrunkId": "LiveKit SIP Trunk ID",
+    "livekitRoomName": "LiveKit Room Name",
+    "livekitRoomNameTooltip": "The LiveKit room name to join and wait for SIP calls. Must match the room name in your SIP Dispatch Rule.",
     "xiaoyiSetupGuide": "Please create an agent on Huawei Developer Platform and get AK/SK and Agent ID. AK/SK can be found in the credential management page.",
     "filterAll": "All",
     "builtin": "Built-in",
@@ -1034,6 +1059,7 @@
     "modelNamePlaceholder": "e.g. GPT-4o, Gemini 2.0 Flash",
     "modelAdded": "Model \"{{name}}\" added",
     "modelAddFailed": "Failed to add model",
+    "modelAlreadyExists": "Model ID \"{{id}}\" already exists",
     "autoDiscoverModelsSuccess": "Auto discovery complete. Added {{count}} models",
     "autoDiscoverModelsNoNew": "Auto discovery complete. No new models were added",
     "autoDiscoverModelsFailed": "Failed to auto discover models",
@@ -1244,7 +1270,7 @@
     "llmAcquireTimeoutGtPauseJitter": "Slot acquire timeout must be greater than rate limit pause + jitter",
     "contextManagementTitle": "Context Management",
     "memoryManagerBackend": "Memory Manager Backend",
-    "memoryManagerBackendTooltip": "Backend for the memory manager. Currently only ReMeLight is supported.",
+    "memoryManagerBackendTooltip": "Backend for the memory manager. Currently only remelight is supported.",
     "memoryManagerBackendRestartWarning": "Switching the memory manager backend does not support hot reload. Save and restart QwenPaw for changes to take effect.",
     "maxIters": "Max Iterations",
     "maxItersTooltip": "Maximum number of reasoning-acting iterations for ReAct agent",
@@ -1253,6 +1279,13 @@
     "maxItersMin": "Max iterations must be at least 1",
     "autoContinueOnTextOnly": "Auto-continue on text-only step",
     "autoContinueOnTextOnlyTooltip": "If the model ends a reasoning step with only text (no tool calls), inject a hint and run one extra reasoning pass with the same tool policy so multi-step tasks are less likely to stop silently. Turn off to match legacy behavior. May increase token usage when enabled.",
+    "shellCommandTimeout": "Shell Command Timeout (s)",
+    "shellCommandTimeoutTooltip": "Default timeout in seconds for the execute_shell_command tool. The LLM can still override this per-call via the timeout parameter. Useful for long-running tasks like compilation or data processing.",
+    "shellCommandTimeoutPlaceholder": "Enter timeout",
+    "shellCommandTimeoutRequired": "Shell command timeout is required",
+    "shellCommandTimeoutMin": "Shell command timeout must be at least 1 second",
+    "planMode": "Plan Mode",
+    "planModeTooltip": "Enable plan mode to use /plan <description> for structured task planning. When enabled, plan tools are registered and the plan panel becomes available.",
     "maxInputLength": "Max Input Length",
     "maxInputLengthTooltip": "Maximum input length (tokens) for the model context window",
     "maxInputLengthPlaceholder": "Enter max input length",
@@ -1284,6 +1317,12 @@
     "toolResultCompactRetentionDays": "Tool Result File Retention Days",
     "toolResultCompactRetentionDaysTooltip": "Number of days to retain compacted tool result files, expired files are auto-cleaned",
     "toolResultCompactRetentionDaysRequired": "Tool result file retention days is required",
+    "exemptFileExtensions": "Exempt File Extensions",
+    "exemptFileExtensionsTooltip": "read_file tool results for these file extensions will use the recent messages threshold instead of the older messages threshold",
+    "exemptFileExtensionsPlaceholder": ".md, .txt, .json",
+    "exemptToolNames": "Exempt Tool Names",
+    "exemptToolNamesTooltip": "Tool results from these tools will use the recent messages threshold instead of the older messages threshold",
+    "exemptToolNamesPlaceholder": "chat_with_agent, list_agents",
     "language": "Agent Language",
     "languageTooltip": "Language for agent persona files (SOUL.md, AGENTS.md, etc.). Changing this will re-copy MD files in the selected language.",
     "languageConfirmTitle": "Change Agent Language",
@@ -1329,15 +1368,15 @@
     "dreamCron": "Dream",
     "dreamCronTooltip": "Cron expression for periodically optimizing long-term memories through dream state (leave empty to disable)",
     "dreamCronPlaceholder": "0 23 * * *",
-    "forceMemorySearch": "Force Memory Search (beta)",
-    "forceMemorySearchTooltip": "Force memory search to run on every conversation turn. Each query will retrieve relevant memories, helping QwenPaw understand you better — but this increases token consumption. Note: enabling force memory search will break the KV cache, reducing cache hit rate. Use with caution.",
-    "forceMaxResults": "Force Search Max Results",
-    "forceMaxResultsTooltip": "Maximum number of results returned when force memory search is enabled",
-    "forceMaxResultsRequired": "Max results is required",
-    "forceMaxResultsMin": "Max results must be at least 1",
-    "forceMinScore": "Force Search Min Score",
-    "forceMinScoreTooltip": "Minimum relevance score threshold (0–1) when force memory search is enabled",
-    "forceMinScoreRequired": "Min score is required",
+    "autoMemorySearch": "Auto Memory Search (beta)",
+    "autoMemorySearchTooltip": "Auto memory search to run on every conversation turn. Each query will automatically invoke memory search capabilities, helping QwenPaw understand you better — but this increases token consumption.",
+    "autoMaxResults": "Auto Search Max Results",
+    "autoMaxResultsTooltip": "Maximum number of results returned when auto memory search is enabled",
+    "autoMaxResultsRequired": "Max results is required",
+    "autoMaxResultsMin": "Max results must be at least 1",
+    "autoMinScore": "Auto Search Min Score",
+    "autoMinScoreTooltip": "Minimum relevance score threshold (0–1) when auto memory search is enabled",
+    "autoMinScoreRequired": "Min score is required",
     "embeddingConfigTitle": "Embedding Model Config",
     "embeddingBackend": "Backend",
     "embeddingBackendTooltip": "Embedding backend provider, e.g. openai",
@@ -1369,6 +1408,21 @@
     "embeddingMaxBatchSizeTooltip": "Maximum number of items in a single batch embedding request",
     "embeddingMaxBatchSizeRequired": "Max batch size is required",
     "embeddingRestartWarning": "Embedding model config does not support hot reload. Save and restart the service for changes to take effect.",
+    "toolExecutionLevelTitle": "Tool Execution Security",
+    "toolExecutionLevel": {
+      "title": "Tool Execution Security",
+      "alertMessage": "Configure tool call approval policy to control the security level when agents execute tools",
+      "strict": "Strict Mode",
+      "strictDesc": "All tool calls require approval, highest security level",
+      "smart": "Smart Mode",
+      "smartDesc": "Low-risk tools auto-approved, medium+ risk tools require approval",
+      "auto": "Auto Mode",
+      "autoDesc": "Only tools explicitly marked for approval require approval (default)",
+      "off": "Off Mode",
+      "offDesc": "Disable all tool approvals, all tools execute automatically"
+    },
+    "saveLevelSuccess": "Tool execution security level saved",
+    "saveLevelFailed": "Failed to save tool execution security level",
     "maxContextLength": "Max Context Length",
     "maxContextLengthTooltip": "Maximum token count for the model context window, determining how much history fits in each request",
     "maxContextLengthRequired": "Max context length is required",
@@ -1378,7 +1432,26 @@
     "embeddingEnableHint": "Fill in both Base URL and Model Name to enable the embedding feature. API Key is optional.",
     "rebuildMemoryIndexOnStart": "Rebuild Memory Index on Start",
     "rebuildMemoryIndexOnStartTooltip": "Clear and rebuild the memory search index when the agent starts. Disable to skip re-indexing and only watch for new file changes (faster startup, but index may be out of sync).",
-    "toolResultCompactRecentGtOld": "Recent messages threshold must be greater than or equal to the older messages threshold"
+    "toolResultCompactRecentGtOld": "Recent messages threshold must be greater than or equal to the older messages threshold",
+    "lightContextTitle": "Context Management",
+    "remeLightMemoryTitle": "Long-term Memory",
+    "dialogPath": "Dialog Storage Path",
+    "dialogPathTooltip": "Relative path for dialog persistence storage (relative to working_dir)",
+    "dialogPathPlaceholder": "dialog",
+    "contextCompactCollapseLabel": "Context Compaction",
+    "toolResultPruningCollapseLabel": "Tool Result Pruning",
+    "autoMemorySearchCollapseLabel": "Auto Memory Search",
+    "embeddingConfigCollapseLabel": "Embedding Model Config",
+    "summarizeWhenCompact": "Memory on Compact",
+    "summarizeWhenCompactTooltip": "Automatically generate and save memory during context compaction",
+    "autoMemoryInterval": "Auto Memory Interval",
+    "autoMemoryIntervalTooltip": "Trigger auto memory every N user queries. Leave empty to disable periodic auto memory. 1 means auto memory after every query, 2 means every 2 queries, etc. Warning: setting too low (e.g., 1-3) may cause high token usage and heavy background task burden. Recommended: 5 or 10.",
+    "autoMemoryIntervalPlaceholder": "Leave empty to disable periodic auto memory",
+    "recursiveFileWatcher": "Recursive File Watcher",
+    "recursiveFileWatcherTooltip": "Watch the memory directory recursively. Enable to include files in subdirectories like memory/subdirectory/* in vector search indexing.",
+    "contextManagerBackend": "Context Manager Backend",
+    "contextManagerBackendTooltip": "Backend type for the context manager. Currently only Light is supported.",
+    "backendRestartWarning": "Switching backends does not support hot reload. Save and restart QwenPaw for changes to take effect."
   },
   "tools": {
     "title": "Built-in Tools",
@@ -1462,6 +1535,9 @@
       },
       "skills": {
         "description": "List chat-available skills and expose explicit skill commands"
+      },
+      "plan": {
+        "description": "Create a structured plan to decompose the task into subtasks"
       }
     },
     "attachments": {
@@ -1483,6 +1559,13 @@
       "userMessage": "User",
       "assistantMessage": "Assistant",
       "titleMatch": "Title"
+    },
+    "contextMenu": {
+      "open": "Open",
+      "rename": "Rename",
+      "pin": "Pin",
+      "unpin": "Unpin",
+      "delete": "Delete"
     }
   },
   "security": {
@@ -1558,6 +1641,53 @@
         "TOOL_CMD_SERVICE_RESTART": "Detects service management commands that can disrupt system services",
         "TOOL_CMD_PROCESS_KILL": "Detects process termination commands that may kill critical processes",
         "TOOL_CMD_PRIVILEGE_ESCALATION": "Detects privilege escalation attempts using sudo, su, doas, pkexec, or runas"
+      },
+      "categories": {
+        "command_injection": "Command Injection",
+        "code_execution": "Code Execution",
+        "data_exfiltration": "Data Exfiltration",
+        "path_traversal": "Path Traversal",
+        "sensitive_file_access": "Sensitive File Access",
+        "network_abuse": "Network Abuse",
+        "credential_exposure": "Credential Exposure",
+        "resource_abuse": "Resource Abuse",
+        "privilege_escalation": "Privilege Escalation",
+        "prompt_injection": "Prompt Injection",
+        "other": "Other"
+      }
+    },
+    "shellEvasion": {
+      "title": "Shell Evasion Detection",
+      "description": "Configure which shell evasion and obfuscation detection checks are enabled. These checks detect techniques that attempt to hide malicious intent from simpler regex-only detection.",
+      "checks": {
+        "command_substitution": {
+          "name": "Command Substitution",
+          "description": "Detects $(), backticks, process substitution, and other command substitution patterns"
+        },
+        "obfuscated_flags": {
+          "name": "Obfuscated Flags",
+          "description": "Detects ANSI-C quoting, locale quoting, and empty-quote flag obfuscation"
+        },
+        "backslash_escaped_whitespace": {
+          "name": "Backslash Escaped Whitespace",
+          "description": "Detects backslash-escaped spaces/tabs that can alter command parsing"
+        },
+        "backslash_escaped_operators": {
+          "name": "Backslash Escaped Operators",
+          "description": "Detects backslash before shell operators (;|&<>) that can hide command structure"
+        },
+        "newlines": {
+          "name": "Hidden Newlines",
+          "description": "Detects newlines and carriage returns that could separate hidden commands"
+        },
+        "comment_quote_desync": {
+          "name": "Comment Quote Desync",
+          "description": "Detects quote characters inside # comments that can desync quote tracking"
+        },
+        "quoted_newline": {
+          "name": "Quoted Newline",
+          "description": "Detects newlines inside quoted strings followed by #-prefixed lines that can hide arguments"
+        }
       }
     },
     "fileGuard": {
@@ -1575,6 +1705,23 @@
       "saveSuccess": "File guard settings saved",
       "saveFailed": "Failed to save file guard settings",
       "loadFailed": "Failed to load file guard settings"
+    },
+    "allowNoAuthHosts": {
+      "title": "Allow No Auth Hosts",
+      "warningTitle": "Security Warning",
+      "warningDescription": "IP addresses in this list can access API endpoints without authentication. By default, localhost (127.0.0.1 and ::1) are allowed for CLI access. Only add trusted IP addresses. WARNING: Adding untrusted IPs poses a serious security risk.",
+      "ipAddress": "IP Address",
+      "actions": "Actions",
+      "add": "Add",
+      "inputPlaceholder": "Enter IP address (e.g., 192.168.1.100 or ::1)",
+      "empty": "No IP addresses configured",
+      "default": "Default",
+      "removeConfirm": "Remove this IP address from the whitelist?",
+      "duplicate": "This IP address is already in the list",
+      "invalidIP": "Invalid IP address format",
+      "saveSuccess": "Allow no auth hosts settings saved",
+      "saveFailed": "Failed to save allow no auth hosts settings",
+      "loadFailed": "Failed to load allow no auth hosts settings"
     },
     "skillScanner": {
       "title": "Skill Scanner",
@@ -1665,5 +1812,34 @@
     "nothingToUpdate": "Please enter a new username or password",
     "passwordEmpty": "Password cannot be blank",
     "usernameEmpty": "Username cannot be blank"
+  },
+  "approval": {
+    "title": "Security Approval Required",
+    "tool": "Tool",
+    "severity": "Severity",
+    "findings": "Findings",
+    "parameters": "Parameters",
+    "approve": "Approve",
+    "deny": "Deny",
+    "source": "Source",
+    "subSession": "Sub-Agent",
+    "approved": "Tool call approved",
+    "denied": "Tool call denied",
+    "approveFailed": "Failed to approve",
+    "cancelTask": "Cancel Task",
+    "denyFailed": "Failed to deny"
+  },
+  "plan": {
+    "title": "Plan",
+    "noPlan": "No active plan",
+    "noPlanHint": "Use /plan <description> to create a plan",
+    "progress": "Progress",
+    "outcome": "Outcome",
+    "state": {
+      "todo": "Todo",
+      "in_progress": "In Progress",
+      "done": "Done",
+      "abandoned": "Abandoned"
+    }
   }
 }

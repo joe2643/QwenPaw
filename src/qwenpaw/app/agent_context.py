@@ -35,6 +35,12 @@ _current_channel_meta: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
     default=None,
 )
 
+# Context variable to store current root session id for cross-session approval
+_current_root_session_id: ContextVar[Optional[str]] = ContextVar(
+    "current_root_session_id",
+    default=None,
+)
+
 
 async def get_agent_for_request(
     request: Request,
@@ -178,3 +184,21 @@ def get_current_channel_meta() -> Optional[Dict[str, Any]]:
     """Return the current request's channel_meta or ``None`` when
     no agent request is in flight."""
     return _current_channel_meta.get()
+
+
+def set_current_root_session_id(root_session_id: Optional[str]) -> None:
+    """Set current root session ID in context.
+
+    Args:
+        root_session_id: Root session ID to set
+    """
+    _current_root_session_id.set(root_session_id)
+
+
+def get_current_root_session_id() -> Optional[str]:
+    """Get current root session ID from context.
+
+    Returns:
+        Root session ID or None
+    """
+    return _current_root_session_id.get()

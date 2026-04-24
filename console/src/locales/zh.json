@@ -15,6 +15,7 @@
     "enabled": "已启用",
     "disabled": "已禁用",
     "preview": "预览",
+    "view": "查看",
     "content": "内容",
     "loading": "加载中...",
     "copy": "复制",
@@ -175,7 +176,12 @@
     "selectBuiltin": "内置",
     "selectNone": "清空",
     "noPoolSkills": "技能池中暂无可用技能",
-    "addSkillsToAgent": "添加技能"
+    "addSkillsToAgent": "添加技能",
+    "model": "模型",
+    "modelHelp": "为此智能体指定特定的 LLM 模型。留空则使用全局默认模型。",
+    "modelPlaceholder": "使用全局默认",
+    "noConfiguredModels": "暂无已配置的模型",
+    "modelColumn": "模型"
   },
   "acp": {
     "title": "ACP",
@@ -204,6 +210,8 @@
     "stdioBufferLimitHelp": "ACP 子进程 stdio 单行读取缓冲的最大字节数。",
     "stdioBufferLimitRequired": "请输入 stdio 缓冲上限",
     "stdioBufferLimitMin": "stdio 缓冲上限至少为 1 字节",
+    "docs": "配置文档",
+    "docsHelp": "打开 ACP 集成文档，并跳转到“如何配置外部 runner”章节",
     "notSet": "未设置",
     "configSaved": "ACP 配置已保存",
     "configFailed": "ACP 配置保存失败"
@@ -644,6 +652,24 @@
     "wecomAuthFailed": "授权失败：{{msg}}",
     "voiceSetupGuide": "请先注册 Twilio 账户并购买电话号码，然后在下方填写凭据。Account SID 和 Auth Token 可在 Twilio 控制台首页找到。Phone Number SID 在 Phone Numbers → Active Numbers 中查看。",
     "voiceSetupLink": "打开 Twilio 控制台",
+    "sipSetupGuide": "配置 SIP 注册服务器（如 Asterisk、FreeSWITCH），然后在下方填写 SIP 凭据。Dev 模式使用 pyVoIP 在本地处理 SIP/RTP；Production 模式使用 LiveKit SIP Server。",
+    "sipMode": "SIP 模式",
+    "sipModeTooltip": "Dev：纯 Python pyVoIP，适合本地开发测试。Production：LiveKit SIP Server，适合高并发生产环境。",
+    "sipServer": "SIP 服务器",
+    "sipServerPlaceholder": "留空使用内置注册服务器",
+    "sipServerPlaceholderLivekit": "LiveKit 模式无需填写",
+    "sipUsername": "SIP 用户名",
+    "sipPassword": "SIP 密码",
+    "sipPort": "SIP 端口",
+    "sipTransport": "传输协议",
+    "sipDashscopeApiKey": "DashScope API Key",
+    "sipDashscopeApiKeyTooltip": "阿里云 DashScope STT/TTS 的 API Key。留空则回退到 DASHSCOPE_API_KEY 环境变量。",
+    "livekitUrl": "LiveKit URL",
+    "livekitApiKey": "LiveKit API Key",
+    "livekitApiSecret": "LiveKit API Secret",
+    "livekitSipTrunkId": "LiveKit SIP Trunk ID",
+    "livekitRoomName": "LiveKit 房间名称",
+    "livekitRoomNameTooltip": "Agent 连入并等待 SIP 来电的 LiveKit 房间名称，需与 SIP Dispatch Rule 中配置的房间名一致。",
     "xiaoyiSetupGuide": "请在华为开发者平台创建智能体并获取 AK/SK 和 Agent ID。AK/SK 可在凭证管理页面找到。",
     "filterAll": "全部",
     "builtin": "内置",
@@ -896,6 +922,7 @@
     "modelNamePlaceholder": "例如 GPT-4o, Gemini 2.0 Flash",
     "modelAdded": "模型 \"{{name}}\" 已添加",
     "modelAddFailed": "添加模型失败",
+    "modelAlreadyExists": "模型 ID \"{{id}}\" 已存在",
     "autoDiscoverModelsSuccess": "自动发现完成，新增 {{count}} 个模型",
     "autoDiscoverModelsNoNew": "自动发现完成，未新增模型",
     "autoDiscoverModelsFailed": "自动发现模型失败",
@@ -1106,7 +1133,7 @@
     "llmAcquireTimeoutGtPauseJitter": "槽位获取超时必须大于限流暂停时长与抖动范围之和",
     "contextManagementTitle": "上下文管理",
     "memoryManagerBackend": "记忆管理后端",
-    "memoryManagerBackendTooltip": "记忆管理器的后端类型，目前仅支持 ReMeLight",
+    "memoryManagerBackendTooltip": "记忆管理器的后端类型，目前仅支持 remelight",
     "memoryManagerBackendRestartWarning": "切换记忆管理后端不支持热更新，保存后需要重启 QwenPaw 才能生效",
     "maxIters": "最大迭代次数",
     "maxItersTooltip": "ReAct 智能体的最大推理-行动迭代次数",
@@ -1115,6 +1142,13 @@
     "maxItersMin": "最大迭代次数必须大于等于 1",
     "autoContinueOnTextOnly": "纯文本步骤自动续跑",
     "autoContinueOnTextOnlyTooltip": "当某轮推理只输出文字、未调用任何工具时，注入提示并额外进行一轮推理（工具策略与当前步相同），减少多步任务「无声中断」。关闭则与旧版行为一致。开启后可能增加 token 消耗。",
+    "shellCommandTimeout": "Shell 命令超时（秒）",
+    "shellCommandTimeoutTooltip": "execute_shell_command 工具的默认超时时间（秒）。LLM 在单次调用时仍可通过 timeout 参数覆盖此值。适用于编译、数据处理等耗时任务。",
+    "shellCommandTimeoutPlaceholder": "请输入超时时间",
+    "shellCommandTimeoutRequired": "Shell 命令超时为必填项",
+    "shellCommandTimeoutMin": "Shell 命令超时至少为 1 秒",
+    "planMode": "计划模式",
+    "planModeTooltip": "启用后可使用 /plan <描述> 进行结构化任务规划。启用时会注册 plan 相关工具，并显示计划面板。",
     "maxInputLength": "最大输入长度",
     "maxInputLengthTooltip": "模型上下文窗口的最大输入长度（token 数）",
     "maxInputLengthPlaceholder": "请输入最大输入长度",
@@ -1146,6 +1180,12 @@
     "toolResultCompactRetentionDays": "工具调用的文件保留天数",
     "toolResultCompactRetentionDaysTooltip": "压缩后的工具结果文件保留天数，过期自动清理",
     "toolResultCompactRetentionDaysRequired": "工具调用的文件保留天数为必填项",
+    "exemptFileExtensions": "豁免文件后缀",
+    "exemptFileExtensionsTooltip": "这些文件后缀的 read_file 工具结果将使用最新消息的压缩阈值，而不是早期消息阈值",
+    "exemptFileExtensionsPlaceholder": ".md, .txt, .json",
+    "exemptToolNames": "豁免工具名称",
+    "exemptToolNamesTooltip": "这些工具的调用结果将使用最新消息的压缩阈值，而不是早期消息阈值",
+    "exemptToolNamesPlaceholder": "chat_with_agent, list_agents",
     "language": "智能体语言",
     "languageTooltip": "智能体人设文件（SOUL.md、AGENTS.md 等）使用的语言。切换语言后将自动重新复制对应语言的 MD 文件。",
     "languageConfirmTitle": "切换智能体语言",
@@ -1191,15 +1231,15 @@
     "dreamCron": "梦境",
     "dreamCronTooltip": "设置梦境任务自动整理和优化长期记忆（留空则禁用）",
     "dreamCronPlaceholder": "0 23 * * *",
-    "forceMemorySearch": "强制记忆搜索(beta)",
-    "forceMemorySearchTooltip": "每轮对话都强制触发记忆搜索。每次 query 进来都会调用记忆，让 QwenPaw 更懂你，但会增加 token 消耗。注意：强制记忆搜索会破坏 KV Cache，造成缓存命中率降低，请谨慎开启。",
-    "forceMaxResults": "强制搜索最大结果数",
-    "forceMaxResultsTooltip": "强制记忆搜索时返回的最大结果数",
-    "forceMaxResultsRequired": "最大结果数为必填项",
-    "forceMaxResultsMin": "最大结果数必须大于等于 1",
-    "forceMinScore": "强制搜索最低相关性分数",
-    "forceMinScoreTooltip": "强制记忆搜索时结果的最低相关性分数阈值（0~1）",
-    "forceMinScoreRequired": "最低相关性分数为必填项",
+    "autoMemorySearch": "自动记忆搜索(beta)",
+    "autoMemorySearchTooltip": "每轮对话都自动触发记忆搜索。每次 query 进来都会自动调用记忆搜索能力，让 QwenPaw 更懂你，但会增加 token 消耗。",
+    "autoMaxResults": "自动搜索最大结果数",
+    "autoMaxResultsTooltip": "自动记忆搜索时返回的最大结果数",
+    "autoMaxResultsRequired": "最大结果数为必填项",
+    "autoMaxResultsMin": "最大结果数必须大于等于 1",
+    "autoMinScore": "自动搜索最低相关性分数",
+    "autoMinScoreTooltip": "自动记忆搜索时结果的最低相关性分数阈值（0~1）",
+    "autoMinScoreRequired": "最低相关性分数为必填项",
     "embeddingConfigTitle": "向量模型配置",
     "embeddingBackend": "后端类型",
     "embeddingBackendTooltip": "向量模型后端，如 openai",
@@ -1231,6 +1271,21 @@
     "embeddingMaxBatchSizeTooltip": "单次批量向量化请求的最大条目数",
     "embeddingMaxBatchSizeRequired": "最大批处理大小为必填项",
     "embeddingRestartWarning": "向量模型配置不支持热更新，保存后需要重启服务才能生效",
+    "toolExecutionLevelTitle": "工具执行安全",
+    "toolExecutionLevel": {
+      "title": "工具执行安全",
+      "alertMessage": "配置工具调用的审批策略，控制智能体执行工具时的安全级别",
+      "strict": "严格模式",
+      "strictDesc": "所有工具调用都需要审批，最高安全级别",
+      "smart": "智能模式",
+      "smartDesc": "低风险工具自动放行，中高风险工具需要审批",
+      "auto": "自动模式",
+      "autoDesc": "仅被明确标记为需要审批的工具才会要求审批（默认）",
+      "off": "关闭模式",
+      "offDesc": "关闭所有工具审批，所有工具自动执行"
+    },
+    "saveLevelSuccess": "工具执行安全级别已保存",
+    "saveLevelFailed": "保存工具执行安全级别失败",
     "maxContextLength": "最大上下文长度",
     "maxContextLengthTooltip": "模型上下文窗口的最大 token 数，决定每次请求能携带的最大历史长度",
     "maxContextLengthRequired": "最大上下文长度为必填项",
@@ -1240,7 +1295,26 @@
     "embeddingEnableHint": "同时填写 Base URL 和模型名称后即可启用向量模型功能，API Key 按需填写",
     "rebuildMemoryIndexOnStart": "启动时重建记忆索引",
     "rebuildMemoryIndexOnStartTooltip": "智能体启动时清空并重建记忆搜索索引。关闭后跳过重新索引，仅监听新文件变化（启动更快，但索引可能与文件不同步）",
-    "toolResultCompactRecentGtOld": "最新消息阈值必须大于或等于早期消息阈值"
+    "toolResultCompactRecentGtOld": "最新消息阈值必须大于或等于早期消息阈值",
+    "lightContextTitle": "上下文管理",
+    "remeLightMemoryTitle": "长期记忆",
+    "dialogPath": "对话存储路径",
+    "dialogPathTooltip": "对话记录持久化存储的相对路径（相对于 working_dir）",
+    "dialogPathPlaceholder": "dialog",
+    "contextCompactCollapseLabel": "上下文压缩",
+    "toolResultPruningCollapseLabel": "工具结果压缩",
+    "autoMemorySearchCollapseLabel": "自动记忆搜索",
+    "embeddingConfigCollapseLabel": "向量模型配置",
+    "summarizeWhenCompact": "压缩时记忆",
+    "summarizeWhenCompactTooltip": "在上下文压缩时自动生成并保存记忆",
+    "autoMemoryInterval": "自动记忆间隔",
+    "autoMemoryIntervalTooltip": "每隔 N 次用户查询触发一次自动记忆。留空则禁用定期自动记忆，1 表示每次查询后自动记忆，2 表示每 2 次查询后自动记忆等。注意：设置过小（如 1-3）可能导致高 token 消耗和后台任务负担，推荐值：5 或 10。",
+    "autoMemoryIntervalPlaceholder": "留空禁用定期自动记忆",
+    "recursiveFileWatcher": "递归文件监听",
+    "recursiveFileWatcherTooltip": "是否递归监听记忆目录。开启后将包含 memory/subdirectory/* 等子目录中的文件到向量搜索索引。",
+    "contextManagerBackend": "上下文管理后端",
+    "contextManagerBackendTooltip": "上下文管理器的后端类型，目前仅支持 Light",
+    "backendRestartWarning": "切换后端不支持热更新，保存后需要重启 QwenPaw 才能生效"
   },
   "tools": {
     "title": "内置工具",
@@ -1324,6 +1398,9 @@
       },
       "skills": {
         "description": "列出当前对话可用的技能，并显示可显式调用的技能命令"
+      },
+      "plan": {
+        "description": "创建结构化计划，将任务分解为多个子任务"
       }
     },
     "attachments": {
@@ -1345,6 +1422,13 @@
       "userMessage": "用户",
       "assistantMessage": "助手",
       "titleMatch": "标题"
+    },
+    "contextMenu": {
+      "open": "打开",
+      "rename": "重命名",
+      "pin": "置顶",
+      "unpin": "取消置顶",
+      "delete": "删除"
     }
   },
   "security": {
@@ -1420,6 +1504,53 @@
         "TOOL_CMD_SERVICE_RESTART": "检测可能中断系统服务的服务管理命令",
         "TOOL_CMD_PROCESS_KILL": "检测可能终止关键进程的进程终止命令",
         "TOOL_CMD_PRIVILEGE_ESCALATION": "检测使用 sudo、su、doas、pkexec 或 runas 的权限提升尝试"
+      },
+      "categories": {
+        "command_injection": "命令注入",
+        "code_execution": "代码执行",
+        "data_exfiltration": "数据外泄",
+        "path_traversal": "路径穿越",
+        "sensitive_file_access": "敏感文件访问",
+        "network_abuse": "网络滥用",
+        "credential_exposure": "凭证泄露",
+        "resource_abuse": "资源滥用",
+        "privilege_escalation": "权限提升",
+        "prompt_injection": "提示注入",
+        "other": "其他"
+      }
+    },
+    "shellEvasion": {
+      "title": "Shell 逃逸检测",
+      "description": "配置启用哪些 Shell 逃逸和混淆检测。这些检测能够发现试图绕过简单正则检测来隐藏恶意意图的技术手段。",
+      "checks": {
+        "command_substitution": {
+          "name": "命令替换",
+          "description": "检测 $()、反引号、进程替换等命令替换模式"
+        },
+        "obfuscated_flags": {
+          "name": "混淆标志",
+          "description": "检测 ANSI-C 引号、本地化引号和空引号标志混淆"
+        },
+        "backslash_escaped_whitespace": {
+          "name": "反斜杠转义空白",
+          "description": "检测可能改变命令解析的反斜杠转义空格/制表符"
+        },
+        "backslash_escaped_operators": {
+          "name": "反斜杠转义操作符",
+          "description": "检测 Shell 操作符 (;|&<>) 前的反斜杠，可隐藏命令结构"
+        },
+        "newlines": {
+          "name": "隐藏换行符",
+          "description": "检测可能分隔隐藏命令的换行符和回车符"
+        },
+        "comment_quote_desync": {
+          "name": "注释引号失同步",
+          "description": "检测 # 注释中的引号字符，可导致引号追踪失同步"
+        },
+        "quoted_newline": {
+          "name": "引号内换行",
+          "description": "检测引号字符串中的换行符后跟 # 行，可隐藏参数"
+        }
       }
     },
     "fileGuard": {
@@ -1437,6 +1568,23 @@
       "saveSuccess": "文件防护设置已保存",
       "saveFailed": "保存文件防护设置失败",
       "loadFailed": "加载文件防护设置失败"
+    },
+    "allowNoAuthHosts": {
+      "title": "免认证主机白名单",
+      "warningTitle": "安全警告",
+      "warningDescription": "此列表中的 IP 地址可以无需认证访问 API 端点。默认情况下，本地主机（127.0.0.1 和 ::1）允许 CLI 访问。仅添加可信任的 IP 地址。警告：添加不受信任的 IP 会带来严重的安全风险。",
+      "ipAddress": "IP 地址",
+      "actions": "操作",
+      "add": "添加",
+      "inputPlaceholder": "输入 IP 地址（例如：192.168.1.100 或 ::1）",
+      "empty": "未配置 IP 地址",
+      "default": "默认",
+      "removeConfirm": "从白名单中移除该 IP 地址？",
+      "duplicate": "该 IP 地址已存在",
+      "invalidIP": "无效的 IP 地址格式",
+      "saveSuccess": "免认证主机白名单设置已保存",
+      "saveFailed": "保存免认证主机白名单设置失败",
+      "loadFailed": "加载免认证主机白名单设置失败"
     },
     "skillScanner": {
       "title": "技能扫描器",
@@ -1672,5 +1820,34 @@
     "progressSaving": "正在写入备份文件...",
     "progressDone": "备份完成",
     "localModelsNotice": "备份文件不包含本地模型文件。如需跨设备迁移，请在目标设备上重新下载所需的本地模型。"
+  },
+  "approval": {
+    "title": "安全审批",
+    "tool": "工具",
+    "severity": "严重性",
+    "findings": "发现",
+    "parameters": "参数",
+    "approve": "批准",
+    "deny": "拒绝",
+    "source": "来源",
+    "subSession": "子Agent",
+    "approved": "已批准工具调用",
+    "denied": "已拒绝工具调用",
+    "approveFailed": "批准失败",
+    "cancelTask": "取消任务",
+    "denyFailed": "拒绝失败"
+  },
+  "plan": {
+    "title": "计划",
+    "noPlan": "暂无活跃计划",
+    "noPlanHint": "使用 /plan <描述> 创建计划",
+    "progress": "进度",
+    "outcome": "结果",
+    "state": {
+      "todo": "待办",
+      "in_progress": "进行中",
+      "done": "已完成",
+      "abandoned": "已放弃"
+    }
   }
 }
