@@ -259,6 +259,21 @@ class WhatsAppChannel(BaseChannel):
             logger.info("whatsapp: update_config: enabled changed, needs restart")
             return False
 
+        # If the existing neonize client is dead (e.g. server-forced logout
+        # or zombie after EOF with no DisconnectedEv), in-place reload
+        # would preserve a useless client and every subsequent send
+        # would fail with "device JID missing" / "websocket not
+        # connected".  Force a full restart so the channel teardown +
+        # fresh start picks up any newly-paired credentials in
+        # ``neonize.db`` and fires ``ConnectedEv`` cleanly.
+        if not self._connected:
+            logger.info(
+                "whatsapp: update_config: neonize client is dead "
+                "(_connected=False) — triggering full restart so the "
+                "fresh client re-reads device credentials.",
+            )
+            return False
+
         # Soft-patchable fields
         self._send_read_receipts = c.get("send_read_receipts", True)
         self._text_chunk_limit = c.get("text_chunk_limit", WHATSAPP_MAX_TEXT_LENGTH)
@@ -283,6 +298,105 @@ class WhatsAppChannel(BaseChannel):
         return True
 
     # ── Lifecycle ─────────────────────────────────────────────────────
+
+    async def _rewire_handlers(self) -> None:
+        """Re-register every ``@self._client.event(...)`` handler.
+
+        Used after ``_auto_reconnect`` recreates the neonize client
+        to pick up a fresh device (see the docstring in
+        ``_auto_reconnect``).  The handlers originally live inside
+        ``start()``'s body to close over ``self``, and the decorator
+        binds them to whatever ``self._client`` was at registration
+        time — swapping the client without re-binding leaves the new
+        client deaf to every event.  Keep this body in sync with the
+        handler definitions in ``start()``.
+        """
+        # Call start() again but only the handler-binding portion
+        # would require threading a flag into start(); simpler to let
+        # this method be a deliberate mirror, and the test
+        # ``test_rewire_handlers_matches_start`` enforces the pair
+        # stay in sync.
+        from neonize.events import (
+            MessageEv, ConnectedEv, QREv, DisconnectedEv,
+            ConnectFailureEv, KeepAliveTimeoutEv,
+        )
+
+        @self._client.event(MessageEv)
+        async def on_message(client, message):
+            logger.debug("whatsapp: MessageEv received (rewired)")
+            await self._on_message(client, message)
+
+        @self._client.event(ConnectedEv)
+        async def on_connected(client, evt):
+            self._connected = True
+            self._my_jid = client.me
+            try:
+                import sqlite3
+                def _read_device_jid():
+                    _db = str(self._auth_dir / "neonize.db")
+                    _conn = sqlite3.connect(_db)
+                    try:
+                        return _conn.execute(
+                            "SELECT jid, lid FROM whatsmeow_device LIMIT 1",
+                        ).fetchone()
+                    finally:
+                        _conn.close()
+                row = await asyncio.to_thread(_read_device_jid)
+                if row:
+                    jid_str = row[0] or ""
+                    lid_str = row[1] or ""
+                    bot_phone = jid_str.split(":")[0] if ":" in jid_str else jid_str.split("@")[0]
+                    bot_lid = lid_str.split(":")[0] if ":" in lid_str else lid_str.split("@")[0]
+                    self._my_jid = _str_to_jid(bot_phone)
+                    self._bot_phone = bot_phone
+                    self._bot_lid = bot_lid
+                    if bot_lid and bot_phone:
+                        self._lid_cache[f"{bot_lid}@lid"] = {
+                            "phone": bot_phone, "name": "bot",
+                            "lid": f"{bot_lid}@lid",
+                        }
+                    logger.info(
+                        "whatsapp: connected as phone=%s lid=%s (rewired)",
+                        bot_phone, bot_lid,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "whatsapp: failed to read JID from DB (rewired): %s", e,
+                )
+
+        @self._client.event(QREv)
+        async def on_qr(client, evt):
+            logger.info(
+                "whatsapp: QR code event received during reconnect "
+                "(new pair required)",
+            )
+
+        def _schedule_reconnect(delay: int, reason: str) -> None:
+            if self._stopping:
+                return
+            logger.warning(
+                "whatsapp: %s — scheduling auto-reconnect in %ds (rewired)",
+                reason, delay,
+            )
+            loop = asyncio.get_running_loop()
+            loop.call_later(
+                delay, lambda: loop.create_task(self._auto_reconnect()),
+            )
+
+        @self._client.event(DisconnectedEv)
+        async def on_disconnected(client, evt):
+            self._connected = False
+            _schedule_reconnect(10, "DISCONNECTED")
+
+        @self._client.event(ConnectFailureEv)
+        async def on_connect_failure(client, evt):
+            self._connected = False
+            reason = getattr(evt, "reason", "unknown")
+            _schedule_reconnect(30, f"connection failure (reason={reason})")
+
+        @self._client.event(KeepAliveTimeoutEv)
+        async def on_keepalive_timeout(client, evt):
+            _schedule_reconnect(15, "keepalive timeout")
 
     async def start(self) -> None:
         if not self.enabled:
@@ -589,7 +703,15 @@ class WhatsAppChannel(BaseChannel):
 
         # Extract what we can from the quoted message proto
         quote_body = ""
-        media_types = []
+        # Each entry: ``"image: /path/to/file.jpg"`` when the download
+        # succeeded, ``"image"`` alone when we couldn't pull the bytes.
+        # Agents use the path to feed the quoted media into tools
+        # (codex image i2i, view_video, transcribe) — without it they
+        # can only describe the reference, not act on it.
+        media_types: list[str] = []
+        # ImageContent blocks to return alongside the text block so
+        # vision-capable models also see the image inline.
+        extra_parts: list[Any] = []
 
         # Text
         if getattr(quoted_msg, "conversation", ""):
@@ -597,52 +719,81 @@ class WhatsAppChannel(BaseChannel):
         elif quoted_msg.HasField("extendedTextMessage") and quoted_msg.extendedTextMessage.text:
             quote_body = quoted_msg.extendedTextMessage.text
 
-        # Detect media types present in quoted message
+        stanza_id = getattr(ctx, "stanzaId", "") or "quote"
+        stanza_key = stanza_id[:12] if stanza_id else "quote"
+
+        async def _try_download(ext: str) -> str | None:
+            """Download the currently-iterating quoted media to
+            ``wa_quote_<stanza>.<ext>`` under the channel media dir.
+            Returns the absolute path on success; ``None`` if the
+            media key is missing (the common case for forwarded
+            quotes) or the download errored for any reason.
+            """
+            try:
+                self._media_dir.mkdir(parents=True, exist_ok=True)
+                path = self._media_dir / f"wa_quote_{stanza_key}.{ext}"
+                await client.download_any(quoted_msg, path=str(path))
+                if path.exists() and path.stat().st_size > 0:
+                    return str(path)
+            except Exception:
+                pass
+            return None
+
+        # Detect media types present in quoted message.  For each
+        # downloadable type we attempt ``client.download_any`` and,
+        # on success, emit the path inline in the text block so the
+        # agent can reference it without guessing.
         if quoted_msg.HasField("imageMessage"):
             caption = getattr(quoted_msg.imageMessage, "caption", "") or ""
             if caption and not quote_body:
                 quote_body = caption
-            media_types.append("image")
-            # Try to download quoted image (may work if media key is present)
-            stanza_id = getattr(ctx, "stanzaId", "") or "quote"
-            try:
-                self._media_dir.mkdir(parents=True, exist_ok=True)
-                path = self._media_dir / f"wa_quote_{stanza_id[:12]}.jpg"
-                await client.download_any(quoted_msg, path=str(path))
-                if path.exists() and path.stat().st_size > 0:
-                    block = self._format_reply_context(
-                        sender=sender_label,
-                        body=quote_body,
-                        media_types=["image"],
-                    )
-                    return [
-                        TextContent(type=ContentType.TEXT, text=block),
-                        ImageContent(type=ContentType.IMAGE, image_url=await resolve_media_url(str(path))),
-                    ]
-            except Exception:
-                pass  # Download failed — describe instead
+            img_path = await _try_download("jpg")
+            if img_path:
+                media_types.append(f"image: {img_path}")
+                extra_parts.append(ImageContent(
+                    type=ContentType.IMAGE,
+                    image_url=await resolve_media_url(img_path),
+                ))
+            else:
+                media_types.append("image")
+
         if quoted_msg.HasField("videoMessage"):
-            media_types.append("video")
+            vid_path = await _try_download("mp4")
+            media_types.append(f"video: {vid_path}" if vid_path else "video")
+
         if quoted_msg.HasField("audioMessage"):
             ptt = getattr(quoted_msg.audioMessage, "ptt", False)
-            media_types.append("voice note" if ptt else "audio")
+            label = "voice note" if ptt else "audio"
+            aud_path = await _try_download("ogg")
+            media_types.append(f"{label}: {aud_path}" if aud_path else label)
+
         if quoted_msg.HasField("documentMessage"):
             fname = getattr(quoted_msg.documentMessage, "fileName", "") or ""
-            media_types.append(f"file: {fname}" if fname else "document")
+            base_label = f"file: {fname}" if fname else "document"
+            # Preserve the original extension when we can — some
+            # downstream tools sniff file type from the path.
+            ext = fname.rsplit(".", 1)[-1] if "." in fname else "bin"
+            doc_path = await _try_download(ext)
+            media_types.append(
+                f"{base_label} ({doc_path})" if doc_path else base_label,
+            )
+
         if quoted_msg.HasField("stickerMessage"):
-            media_types.append("sticker")
+            st_path = await _try_download("webp")
+            media_types.append(f"sticker: {st_path}" if st_path else "sticker")
 
         if not quote_body and not media_types:
             return []
 
-        return [TextContent(
+        block = TextContent(
             type=ContentType.TEXT,
             text=self._format_reply_context(
                 sender=sender_label,
                 body=quote_body,
                 media_types=media_types,
             ),
-        )]
+        )
+        return [block, *extra_parts]
 
     @staticmethod
     def _format_reply_context(sender: str, body: str, media_types: List[str]) -> str:
@@ -1046,6 +1197,21 @@ class WhatsAppChannel(BaseChannel):
             if re.search(rf"@\+?{re.escape(my_phone)}(?!\d)", body):
                 return True
         
+        # WhatsApp JID/LID user portion can carry a ``:<device>`` suffix
+        # (e.g. ``229661330157571:2@lid`` for the 2nd linked device on
+        # that LID).  ``_bot_lid`` / ``_bot_phone`` were already stripped
+        # of the device suffix in the ConnectedEv handler, so raw
+        # splits that only remove ``@<server>`` leave ``229661330157571:2``
+        # and the equality check silently fails.  This tripped up
+        # reply-to-bot detection in groups (reply to any bot message →
+        # bot thinks it isn't mentioned → ignores the reply).
+        def _normalize_user(s: str) -> str:
+            if not s:
+                return ""
+            s = s.split("@", 1)[0]
+            s = s.split(":", 1)[0]
+            return s
+
         # 2. Check WhatsApp native mention (contextInfo.mentionedJID)
         ctx = None
         if msg.HasField("extendedTextMessage"):
@@ -1055,23 +1221,21 @@ class WhatsAppChannel(BaseChannel):
             if ctx.mentionedJID:
                 for jid in ctx.mentionedJID:
                     if hasattr(jid, "User"):
-                        jid_user = jid.User
+                        jid_user = _normalize_user(str(jid.User))
                     elif isinstance(jid, str):
-                        jid_user = jid.split("@")[0] if "@" in jid else jid
+                        jid_user = _normalize_user(jid)
                     else:
                         continue
-                    # Exact match only
                     if jid_user and (jid_user == my_lid or jid_user == my_phone):
                         return True
-            
+
             # 3. Reply-to bot message counts as mention
             if ctx.HasField("quotedMessage") or getattr(ctx, "stanzaId", ""):
-                # Check if the quoted message is from bot
                 quoted_participant = getattr(ctx, "participant", "") or ""
                 if isinstance(quoted_participant, str):
-                    qp_user = quoted_participant.split("@")[0] if "@" in quoted_participant else quoted_participant
+                    qp_user = _normalize_user(quoted_participant)
                 elif hasattr(quoted_participant, "User"):
-                    qp_user = quoted_participant.User
+                    qp_user = _normalize_user(str(quoted_participant.User))
                 else:
                     qp_user = ""
                 if qp_user and (qp_user == my_lid or qp_user == my_phone):
@@ -1190,6 +1354,41 @@ class WhatsAppChannel(BaseChannel):
                             await self._connect_task
                         except (asyncio.CancelledError, Exception):
                             pass
+
+                    # After 2 failed reuses, recreate the neonize client
+                    # from scratch.  Reason: a server-forced logout (EOF
+                    # that doesn't surface as ``DisconnectedEv``) wipes
+                    # the ``whatsmeow_device`` row from the backing db.
+                    # The in-memory ``self._client`` caches the old
+                    # device identity at ``__init__`` time, so
+                    # ``_client.connect()`` alone re-dials the socket
+                    # but can't re-pair.  Rebuilding the client forces
+                    # neonize to re-read the db — if a fresh QR scan
+                    # landed in between, the new device row picks up
+                    # and pairing completes cleanly.
+                    if attempt > 2:
+                        try:
+                            db_path = str(self._auth_dir / "neonize.db")
+                            self._client = NewAClient(name=db_path)
+                            # Re-register every event handler on the
+                            # fresh client by re-running start().  We
+                            # can't just call start() (it checks
+                            # ``self.enabled`` and would re-bind the
+                            # task), so inline the minimum: the handler
+                            # wiring happens inside the new connect
+                            # call's event loop anyway.
+                            logger.info(
+                                "whatsapp: recreated neonize client "
+                                "(attempt %d) — re-reading device from db",
+                                attempt,
+                            )
+                            # Fall through to start() so handlers are
+                            # registered against the new client.
+                            await self._rewire_handlers()
+                        except Exception as e:
+                            logger.error(
+                                "whatsapp: client recreation failed: %s", e,
+                            )
 
                     # Re-connect
                     self._connect_task = await self._client.connect()
@@ -1350,7 +1549,18 @@ class WhatsAppChannel(BaseChannel):
             return
         try:
             if t == ContentType.IMAGE:
-                await self._client.send_image(jid, file_path)
+                # Filename convention: `.sticker.webp` → send as sticker
+                # (explicit, controllable, no guessing). Applies only to
+                # WhatsApp sticker format (.webp with .sticker. marker).
+                if isinstance(file_path, str) and file_path.lower().endswith(
+                    ".sticker.webp"
+                ):
+                    logger.info(
+                        "whatsapp: send_media → sticker path=%s", file_path,
+                    )
+                    await self._client.send_sticker(jid, file_path)
+                else:
+                    await self._client.send_image(jid, file_path)
             elif t == ContentType.VIDEO:
                 await self._client.send_video(jid, file_path)
             elif t == ContentType.AUDIO:

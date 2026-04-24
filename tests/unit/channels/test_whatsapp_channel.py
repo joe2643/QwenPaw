@@ -261,6 +261,76 @@ class TestExtractQuoteContent:
         assert "UNTRUSTED reply-to" in combined
         assert "image" in combined.lower()
 
+    async def test_quote_with_image_download_success_emits_path(self):
+        # On a successful download the reply-to block MUST surface
+        # the file path so the agent can pass it to tools (codex
+        # image i2i, describe_image, ocr) — without the path the
+        # reference is dead text.
+        ch = _make_channel()
+        ctx = MagicMock()
+        ctx.HasField = lambda name: name == "quotedMessage"
+        ctx.participant = "sender@s.whatsapp.net"
+        ctx.stanzaId = "stanza_img_ok"
+
+        img = MagicMock()
+        img.caption = ""
+
+        quoted = MagicMock()
+        quoted.conversation = ""
+        quoted.HasField = lambda name: name == "imageMessage"
+        quoted.imageMessage = img
+        ctx.quotedMessage = quoted
+
+        etm = MagicMock()
+        etm.text = "edit this"
+        etm.contextInfo = ctx
+        msg = _make_proto_message(extendedTextMessage=etm)
+
+        # Write bytes to the target path so the existence check passes.
+        async def _fake_download(_proto, *, path):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_bytes(b"\xff\xd8\xff" + b"x" * 100)
+        client = MagicMock()
+        client.download_any = AsyncMock(side_effect=_fake_download)
+
+        parts = await ch._extract_quote_content(client, msg)
+        # Two parts: text block + ImageContent attached.
+        assert any(isinstance(p, ImageContent) for p in parts)
+        text = next(p.text for p in parts if hasattr(p, "text"))
+        # Path must appear verbatim inside the Media: line.
+        assert "Media: image:" in text
+        assert "wa_quote_stanza_img_o" in text
+
+    async def test_quote_with_video_download_success_emits_path(self):
+        # Generalises the image-path guarantee to the other media
+        # types the generalised ``_try_download`` helper now handles.
+        ch = _make_channel()
+        ctx = MagicMock()
+        ctx.HasField = lambda name: name == "quotedMessage"
+        ctx.participant = "sender@s.whatsapp.net"
+        ctx.stanzaId = "stanza_vid_ok"
+
+        quoted = MagicMock()
+        quoted.conversation = ""
+        quoted.HasField = lambda name: name == "videoMessage"
+        ctx.quotedMessage = quoted
+
+        etm = MagicMock()
+        etm.text = "describe this clip"
+        etm.contextInfo = ctx
+        msg = _make_proto_message(extendedTextMessage=etm)
+
+        async def _fake_download(_proto, *, path):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_bytes(b"x" * 1024)
+        client = MagicMock()
+        client.download_any = AsyncMock(side_effect=_fake_download)
+
+        parts = await ch._extract_quote_content(client, msg)
+        text = next(p.text for p in parts if hasattr(p, "text"))
+        assert "Media: video:" in text
+        assert ".mp4" in text
+
     async def test_quote_with_video_described(self):
         """Quoted video produces 'Media: video' in reply-to block."""
         ch = _make_channel()
@@ -686,6 +756,92 @@ class TestMentionDetection:
         ch = self._setup_channel()
         msg = _make_proto_message(conversation="hello world")
         assert ch._is_bot_mentioned(msg, "hello world") is False
+
+    def test_reply_to_bot_with_device_suffix(self):
+        # Regression guard for the 2026-04-24 bug: WhatsApp JID/LID
+        # format is ``<id>:<device>@<server>`` (e.g.
+        # ``229661330157571:2@lid`` for the 2nd linked device).  The
+        # ConnectedEv handler strips both ``:device`` and ``@server``
+        # when stashing ``_bot_lid``, but the old
+        # ``_is_bot_mentioned`` quote-participant parser only stripped
+        # ``@server`` — leaving ``229661330157571:2`` on one side and
+        # ``229661330157571`` on the other, so equality silently
+        # failed.  Result: reply-to-bot in groups never triggered a
+        # reply.
+        ch = self._setup_channel()
+        ctx = MagicMock()
+        ctx.mentionedJID = []
+        ctx.HasField = lambda name: name == "quotedMessage"
+        ctx.stanzaId = "some_stanza"
+        # Real WhatsApp format — note the ``:2`` device suffix.
+        ctx.participant = "botlid123:2@lid"
+
+        etm = MagicMock()
+        etm.text = "replying"
+        etm.contextInfo = ctx
+        msg = _make_proto_message(extendedTextMessage=etm)
+
+        assert ch._is_bot_mentioned(msg, "replying") is True
+
+    def test_mentioned_jid_user_with_device_suffix(self):
+        # Same normalization applies to the native ``mentionedJID``
+        # path — protobuf gives us ``jid.User`` as ``id:device`` in
+        # some WhatsApp deployments.
+        ch = self._setup_channel()
+        ctx = MagicMock()
+        jid = MagicMock()
+        jid.User = "botlid123:2"  # device suffix on User
+        ctx.mentionedJID = [jid]
+        ctx.HasField = lambda name: False
+        ctx.stanzaId = ""
+        ctx.participant = ""
+
+        etm = MagicMock()
+        etm.text = "hey bot"
+        etm.contextInfo = ctx
+        msg = _make_proto_message(extendedTextMessage=etm)
+
+        assert ch._is_bot_mentioned(msg, "hey bot") is True
+
+
+# ===================================================================
+# TestUpdateConfigDeadClientRestart
+# ===================================================================
+
+
+class TestUpdateConfigDeadClientRestart:
+    """Verify ``update_config`` triggers a full restart when the
+    neonize client is dead (``_connected=False``).
+
+    Without this, a Console-UI re-pair + config save would preserve
+    the zombie client in-place and every send afterwards fails with
+    ``websocket not connected`` / ``device JID missing`` — we saw
+    this live on 2026-04-24.
+    """
+
+    @pytest.mark.asyncio
+    async def test_dead_client_forces_full_restart(self):
+        ch = _make_channel()
+        ch._connected = False  # simulate the zombie state
+        result = await ch.update_config({
+            "enabled": True,
+            "auth_dir": ch._auth_dir,
+        })
+        # False = caller (service_factories) does clone + replace_channel
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_healthy_client_allows_in_place_patch(self):
+        ch = _make_channel()
+        ch._connected = True  # client is alive
+        result = await ch.update_config({
+            "enabled": True,
+            "auth_dir": ch._auth_dir,
+            "send_read_receipts": False,  # a soft-patchable field
+        })
+        assert result is True
+        # Soft field took effect without restart.
+        assert ch._send_read_receipts is False
 
 
 # ===================================================================
@@ -1320,3 +1476,120 @@ class TestTypingLoopPresencePanicPrevention:
 
         assert task.done()
         assert not task.cancelled()  # CancelledError is caught internally
+
+
+# ========================================================================
+# send_media - sticker filename convention (.sticker.webp)
+# ========================================================================
+
+class TestSendMediaStickerConvention:
+    """`.sticker.webp` filename convention routes to send_sticker.
+
+    Regular images (including plain .webp) route to send_image.
+    Rule is explicit and path-based: no content sniffing, no metadata.
+    """
+
+    @pytest.mark.asyncio
+    async def test_sticker_webp_suffix_dispatches_send_sticker(self, tmp_path):
+        ch = _make_channel()
+        ch._client.send_sticker = AsyncMock()
+        ch._client.send_image = AsyncMock()
+
+        sticker_path = tmp_path / "crab.sticker.webp"
+        sticker_path.write_bytes(b"RIFF\x00\x00\x00\x00WEBP")
+
+        part = ImageContent(
+            type=ContentType.IMAGE,
+            image_url=str(sticker_path),
+        )
+        await ch.send_media("1234567890@s.whatsapp.net", part, meta={})
+
+        ch._client.send_sticker.assert_awaited_once()
+        ch._client.send_image.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_plain_webp_dispatches_send_image(self, tmp_path):
+        """`.webp` WITHOUT `.sticker.` marker => regular image."""
+        ch = _make_channel()
+        ch._client.send_sticker = AsyncMock()
+        ch._client.send_image = AsyncMock()
+
+        img_path = tmp_path / "photo.webp"
+        img_path.write_bytes(b"RIFF\x00\x00\x00\x00WEBP")
+
+        part = ImageContent(type=ContentType.IMAGE, image_url=str(img_path))
+        await ch.send_media("1234567890@s.whatsapp.net", part, meta={})
+
+        ch._client.send_image.assert_awaited_once()
+        ch._client.send_sticker.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_png_dispatches_send_image(self, tmp_path):
+        """PNG => send_image (baseline, no regression)."""
+        ch = _make_channel()
+        ch._client.send_sticker = AsyncMock()
+        ch._client.send_image = AsyncMock()
+
+        img_path = tmp_path / "photo.png"
+        img_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+        part = ImageContent(type=ContentType.IMAGE, image_url=str(img_path))
+        await ch.send_media("1234567890@s.whatsapp.net", part, meta={})
+
+        ch._client.send_image.assert_awaited_once()
+        ch._client.send_sticker.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_sticker_suffix_case_insensitive(self, tmp_path):
+        """`.STICKER.WEBP` (uppercase) still triggers sticker path."""
+        ch = _make_channel()
+        ch._client.send_sticker = AsyncMock()
+        ch._client.send_image = AsyncMock()
+
+        sticker_path = tmp_path / "crab.STICKER.WEBP"
+        sticker_path.write_bytes(b"RIFF\x00\x00\x00\x00WEBP")
+
+        part = ImageContent(
+            type=ContentType.IMAGE,
+            image_url=str(sticker_path),
+        )
+        await ch.send_media("1234567890@s.whatsapp.net", part, meta={})
+
+        ch._client.send_sticker.assert_awaited_once()
+        ch._client.send_image.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_sticker_with_file_scheme_prefix(self, tmp_path):
+        """`file://` scheme on sticker path is stripped before suffix check."""
+        ch = _make_channel()
+        ch._client.send_sticker = AsyncMock()
+        ch._client.send_image = AsyncMock()
+
+        sticker_path = tmp_path / "crab.sticker.webp"
+        sticker_path.write_bytes(b"RIFF\x00\x00\x00\x00WEBP")
+
+        part = ImageContent(
+            type=ContentType.IMAGE,
+            image_url="file://" + str(sticker_path),
+        )
+        await ch.send_media("1234567890@s.whatsapp.net", part, meta={})
+
+        ch._client.send_sticker.assert_awaited_once()
+        ch._client.send_image.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_missing_file_skips_both(self, tmp_path):
+        """Non-existent file => neither send_sticker nor send_image."""
+        ch = _make_channel()
+        ch._client.send_sticker = AsyncMock()
+        ch._client.send_image = AsyncMock()
+
+        part = ImageContent(
+            type=ContentType.IMAGE,
+            image_url=str(tmp_path / "does_not_exist.sticker.webp"),
+        )
+        await ch.send_media("1234567890@s.whatsapp.net", part, meta={})
+
+        ch._client.send_sticker.assert_not_awaited()
+        ch._client.send_image.assert_not_awaited()
+
