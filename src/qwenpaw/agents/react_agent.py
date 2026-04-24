@@ -52,6 +52,13 @@ from .tools import (
     read_file,
     send_file_to_user,
     set_user_timezone,
+    signal_add_stickers_to_pack,
+    signal_create_sticker_pack,
+    signal_install_sticker_pack,
+    signal_list_sticker_packs,
+    signal_prepare_sticker_webp,
+    signal_preview_sticker,
+    signal_send_sticker,
     view_image,
     view_video,
     write_file,
@@ -251,13 +258,44 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
             "chat_with_agent": chat_with_agent,
             "submit_to_agent": submit_to_agent,
             "check_agent_task": check_agent_task,
+            "signal_list_sticker_packs": signal_list_sticker_packs,
+            "signal_preview_sticker": signal_preview_sticker,
+            "signal_install_sticker_pack": signal_install_sticker_pack,
+            "signal_create_sticker_pack": signal_create_sticker_pack,
+            "signal_add_stickers_to_pack": signal_add_stickers_to_pack,
+            "signal_prepare_sticker_webp": signal_prepare_sticker_webp,
+            "signal_send_sticker": signal_send_sticker,
         }
+
+        # Per-request channel gate for cross-channel tools.
+        # Observed 2026-04-24: adding 7 signal_sticker tools bloated the
+        # toolkit; claude-opus-4-7 in a WhatsApp reply dropped tool_use
+        # entirely (seemingly-irrelevant signal_* options made the model
+        # play safe and reply with text only).  Rule: only expose
+        # signal_* when the inbound channel is signal OR the request
+        # originates from a UI surface where the user might be testing
+        # them (console).  Agents pointed at whatsapp/discord/etc
+        # don't see them at all, keeping their tool list focused.
+        req_ctx = getattr(self, "_request_context", {}) or {}
+        active_channel = (req_ctx.get("channel") or "").lower()
+        # "console" and empty string = UI/debug context → allow all.
+        # Any other explicit channel = scope to that channel only.
+        signal_tools_allowed = active_channel in ("", "console", "signal")
 
         # Register only enabled tools
         for tool_name, tool_func in tool_functions.items():
             # If tool not in config, enable by default (backward compatibility)
             if not enabled_tools.get(tool_name, True):
                 logger.debug("Skipped disabled tool: %s", tool_name)
+                continue
+
+            # Skip signal_* when inbound is a different chat channel.
+            if tool_name.startswith("signal_") and not signal_tools_allowed:
+                logger.debug(
+                    "Skipped %s: active channel=%s (signal tools hidden)",
+                    tool_name,
+                    active_channel,
+                )
                 continue
 
             # Get async_execution setting (default to False for backward
