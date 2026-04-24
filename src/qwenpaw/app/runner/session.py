@@ -190,6 +190,44 @@ class SafeJSONSession(SessionBase):
             session_save_path,
         )
 
+    def _recover_primary_from_prev_if_missing(
+        self,
+        session_save_path: str,
+    ) -> None:
+        """Restore the primary session file from its ``.prev`` sibling
+        when the primary has disappeared.
+
+        **Why this matters.**  Three code paths read the primary
+        session file: :meth:`load_session_state` (agent boot),
+        :meth:`update_session_state` (key-scoped mutation), and
+        :meth:`get_session_state_dict` (Console UI history).  If only
+        ``load_session_state`` falls back to ``.prev``, the other two
+        paths observe a missing primary and silently start from an
+        empty dict.  When ``update_session_state`` then writes back,
+        it overwrites the (still fine) ``.prev`` companion on its
+        *next* rotation with an empty history — data loss.  This
+        helper gives all three paths a common recovery step.
+        """
+        prev_path = session_save_path + ".prev"
+        if os.path.exists(session_save_path):
+            return
+        if not os.path.exists(prev_path):
+            return
+        try:
+            import shutil
+            shutil.copy2(prev_path, session_save_path)
+            logger.warning(
+                "Session file %s was missing; recovered from %s "
+                "— some tail turns since the last rotation may "
+                "be lost.",
+                session_save_path, prev_path,
+            )
+        except Exception as e:
+            logger.error(
+                "failed to recover %s from %s: %s",
+                session_save_path, prev_path, e,
+            )
+
     async def load_session_state(
         self,
         session_id: str,
@@ -208,28 +246,9 @@ class SafeJSONSession(SessionBase):
         an empty agent memory on restart.
         """
         session_save_path = self._get_save_path(session_id, user_id=user_id)
-        prev_path = session_save_path + ".prev"
 
-        # Primary missing but backup present → recover, surface a
-        # loud warning so ops notice the deletion pattern and so
-        # tests / monitoring can assert the fallback actually fired.
-        if not os.path.exists(session_save_path) and os.path.exists(
-            prev_path,
-        ):
-            try:
-                import shutil
-                shutil.copy2(prev_path, session_save_path)
-                logger.warning(
-                    "Session file %s was missing; recovered from %s "
-                    "— some tail turns since the last rotation may "
-                    "be lost.",
-                    session_save_path, prev_path,
-                )
-            except Exception as e:
-                logger.error(
-                    "load_session_state: failed to recover from %s: %s",
-                    prev_path, e,
-                )
+        # Primary missing but backup present → recover.
+        self._recover_primary_from_prev_if_missing(session_save_path)
 
         if os.path.exists(session_save_path):
             async with aiofiles.open(
@@ -273,6 +292,18 @@ class SafeJSONSession(SessionBase):
         create_if_not_exist: bool = True,
     ) -> None:
         session_save_path = self._get_save_path(session_id, user_id=user_id)
+        prev_path = session_save_path + ".prev"
+        tmp_path = session_save_path + ".tmp"
+
+        # If primary was wiped but ``.prev`` survived, resurrect before
+        # we read — otherwise we would start from ``{}`` and the
+        # write-back below would destroy the surviving history.  This
+        # is the bug that wiped the WhatsApp DM on ``/new`` commands
+        # when the primary was missing: reader saw empty, ``/new``
+        # then stored ``memory.content=[]`` over the primary, and a
+        # later ``save_session_state`` copied that empty primary to
+        # ``.prev`` too — both files now empty.
+        self._recover_primary_from_prev_if_missing(session_save_path)
 
         if os.path.exists(session_save_path):
             async with aiofiles.open(
@@ -306,12 +337,25 @@ class SafeJSONSession(SessionBase):
 
         cur[path[-1]] = value
 
-        with open(
-            session_save_path,
-            "w",
-            encoding="utf-8",
-        ) as f:
+        # Same write ordering as save_session_state: tmp → copy2 →
+        # atomic replace.  Direct overwrite of the primary leaves a
+        # window where the primary is mid-write and reads (including
+        # concurrent Console UI history fetches) can see a truncated
+        # file or zero bytes on crash.
+        with open(tmp_path, "w", encoding="utf-8") as f:
             f.write(json.dumps(states, ensure_ascii=False))
+
+        if os.path.exists(session_save_path):
+            try:
+                import shutil
+                shutil.copy2(session_save_path, prev_path)
+            except Exception as e:
+                logger.warning(
+                    "update_session_state: failed to copy %s → .prev: %s",
+                    session_save_path, e,
+                )
+
+        os.replace(tmp_path, session_save_path)
 
         logger.info(
             "Updated session state key '%s' in %s successfully.",
@@ -343,6 +387,13 @@ class SafeJSONSession(SessionBase):
                 `allow_not_exist=True`.
         """
         session_save_path = self._get_save_path(session_id, user_id=user_id)
+
+        # Same ``.prev`` recovery as load_session_state.  Console UI
+        # hits this path for /api/chats/{id} — without the fallback,
+        # the UI paints a blank chat whenever the primary transiently
+        # vanishes, which is what the user sees as "session drop".
+        self._recover_primary_from_prev_if_missing(session_save_path)
+
         if os.path.exists(session_save_path):
             async with aiofiles.open(
                 session_save_path,
