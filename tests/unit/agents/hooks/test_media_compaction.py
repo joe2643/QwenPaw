@@ -110,6 +110,65 @@ class TestCompactMediaBlocks:
         texts = _get_placeholder_texts(msgs[0])
         assert any("screenshot.png" in t for t in texts)
 
+    def test_placeholder_is_prepended_not_inline(self):
+        # After compaction the <system-note> placeholder must sit at
+        # the *top* of the message content list, before any
+        # surviving user text.  Inline placement (where the image
+        # was) is subtly worse for the model: the agent reads text
+        # first, then the bracketed placeholder mid-stream, and has
+        # to back-patch its interpretation.  Prepending frames the
+        # whole turn with "these media were viewed and removed"
+        # before any other content.
+        msgs = [
+            _make_text_msg("user", "filler-top"),
+            # Synthesise a message whose content has text -> image ->
+            # text, to prove the placeholder rises to the top even
+            # when the image was originally in the middle.
+            _make_text_msg("user", "here is the pic"),
+        ]
+        msgs[1].content = [
+            {"type": "text", "text": "before"},
+            {
+                "type": "image",
+                "source": {"type": "url", "url": "/tmp/middle.png"},
+            },
+            {"type": "text", "text": "after"},
+        ]
+        msgs.append(_make_text_msg("assistant", "ack"))
+
+        MemoryCompactionHook._compact_media_blocks(msgs, recent_n=1)
+        content = msgs[1].content
+
+        # First block must be the system-note placeholder.
+        assert content[0]["type"] == "text"
+        assert "<system-note>" in content[0]["text"]
+        assert "middle.png" in content[0]["text"]
+        # The surviving user text follows, in original order.
+        assert content[1]["text"] == "before"
+        assert content[2]["text"] == "after"
+        # And no media block survives.
+        assert all(b.get("type") != "image" for b in content)
+
+    def test_placeholder_is_wrapped_in_system_note_tag(self):
+        # The placeholder has to be easily distinguishable from user
+        # text — otherwise the model quotes "[Image was viewed: ...
+        # — removed from context]" back at the user as if it were a
+        # real explanation.  Tag convention matches the other
+        # out-of-band injections (<system-hint>, <system-info>).
+        msgs = [
+            _make_image_msg("user", "/tmp/receipt.png"),
+            _make_text_msg("assistant", "got it"),
+            _make_text_msg("user", "thanks"),
+        ]
+        MemoryCompactionHook._compact_media_blocks(msgs, recent_n=1)
+        texts = _get_placeholder_texts(msgs[0])
+        joined = "\n".join(texts)
+        assert "<system-note>" in joined
+        assert "</system-note>" in joined
+        # The human-readable marker must still be inside the tag so
+        # the model's summarisation heuristics still notice it.
+        assert "receipt.png" in joined
+
     def test_recent_media_preserved(self):
         msgs = [
             _make_text_msg("user", "old"),

@@ -89,7 +89,17 @@ class MemoryCompactionHook:
             if not isinstance(content, list):
                 continue
 
-            new_content = []
+            # Two-pass: first strip every media block and collect a
+            # note for each; then prepend all the notes to the top of
+            # the content list.  Prepending (rather than in-place
+            # replacement) means the agent reads *first* that "these
+            # images were viewed and removed" and *then* any
+            # surrounding user text — a clearer frame than stumbling
+            # over a placeholder mid-content and re-parsing what the
+            # user said.  The <system-note> tag keeps the string out
+            # of the model's "reply to user" path.
+            notes: list[TextBlock] = []
+            survivors: list = []
             for block in content:
                 block_type = (
                     block.get("type") if isinstance(block, dict) else None
@@ -108,17 +118,22 @@ class MemoryCompactionHook:
                         if fpath != "unknown"
                         else "unknown"
                     )
-                    placeholder = TextBlock(
-                        type="text",
-                        text=f"[{media_type} was viewed: {fname} — removed from context to save tokens]",  # noqa: E501
+                    notes.append(
+                        TextBlock(
+                            type="text",
+                            text=(
+                                f"<system-note>[{media_type} was viewed: "
+                                f"{fname} — removed from context to save "
+                                f"tokens]</system-note>"
+                            ),
+                        ),
                     )
-                    new_content.append(placeholder)
                     replaced += 1
                 else:
-                    new_content.append(block)
+                    survivors.append(block)
 
-            if new_content != content:
-                msg.content = new_content
+            if notes:
+                msg.content = [*notes, *survivors]
 
         if replaced:
             logger.info(

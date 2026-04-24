@@ -420,14 +420,29 @@ async def process_file_and_media_blocks_in_message(msg) -> None:
 
         if downloaded_files:
             lang = load_config().agents.language
-            for i, local_path in reversed(downloaded_files):
-                text = (
+            # Prepend all upload notes to the top of the message so
+            # the agent reads "files X, Y were downloaded to these
+            # paths" *before* it reads the media blocks and the
+            # user's command.  Inserting next to each media block
+            # used to work but agents still misread them — the
+            # command at the bottom drew attention, and the
+            # interleaved notes read like repeated user captions.
+            # Grouped at the top, inside <system-note>, they look
+            # unambiguously like a system preamble.  Iteration order
+            # matches ``downloaded_files`` so the note sequence
+            # mirrors the media sequence.
+            notes: list[dict] = []
+            for _i, local_path in downloaded_files:
+                inner = (
                     f"用户上传文件，已经下载到 {local_path}"
                     if lang == "zh"
                     else f"User uploaded a file, downloaded to {local_path}"
                 )
-                text_block = {"type": "text", "text": text}
-                message.content.insert(i + 1, text_block)
+                notes.append({
+                    "type": "text",
+                    "text": f"<system-note>{inner}</system-note>",
+                })
+            message.content = [*notes, *message.content]
 
 
 def is_first_user_interaction(messages: list) -> bool:
