@@ -31,6 +31,15 @@ from .agent_management import (
 )
 from .delegate_external_agent import delegate_external_agent
 from .mempalace_diary import mempalace_diary_write
+from .signal_sticker import (
+    signal_add_stickers_to_pack,
+    signal_create_sticker_pack,
+    signal_install_sticker_pack,
+    signal_list_sticker_packs,
+    signal_prepare_sticker_webp,
+    signal_preview_sticker,
+    signal_send_sticker,
+)
 
 __all__ = [
     "execute_python_code",
@@ -58,4 +67,11 @@ __all__ = [
     "submit_to_agent",
     "check_agent_task",
     "mempalace_diary_write",
+    "signal_list_sticker_packs",
+    "signal_preview_sticker",
+    "signal_install_sticker_pack",
+    "signal_create_sticker_pack",
+    "signal_add_stickers_to_pack",
+    "signal_prepare_sticker_webp",
+    "signal_send_sticker",
 ]

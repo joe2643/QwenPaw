@@ -74,6 +74,18 @@ class FakeClient:
     async def download_attachment(self, attachment_id, dest_dir):
         return None
 
+    async def get_sticker(
+        self, pack_id, sticker_id, dest_dir, *, pack_key=None,
+    ):
+        """Default behaviour: write a stub webp into dest_dir and
+        return the path.  Tests that want to exercise failure paths
+        override this attribute directly on the instance.
+        """
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        p = dest_dir / f"signal_sticker_{pack_id[:8]}_{sticker_id}.webp"
+        p.write_bytes(b"RIFF\x00\x00\x00\x00WEBP")
+        return p
+
 
 # ───────────────────────────── helpers ───────────────────────────────
 
@@ -118,6 +130,152 @@ def test_markdown_monospace_and_italic() -> None:
     assert plain == "run foo then go"
     kinds = sorted(s["style"] for s in styles)
     assert kinds == ["ITALIC", "MONOSPACE"]
+
+
+# ───────────────────────────── reply-to (quote) ──────────────────────
+
+async def test_quote_with_image_attachment_inlines_local_path(
+    tmp_path,
+) -> None:
+    # Mirrors the WhatsApp channel fix: when the quoted message had an
+    # image attachment and we successfully downloaded it, the
+    # ``Media:`` label in the reply-to block must include the absolute
+    # local path.  Without it the agent sees "Media: image" and has
+    # nothing to hand to tools like codex image i2i / view_image.
+    ch = _make_channel()
+    ch._media_dir = tmp_path
+
+    fake_local = tmp_path / "sig_quote_123.jpg"
+    fake_local.write_bytes(b"\xff\xd8\xff" + b"x" * 64)
+
+    # Override the download to return the path we just wrote.
+    ch.client.download_attachment = AsyncMock(return_value=fake_local)
+
+    data_message = {
+        "quote": {
+            "text": "earlier text",
+            "author": "+85298765432",
+            "authorUuid": "",
+            "id": "quote-id-1",
+            "mentions": [],
+            "attachments": [
+                {
+                    "id": "att-123",
+                    "contentType": "image/jpeg",
+                    "fileName": "sig_quote_123.jpg",
+                },
+            ],
+        },
+    }
+
+    parts = await ch._extract_quote_content(data_message)
+    text_parts = [p for p in parts if hasattr(p, "text")]
+    assert text_parts, "expected a reply-to text block"
+    joined = " ".join(p.text for p in text_parts)
+    assert "=== UNTRUSTED reply-to" in joined
+    assert "Media: image:" in joined
+    assert str(fake_local) in joined
+
+
+async def test_quote_with_video_attachment_inlines_local_path(
+    tmp_path,
+) -> None:
+    # Generalises the guarantee to video attachments — same reason:
+    # the agent needs the path to invoke view_video downstream.
+    ch = _make_channel()
+    ch._media_dir = tmp_path
+    fake_local = tmp_path / "sig_quote_vid.mp4"
+    fake_local.write_bytes(b"x" * 1024)
+    ch.client.download_attachment = AsyncMock(return_value=fake_local)
+
+    data_message = {
+        "quote": {
+            "text": "check this clip",
+            "author": "+85298765432",
+            "authorUuid": "",
+            "id": "quote-id-2",
+            "mentions": [],
+            "attachments": [
+                {
+                    "id": "att-vid",
+                    "contentType": "video/mp4",
+                    "fileName": "clip.mp4",
+                },
+            ],
+        },
+    }
+
+    parts = await ch._extract_quote_content(data_message)
+    text = next(p.text for p in parts if hasattr(p, "text"))
+    assert "Media: video:" in text
+    assert str(fake_local) in text
+
+
+async def test_quote_with_sticker_inlines_image_and_emoji(tmp_path) -> None:
+    """Quoted messages that reference a sticker must surface both
+    the webp path (so the agent can reuse it with
+    ``signal_send_sticker`` / view it) and the emoji (so the agent
+    can grasp the tone of what the user is quoting).
+    """
+    ch = _make_channel()
+    ch._media_dir = tmp_path
+
+    data_message = {
+        "quote": {
+            "text": "",
+            "author": "+85298765432",
+            "authorUuid": "",
+            "id": "quote-sticker-1",
+            "sticker": {
+                "packId": "PACKID" * 8,
+                "packKey": "PACKKEY" * 8,
+                "stickerId": 4,
+                "emoji": "🦀",
+            },
+        },
+    }
+
+    parts = await ch._extract_quote_content(data_message)
+    # Reply-to block should name the sticker with emoji + path.
+    text = next(p.text for p in parts if hasattr(p, "text"))
+    assert "Media: sticker 🦀" in text
+    # An ImageContent block should have been appended for vision.
+    images = [p for p in parts if getattr(p, "type", None) == "image"]
+    assert len(images) == 1
+    # The file written by FakeClient.get_sticker must be under
+    # the channel's media_dir.
+    sticker_files = list(tmp_path.glob("signal_sticker_*.webp"))
+    assert len(sticker_files) == 1
+    assert str(sticker_files[0]) in text
+
+
+async def test_quote_with_sticker_fetch_failure_labels_as_failed(
+    tmp_path,
+) -> None:
+    """When the sticker pack is unreachable (no key + RPC errors)
+    we still surface the fact that the quoted message was a
+    sticker, just without the path — better than silently
+    dropping the quote context."""
+    ch = _make_channel()
+    ch._media_dir = tmp_path
+
+    async def _fail(*_a, **_kw):
+        return None
+    ch.client.get_sticker = _fail
+
+    parts = await ch._extract_quote_content({
+        "quote": {
+            "text": "",
+            "author": "+85298765432",
+            "sticker": {
+                "packId": "PID" * 10,
+                "stickerId": 0,
+                "emoji": "😀",
+            },
+        },
+    })
+    text = next(p.text for p in parts if hasattr(p, "text"))
+    assert "Media: sticker 😀 (fetch failed)" in text
 
 
 # ───────────────────────────── outbound mentions ─────────────────────
@@ -344,6 +502,141 @@ async def test_group_with_mention_enqueues_and_injects_history() -> None:
     assert ch._group_history.get(group_id) == []
 
 
+# ───────────────────────────── inbound sticker ───────────────────────
+
+@pytest.mark.asyncio
+async def test_inbound_sticker_only_message_enqueues_with_hint(
+    tmp_path,
+) -> None:
+    """Sticker-only envelope (no body, no attachments) is enqueued
+    with both a `[Signal sticker … at <path>]` hint TextContent and
+    the actual ImageContent block — mirrors how the WhatsApp
+    channel surfaces stickers so the agent can decide to reply in
+    kind.
+    """
+    enqueue_calls: List[Any] = []
+
+    ch = _make_channel()
+    ch._media_dir = tmp_path / "media"
+    ch._enqueue = enqueue_calls.append
+    ch.client.connected = True
+
+    await ch._on_notification({
+        "envelope": {
+            "sourceNumber": "+85298765432",
+            "sourceUuid": "abcd1234-0000-0000-0000-000000000000",
+            "sourceName": "Alice",
+            "timestamp": 1_700_000_000,
+            "dataMessage": {
+                "sticker": {
+                    "packId": "abcdef0123456789" * 2,
+                    "packKey": "fedcba9876543210" * 4,
+                    "stickerId": 7,
+                    "emoji": "🔥",
+                },
+            },
+        },
+    })
+
+    assert len(enqueue_calls) == 1
+    req = enqueue_calls[0]
+    # Find the TextContent + ImageContent pair the channel builds
+    # from the sticker reference.  The envelope-prefix hint
+    # rewrites the first TextContent to prefix the sender, which
+    # is why we scan instead of hard-indexing.
+    content = req.input[-1].content
+    texts = [c.text for c in content if getattr(c, "type", None) == "text"]
+    images = [
+        c for c in content if getattr(c, "type", None) == "image"
+    ]
+    assert any("Signal sticker" in t for t in texts), texts
+    assert any("🔥" in t for t in texts), "emoji should survive"
+    # Path in the hint should point at the file we wrote into the
+    # channel's media_dir.
+    sticker_files = list((tmp_path / "media").glob("signal_sticker_*.webp"))
+    assert len(sticker_files) == 1
+    assert any(str(sticker_files[0]) in t for t in texts)
+    assert len(images) == 1
+
+
+@pytest.mark.asyncio
+async def test_inbound_sticker_without_emoji_omits_emoji_token(
+    tmp_path,
+) -> None:
+    """No emoji → hint reads `[Signal sticker at <path>]`."""
+    enqueue_calls: List[Any] = []
+    ch = _make_channel()
+    ch._media_dir = tmp_path / "media"
+    ch._enqueue = enqueue_calls.append
+    ch.client.connected = True
+
+    await ch._on_notification({
+        "envelope": {
+            "sourceNumber": "+85298765432",
+            "timestamp": 1_700_000_000,
+            "dataMessage": {
+                "sticker": {
+                    "packId": "abc" * 10,
+                    "packKey": "def" * 20,
+                    "stickerId": 0,
+                },
+            },
+        },
+    })
+
+    req = enqueue_calls[0]
+    texts = [
+        c.text for c in req.input[-1].content
+        if getattr(c, "type", None) == "text"
+    ]
+    hint = next(t for t in texts if "Signal sticker" in t)
+    # No emoji glyph between the word and "at"
+    assert " at " in hint
+    assert "🔥" not in hint
+
+
+@pytest.mark.asyncio
+async def test_inbound_sticker_fetch_failure_drops_sticker_silently(
+    tmp_path,
+) -> None:
+    """When get_sticker returns None the message continues with
+    whatever body/attachments exist — we don't want a single bad
+    sticker to black-hole the text the user typed alongside it.
+    """
+    enqueue_calls: List[Any] = []
+    ch = _make_channel()
+    ch._media_dir = tmp_path / "media"
+    ch._enqueue = enqueue_calls.append
+    ch.client.connected = True
+
+    async def _fail_sticker(*_args, **_kwargs):
+        return None
+    ch.client.get_sticker = _fail_sticker
+
+    await ch._on_notification({
+        "envelope": {
+            "sourceNumber": "+85298765432",
+            "timestamp": 1_700_000_000,
+            "dataMessage": {
+                "message": "check this out",
+                "sticker": {
+                    "packId": "abc" * 10,
+                    "packKey": "def" * 20,
+                    "stickerId": 0,
+                },
+            },
+        },
+    })
+
+    assert len(enqueue_calls) == 1
+    texts = [
+        c.text for c in enqueue_calls[0].input[-1].content
+        if getattr(c, "type", None) == "text"
+    ]
+    assert any("check this out" in t for t in texts)
+    assert not any("Signal sticker" in t for t in texts)
+
+
 # ───────────────────────────── allowlist ─────────────────────────────
 
 def test_is_source_allowed_phone() -> None:
@@ -479,6 +772,412 @@ def test_subprocess_cmd_no_config_flag_when_unset() -> None:
         client = SignalSubprocessClient(account="+1", data_dir=v)
         cmd = client._build_cmd()
         assert "-c" not in cmd, f"-c should not appear for data_dir={v!r}"
+
+
+# ───────────────────────────── download_attachment dest_dir ─────────
+
+async def test_download_attachment_copies_into_dest_dir(
+    tmp_path, monkeypatch,
+) -> None:
+    # Without this copy the returned path sits under
+    # ~/.local/share/signal-cli/attachments/, which isn't in the
+    # media server's allowed_dirs — /sign 403s, resolve_media_url
+    # falls back to the raw path, and remote LLMs can't reach the
+    # file.  This test locks the invariant: returned path must be
+    # under dest_dir (signed-URL-eligible) when signal-cli has
+    # autosaved the file.
+    from qwenpaw.app.channels.signal.subprocess_client import (
+        SignalSubprocessClient,
+    )
+
+    # Spoof the signal-cli autosave location with a temp dir we
+    # actually own (the real code reads ``Path.home() / .local ...``).
+    fake_autosave = tmp_path / "signal_autosave"
+    fake_autosave.mkdir()
+    att_id = "AtXxXzQq123.jpg"
+    (fake_autosave / att_id).write_bytes(b"\xff\xd8\xff" + b"x" * 64)
+    monkeypatch.setattr(
+        "qwenpaw.app.channels.signal.subprocess_client.Path.home",
+        lambda: tmp_path,
+    )
+    # Path.home() / .local / share / signal-cli / attachments →
+    # tmp_path / .local / share / signal-cli / attachments.  Make it
+    # point at our seeded autosave dir.
+    real_dir = tmp_path / ".local" / "share" / "signal-cli" / "attachments"
+    real_dir.mkdir(parents=True, exist_ok=True)
+    (real_dir / att_id).write_bytes((fake_autosave / att_id).read_bytes())
+
+    client = SignalSubprocessClient(account="+1")
+    dest_dir = tmp_path / "copaw_media"
+
+    result = await client.download_attachment(att_id, dest_dir)
+    assert result is not None
+    # The returned path MUST be under dest_dir, not the autosave dir.
+    assert str(result).startswith(str(dest_dir))
+    assert result.is_file()
+    # Same bytes — not a zero-length stub.
+    assert result.read_bytes() == b"\xff\xd8\xff" + b"x" * 64
+
+
+# ───────────────────────────── subprocess client: get_sticker ───────
+
+async def test_get_sticker_writes_under_dest_dir(tmp_path) -> None:
+    """Happy path: RPC returns base64 bytes, get_sticker persists
+    them under dest_dir with a deterministic filename and the pack
+    key is NOT needed for the first attempt.
+    """
+    import base64 as _b64
+    from qwenpaw.app.channels.signal.subprocess_client import (
+        SignalSubprocessClient,
+    )
+
+    client = SignalSubprocessClient(account="+1")
+    # Bypass the "connected" gate by stubbing .call directly.
+    rpc_calls: List[Dict[str, Any]] = []
+
+    async def _fake_call(method, params=None, timeout=None):
+        rpc_calls.append({"method": method, "params": params})
+        if method == "getSticker":
+            return {"data": _b64.b64encode(b"WEBPBYTES").decode("ascii")}
+        raise AssertionError(f"unexpected method {method}")
+    client.call = _fake_call  # type: ignore[method-assign]
+
+    dest_dir = tmp_path / "m"
+    result = await client.get_sticker(
+        "PACKHEXID" * 4, 3, dest_dir,
+    )
+    assert result is not None
+    assert result.parent == dest_dir
+    assert result.name.endswith("_3.webp")
+    assert result.read_bytes() == b"WEBPBYTES"
+    # Only one RPC — pack was already local, no addStickerPack fallback.
+    assert [c["method"] for c in rpc_calls] == ["getSticker"]
+
+
+async def test_get_sticker_falls_back_to_add_pack_then_retries(
+    tmp_path,
+) -> None:
+    """getSticker raises (pack unknown) → addStickerPack → getSticker
+    succeeds.  Uses the fragment-URI format Signal Desktop / signal-cli
+    expect (``pack_id=...&pack_key=...`` in the URL hash).
+    """
+    import base64 as _b64
+    from qwenpaw.app.channels.signal.subprocess_client import (
+        SignalSubprocessClient,
+    )
+
+    client = SignalSubprocessClient(account="+1")
+    calls: List[Dict[str, Any]] = []
+    attempt = {"n": 0}
+
+    async def _fake_call(method, params=None, timeout=None):
+        calls.append({"method": method, "params": params})
+        if method == "getSticker":
+            attempt["n"] += 1
+            if attempt["n"] == 1:
+                raise RuntimeError("StickerPackNotFoundException")
+            return _b64.b64encode(b"OK").decode("ascii")
+        if method == "addStickerPack":
+            return None
+        raise AssertionError(f"unexpected method {method}")
+    client.call = _fake_call  # type: ignore[method-assign]
+
+    result = await client.get_sticker(
+        "PACKID" * 10,
+        0,
+        tmp_path,
+        pack_key="PACKKEY" * 10,
+    )
+    assert result is not None
+    assert result.read_bytes() == b"OK"
+    # Order: getSticker (fail) → addStickerPack → getSticker (ok)
+    assert [c["method"] for c in calls] == [
+        "getSticker", "addStickerPack", "getSticker",
+    ]
+    uri = calls[1]["params"]["uri"]
+    assert uri.startswith("https://signal.art/addstickers/#")
+    assert "pack_id=PACKID" in uri
+    assert "pack_key=PACKKEY" in uri
+
+
+async def test_get_sticker_returns_none_without_key_when_fetch_fails(
+    tmp_path,
+) -> None:
+    """No pack_key → we can't install the pack, so the single
+    getSticker failure is terminal (caller should fall through to
+    its own handling — e.g. drop the sticker block).
+    """
+    from qwenpaw.app.channels.signal.subprocess_client import (
+        SignalSubprocessClient,
+    )
+
+    client = SignalSubprocessClient(account="+1")
+
+    async def _fake_call(method, params=None, timeout=None):
+        raise RuntimeError("nope")
+    client.call = _fake_call  # type: ignore[method-assign]
+
+    result = await client.get_sticker("PID" * 10, 0, tmp_path)
+    assert result is None
+
+
+# ───────────────────────── subprocess client: orphan reap ──────────
+
+async def test_reap_account_orphans_sigterms_matches_and_noops_otherwise(
+    monkeypatch,
+) -> None:
+    """The pre-spawn reap step must target ONLY signal-cli pids that
+    match our account AND aren't the current self._proc — killing
+    anything else would be a footgun for devs running parallel
+    signal-cli on other accounts."""
+    import sys
+    if not sys.platform.startswith("linux"):
+        pytest.skip("orphan reap is Linux-only")
+
+    from qwenpaw.app.channels.signal import subprocess_client as sc
+
+    client = sc.SignalSubprocessClient(account="+1")
+    client._proc = None
+
+    kills: List[Dict[str, Any]] = []
+
+    def _fake_kill(pid, sig):
+        kills.append({"pid": pid, "sig": int(sig)})
+    monkeypatch.setattr(sc.os, "kill", _fake_kill)
+
+    # First probe returns an orphan; second probe (after grace) says
+    # it's gone — simulating SIGTERM taking effect quickly.
+    state = {"calls": 0}
+
+    def _fake_iter(account):
+        state["calls"] += 1
+        if state["calls"] == 1:
+            return [9999]
+        return []
+    monkeypatch.setattr(sc, "_iter_signal_cli_pids", _fake_iter)
+
+    await client._reap_account_orphans()
+
+    assert len(kills) == 1
+    assert kills[0]["pid"] == 9999
+    # First call should be SIGTERM, not SIGKILL.
+    import signal as _sig
+    assert kills[0]["sig"] == int(_sig.SIGTERM)
+
+
+async def test_reap_account_orphans_escalates_to_sigkill(monkeypatch) -> None:
+    """An orphan that shrugs off SIGTERM must get SIGKILL — otherwise
+    the next signal-cli stalls on the file lock indefinitely."""
+    import sys
+    if not sys.platform.startswith("linux"):
+        pytest.skip("orphan reap is Linux-only")
+
+    from qwenpaw.app.channels.signal import subprocess_client as sc
+
+    client = sc.SignalSubprocessClient(account="+1")
+    client._proc = None
+
+    kills: List[Dict[str, Any]] = []
+
+    def _fake_kill(pid, sig):
+        kills.append({"pid": pid, "sig": int(sig)})
+    monkeypatch.setattr(sc.os, "kill", _fake_kill)
+
+    # Orphan survives all probes — must end in SIGKILL.
+    monkeypatch.setattr(
+        sc, "_iter_signal_cli_pids", lambda _acct: [4242],
+    )
+
+    # Speed up the wait loop so the test isn't slow.
+    async def _fast_sleep(_):
+        return None
+    monkeypatch.setattr(sc.asyncio, "sleep", _fast_sleep)
+
+    await client._reap_account_orphans()
+
+    import signal as _sig
+    sigs = [k["sig"] for k in kills]
+    assert int(_sig.SIGTERM) in sigs
+    assert int(_sig.SIGKILL) in sigs
+
+
+async def test_reap_ignores_self_child(monkeypatch) -> None:
+    """Our own live child (self._proc.pid) must never be treated as
+    an orphan — that would just kill the signal-cli we want to
+    keep."""
+    import sys
+    if not sys.platform.startswith("linux"):
+        pytest.skip("orphan reap is Linux-only")
+
+    from qwenpaw.app.channels.signal import subprocess_client as sc
+
+    client = sc.SignalSubprocessClient(account="+1")
+
+    class _FakeProc:
+        pid = 12345
+    client._proc = _FakeProc()  # type: ignore[assignment]
+
+    kills: List[int] = []
+    monkeypatch.setattr(sc.os, "kill", lambda pid, sig: kills.append(pid))
+    monkeypatch.setattr(
+        sc, "_iter_signal_cli_pids", lambda _acct: [12345, 67890],
+    )
+    async def _fast_sleep(_):
+        return None
+    monkeypatch.setattr(sc.asyncio, "sleep", _fast_sleep)
+    # Also keep the post-SIGTERM probe deterministic.
+    call = {"n": 0}
+
+    def _iter(_acct):
+        call["n"] += 1
+        if call["n"] == 1:
+            return [12345, 67890]
+        return [12345]  # our child still running; orphan gone
+    monkeypatch.setattr(sc, "_iter_signal_cli_pids", _iter)
+
+    await client._reap_account_orphans()
+    assert kills == [67890], (
+        f"expected only the orphan to be signalled, got {kills}"
+    )
+
+
+# ───────────────────────── subprocess client: pack RPCs ─────────────
+
+async def test_list_sticker_packs_returns_array_on_list_result(
+    tmp_path,
+) -> None:
+    from qwenpaw.app.channels.signal.subprocess_client import (
+        SignalSubprocessClient,
+    )
+    client = SignalSubprocessClient(account="+1")
+
+    async def _fake_call(method, params=None, timeout=None):
+        assert method == "listStickerPacks"
+        return [{"packId": "A" * 32, "title": "x"}]
+    client.call = _fake_call  # type: ignore[method-assign]
+    packs = await client.list_sticker_packs()
+    assert len(packs) == 1
+    assert packs[0]["title"] == "x"
+
+
+async def test_list_sticker_packs_tolerates_packs_key_wrapper() -> None:
+    """signal-cli older versions wrap the array in ``{packs: [...]}``.
+    The client should unwrap that shape transparently."""
+    from qwenpaw.app.channels.signal.subprocess_client import (
+        SignalSubprocessClient,
+    )
+    client = SignalSubprocessClient(account="+1")
+
+    async def _fake_call(method, params=None, timeout=None):
+        return {"packs": [{"packId": "B", "title": "y"}]}
+    client.call = _fake_call  # type: ignore[method-assign]
+    packs = await client.list_sticker_packs()
+    assert packs == [{"packId": "B", "title": "y"}]
+
+
+async def test_list_sticker_packs_returns_empty_on_rpc_error() -> None:
+    """Read-only RPC: failures surface as ``[]`` instead of a raise,
+    so callers treat them as "no packs" — the tool layer already
+    returns an empty array in that case."""
+    from qwenpaw.app.channels.signal.subprocess_client import (
+        SignalSubprocessClient,
+    )
+    client = SignalSubprocessClient(account="+1")
+
+    async def _fake_call(method, params=None, timeout=None):
+        raise RuntimeError("boom")
+    client.call = _fake_call  # type: ignore[method-assign]
+    assert await client.list_sticker_packs() == []
+
+
+async def test_add_sticker_pack_uses_signal_art_uri() -> None:
+    from qwenpaw.app.channels.signal.subprocess_client import (
+        SignalSubprocessClient,
+    )
+    client = SignalSubprocessClient(account="+1")
+    calls: List[Dict[str, Any]] = []
+
+    async def _fake_call(method, params=None, timeout=None):
+        calls.append({"method": method, "params": params})
+        return None
+    client.call = _fake_call  # type: ignore[method-assign]
+
+    ok = await client.add_sticker_pack("PACKID", "PACKKEY")
+    assert ok is True
+    assert calls == [{
+        "method": "addStickerPack",
+        "params": {
+            "uri": (
+                "https://signal.art/addstickers/"
+                "#pack_id=PACKID&pack_key=PACKKEY"
+            ),
+        },
+    }]
+
+
+async def test_upload_sticker_pack_handles_plain_url_string() -> None:
+    from qwenpaw.app.channels.signal.subprocess_client import (
+        SignalSubprocessClient,
+    )
+    client = SignalSubprocessClient(account="+1")
+
+    async def _fake_call(method, params=None, timeout=None):
+        assert method == "uploadStickerPack"
+        assert params == {"path": "/tmp/pack/manifest.json"}
+        return "https://signal.art/addstickers/#pack_id=X&pack_key=Y"
+    client.call = _fake_call  # type: ignore[method-assign]
+
+    url = await client.upload_sticker_pack("/tmp/pack/manifest.json")
+    assert url == "https://signal.art/addstickers/#pack_id=X&pack_key=Y"
+
+
+async def test_upload_sticker_pack_handles_dict_url_field() -> None:
+    from qwenpaw.app.channels.signal.subprocess_client import (
+        SignalSubprocessClient,
+    )
+    client = SignalSubprocessClient(account="+1")
+
+    async def _fake_call(method, params=None, timeout=None):
+        return {"url": "https://signal.art/addstickers/#pack_id=Z&pack_key=W"}
+    client.call = _fake_call  # type: ignore[method-assign]
+
+    url = await client.upload_sticker_pack("/x.json")
+    assert url == "https://signal.art/addstickers/#pack_id=Z&pack_key=W"
+
+
+async def test_send_sticker_message_wires_sticker_param() -> None:
+    """send with sticker param must NOT carry ``message`` — signal-cli
+    routes the send purely on the sticker reference.  Bonus check:
+    group vs DM target shape."""
+    from qwenpaw.app.channels.signal.subprocess_client import (
+        SignalSubprocessClient,
+    )
+    client = SignalSubprocessClient(account="+85251159218")
+    calls: List[Dict[str, Any]] = []
+
+    async def _fake_call(method, params=None, timeout=None):
+        calls.append({"method": method, "params": params})
+        return {"timestamp": 42}
+    client.call = _fake_call  # type: ignore[method-assign]
+
+    # DM
+    ts = await client.send_sticker_message(
+        "+85298765432", "PACKID", 3, is_group=False,
+    )
+    assert ts == 42
+    dm_params = calls[0]["params"]
+    assert dm_params["sticker"] == "PACKID:3"
+    assert dm_params["recipients"] == ["+85298765432"]
+    assert "groupId" not in dm_params
+
+    # Group
+    ts2 = await client.send_sticker_message(
+        "GROUPBASE64==", "PACKID", 0, is_group=True,
+    )
+    assert ts2 == 42
+    grp_params = calls[1]["params"]
+    assert grp_params["groupId"] == "GROUPBASE64=="
+    assert "recipients" not in grp_params
 
 
 # ───────────────────────────── mention prefix collision ──────────────

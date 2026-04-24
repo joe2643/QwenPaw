@@ -4,7 +4,7 @@
 Provides utilities to get the correct agent instance for each request.
 """
 from contextvars import ContextVar
-from typing import Optional, TYPE_CHECKING
+from typing import Any, Dict, Optional, TYPE_CHECKING
 from fastapi import Request
 from .multi_agent_manager import MultiAgentManager
 from ..config.utils import load_config
@@ -21,6 +21,17 @@ _current_agent_id: ContextVar[Optional[str]] = ContextVar(
 # Context variable to store current session id across async calls
 _current_session_id: ContextVar[Optional[str]] = ContextVar(
     "current_session_id",
+    default=None,
+)
+
+# Context variable to store the current request's channel metadata.
+# Populated by AgentRunner.stream_query from request.channel_meta so
+# tools can discover which chat they're running on — e.g.
+# ``signal_send_sticker(to=None)`` auto-resolves the recipient from
+# ``group_id`` / ``source`` in this dict.  ContextVars are per-task,
+# so interleaved requests don't leak targets across sessions.
+_current_channel_meta: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
+    "current_channel_meta",
     default=None,
 )
 
@@ -152,3 +163,18 @@ def set_current_session_id(session_id: str) -> None:
 
 def get_current_session_id() -> Optional[str]:
     return _current_session_id.get()
+
+
+def set_current_channel_meta(meta: Optional[Dict[str, Any]]) -> None:
+    """Publish the current request's channel_meta to tool code.
+
+    Pass ``None`` to clear (useful at end of a request so a later
+    unrelated task doesn't inherit stale context).
+    """
+    _current_channel_meta.set(meta)
+
+
+def get_current_channel_meta() -> Optional[Dict[str, Any]]:
+    """Return the current request's channel_meta or ``None`` when
+    no agent request is in flight."""
+    return _current_channel_meta.get()

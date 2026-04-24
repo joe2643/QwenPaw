@@ -32,6 +32,68 @@ _BACKOFF_START = 5.0
 _BACKOFF_MAX = 60.0
 _TERM_GRACE_SEC = 3.0
 
+def _iter_signal_cli_pids(account: str) -> "list[int]":
+    """Find signal-cli processes belonging to the current user that
+    target ``account``.  Uses /proc (Linux only) so there's no new
+    dependency on psutil.  Returns an empty list on non-Linux or
+    when /proc is unreadable — safer to skip the probe than to
+    raise and block spawn entirely.
+    """
+    import sys
+    if not sys.platform.startswith("linux"):
+        return []
+    proc_dir = Path("/proc")
+    if not proc_dir.is_dir():
+        return []
+    my_uid = os.getuid()
+    my_pid = os.getpid()
+    hits: list[int] = []
+    for entry in proc_dir.iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid == my_pid:
+            continue
+        try:
+            # Match UID first so we never touch another user's
+            # processes even when the cmdline coincidentally looks
+            # right.
+            status = (entry / "status").read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if f"Uid:\t{my_uid}" not in status:
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if not cmdline:
+            continue
+        args = cmdline.split(b"\x00")
+        if not any(b"signal-cli" in a for a in args):
+            continue
+        # ``-a <account>`` must appear so we only target the
+        # contested account — a jsonRpc on a different phone number
+        # is unrelated and must not be killed.
+        arg_list = [a.decode("utf-8", "replace") for a in args if a]
+        try:
+            idx = arg_list.index("-a")
+            if idx + 1 >= len(arg_list) or arg_list[idx + 1] != account:
+                continue
+        except ValueError:
+            continue
+        hits.append(pid)
+    return hits
+
+
+def _sticker_pack_uri(pack_id: str, pack_key: str) -> str:
+    """Canonical sticker-pack install URI signal-cli's ``addStickerPack``
+    expects.  Same fragment layout Signal Desktop ships in ``signal.art``
+    share links — the RPC parses ``pack_id`` / ``pack_key`` from the
+    fragment rather than taking them as separate fields.
+    """
+    return f"https://signal.art/addstickers/#pack_id={pack_id}&pack_key={pack_key}"
+
 
 class SignalSubprocessClient:
     """signal-cli subprocess client speaking JSON-RPC over stdin/stdout."""
@@ -243,12 +305,39 @@ class SignalSubprocessClient:
     ) -> Optional[Path]:
         """Download an attachment. signal-cli >=0.13 autosaves to
         ~/.local/share/signal-cli/attachments/<id>; we try that first, then
-        fall back to the getAttachment RPC (which returns base64 data)."""
-        # Fast path: file already saved by signal-cli
+        fall back to the getAttachment RPC (which returns base64 data).
+
+        The returned path is **always** placed under ``dest_dir`` —
+        the callers rely on the media server being able to sign it,
+        and the media server's ``allowed_dirs`` allow-list covers
+        CoPaw's channel dirs but not signal-cli's default autosave
+        location.  When signal-cli has already decoded the blob to
+        its own attachments dir we copy it across rather than
+        pointing at the original; the signal-cli directory still
+        acts as a secondary cache.
+        """
+        # Fast path: file already saved by signal-cli — copy into
+        # dest_dir so media-server signing + resolve_media_url work.
         default_dir = Path.home() / ".local" / "share" / "signal-cli" / "attachments"
         candidate = default_dir / attachment_id
         if candidate.is_file():
-            return candidate
+            try:
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                # Preserve the signal-cli filename (already includes
+                # extension for modern signal-cli versions — e.g.
+                # ``<id>.jpg``).  Fall back to the bare id when not.
+                dest = dest_dir / candidate.name
+                if not dest.exists() or dest.stat().st_size != candidate.stat().st_size:
+                    import shutil
+                    shutil.copy2(candidate, dest)
+                return dest
+            except Exception as e:
+                logger.warning(
+                    "signal: failed to copy attachment %s into %s: %s "
+                    "— falling back to signal-cli path",
+                    attachment_id, dest_dir, e,
+                )
+                return candidate
         # RPC fallback
         try:
             result = await self.call(
@@ -272,6 +361,203 @@ class SignalSubprocessClient:
                 return None
             return dest
         return None
+
+    async def list_sticker_packs(self) -> List[Dict[str, Any]]:
+        """List known sticker packs (installed + uploaded by this account).
+
+        signal-cli's ``listStickerPacks`` returns an array of
+        ``{packId, packKey, title, author, installed, stickers:
+        [{id, emoji, contentType, fileName}]}`` objects.  We
+        forward the raw list verbatim — the tool wrapper shapes it
+        into something the agent can reason about.  Empty list on
+        error (the RPC is read-only, so callers treat it as "no
+        packs" rather than surfacing the subprocess failure).
+        """
+        try:
+            result = await self.call("listStickerPacks")
+        except Exception as e:
+            logger.warning("signal: listStickerPacks failed: %s", e)
+            return []
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict):
+            packs = result.get("packs")
+            if isinstance(packs, list):
+                return packs
+        logger.warning(
+            "signal: listStickerPacks returned unexpected shape: %r",
+            type(result).__name__,
+        )
+        return []
+
+    async def add_sticker_pack(
+        self,
+        pack_id: str,
+        pack_key: str,
+    ) -> bool:
+        """Install a sticker pack by id + key.  Equivalent to
+        tapping a signal.art share link.  Idempotent — re-installing
+        an already-installed pack returns success."""
+        try:
+            await self.call(
+                "addStickerPack",
+                {"uri": _sticker_pack_uri(pack_id, pack_key)},
+            )
+            return True
+        except Exception as e:
+            logger.error(
+                "signal: addStickerPack %s failed: %s",
+                pack_id[:12], e,
+            )
+            return False
+
+    async def upload_sticker_pack(self, manifest_path: str) -> Optional[str]:
+        """Upload a sticker pack from a directory (containing
+        ``manifest.json`` + numbered ``<id>.webp`` files) or a zip.
+
+        Returns the signal.art share URL on success — callers parse
+        that URL for ``pack_id`` + ``pack_key``.  Returns ``None`` on
+        any RPC failure; the caller is expected to surface that to
+        the agent so it can retry or show the user a specific error.
+        """
+        try:
+            result = await self.call(
+                "uploadStickerPack",
+                {"path": manifest_path},
+                timeout=120.0,
+            )
+        except Exception as e:
+            logger.error("signal: uploadStickerPack failed: %s", e)
+            return None
+        # signal-cli returns either a bare URL string or
+        # ``{"url": "..."}`` depending on version.  Tolerate both.
+        if isinstance(result, str):
+            return result
+        if isinstance(result, dict):
+            url = result.get("url") or result.get("packUrl")
+            if isinstance(url, str):
+                return url
+        logger.warning(
+            "signal: uploadStickerPack returned unexpected shape: %r",
+            type(result).__name__,
+        )
+        return None
+
+    async def send_sticker_message(
+        self,
+        target: str,
+        pack_id: str,
+        sticker_id: int,
+        is_group: bool = False,
+    ) -> Optional[int]:
+        """Send a sticker by pack reference.  ``pack_id`` + ``sticker_id``
+        must correspond to a pack the *sender* has access to (either
+        installed or uploaded by this account); the recipient auto-
+        fetches the sticker from Signal's sticker CDN on receipt.
+        """
+        params: Dict[str, Any] = {
+            "account": self._account,
+            "sticker": f"{pack_id}:{sticker_id}",
+        }
+        if is_group:
+            params["groupId"] = target
+        else:
+            params["recipients"] = [target]
+        try:
+            result = await self.call("send", params)
+        except Exception as e:
+            logger.error(
+                "signal: send sticker %s:%s to %s failed: %s",
+                pack_id[:12], sticker_id, target[:20], e,
+            )
+            return None
+        if isinstance(result, dict) and "timestamp" in result:
+            return int(result["timestamp"])
+        return None
+
+    async def get_sticker(
+        self,
+        pack_id: str,
+        sticker_id: int,
+        dest_dir: Path,
+        *,
+        pack_key: Optional[str] = None,
+    ) -> Optional[Path]:
+        """Fetch a single sticker by ``packId:stickerId``.
+
+        Uses signal-cli's ``getSticker`` RPC, which returns the image
+        base64-encoded.  When the pack isn't locally installed yet
+        (``getSticker`` 500s with "StickerPackNotFoundException" or
+        similar) and a ``pack_key`` is supplied, we try
+        ``addStickerPack`` once and retry — this is the common case
+        for an inbound sticker from a pack the bot has never seen.
+
+        The sticker is persisted as
+        ``signal_sticker_<pack_prefix>_<id>.webp`` under ``dest_dir``
+        (lined up with :meth:`download_attachment` so the media
+        server's ``allowed_dirs`` signing covers the path).  Returns
+        ``None`` when the RPC can't produce bytes after both
+        attempts.
+        """
+        params = {"packId": pack_id, "stickerId": sticker_id}
+
+        async def _rpc() -> Any:
+            return await self.call("getSticker", params)
+
+        try:
+            result = await _rpc()
+        except Exception as e:
+            # Retry path: install-then-fetch when we have the key.
+            if pack_key:
+                try:
+                    await self.call(
+                        "addStickerPack",
+                        {"uri": _sticker_pack_uri(pack_id, pack_key)},
+                    )
+                    result = await _rpc()
+                except Exception as retry_exc:
+                    logger.warning(
+                        "signal: getSticker %s:%s failed even after "
+                        "addStickerPack: %s",
+                        pack_id[:12], sticker_id, retry_exc,
+                    )
+                    return None
+            else:
+                logger.warning(
+                    "signal: getSticker %s:%s failed: %s",
+                    pack_id[:12], sticker_id, e,
+                )
+                return None
+
+        # signal-cli may return the raw base64 string or a dict with
+        # ``data`` key — mirror ``getAttachment`` handling.
+        if isinstance(result, dict):
+            payload = result.get("data") or result.get("sticker")
+        else:
+            payload = result
+        if not isinstance(payload, str) or not payload:
+            logger.warning(
+                "signal: getSticker %s:%s returned no data: %r",
+                pack_id[:12], sticker_id, type(result).__name__,
+            )
+            return None
+
+        try:
+            raw = base64.b64decode(payload)
+        except Exception as e:
+            logger.error("signal: sticker base64 decode failed: %s", e)
+            return None
+
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest = (
+                dest_dir / f"signal_sticker_{pack_id[:8]}_{sticker_id}.webp"
+            )
+            dest.write_bytes(raw)
+            return dest
+        except OSError as e:
+            logger.error("signal: sticker write failed: %s", e)
+            return None
 
     async def whoami(self) -> Optional[Dict[str, Any]]:
         try:
@@ -334,6 +620,74 @@ class SignalSubprocessClient:
                 return
             backoff = min(backoff * 2, _BACKOFF_MAX)
 
+    async def _reap_account_orphans(self) -> None:
+        """Look for foreign signal-cli processes bound to this account
+        and request them to quit before we spawn our own.
+
+        "Foreign" = this user's UID, targets our ``-a <account>``,
+        but is not the current ``self._proc`` subprocess.  Covers
+        the orphan-from-crash case: a prior copaw exited (port
+        bind failure, OOM, SIGKILL) but its signal-cli child got
+        reparented to init and is still holding the Java
+        ``FileChannel`` lock on the account db.
+
+        Two-stage kill: SIGTERM + ~3s grace, then SIGKILL so we
+        still make progress even if the orphan is wedged.  The
+        alternative — waiting for signal-cli's own lock contention
+        prompt to time out — silently manifests as 2-min
+        ``uploadStickerPack`` stalls.
+        """
+        import signal as _sig
+        import sys
+
+        if not sys.platform.startswith("linux"):
+            return
+        my_child = self._proc.pid if self._proc else -1
+        candidates = [
+            pid for pid in _iter_signal_cli_pids(self._account)
+            if pid != my_child
+        ]
+        if not candidates:
+            return
+        logger.warning(
+            "signal: reaping %d orphan signal-cli pid(s) on account %s: %s",
+            len(candidates), self._account, candidates,
+        )
+        for pid in candidates:
+            try:
+                os.kill(pid, _sig.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                logger.warning(
+                    "signal: cannot SIGTERM orphan pid %d (EPERM) — "
+                    "skipping", pid,
+                )
+        # Give them a moment to unwind the lock cleanly.
+        for _ in range(30):  # up to 3s in 100ms steps
+            still = [
+                pid for pid in _iter_signal_cli_pids(self._account)
+                if pid != my_child
+            ]
+            if not still:
+                return
+            await asyncio.sleep(0.1)
+        # Still alive — force.  This is the fallback path; most
+        # signal-cli versions honour SIGTERM within a second.
+        still = [
+            pid for pid in _iter_signal_cli_pids(self._account)
+            if pid != my_child
+        ]
+        for pid in still:
+            logger.warning(
+                "signal: orphan pid %d did not exit on SIGTERM, sending "
+                "SIGKILL", pid,
+            )
+            try:
+                os.kill(pid, _sig.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
     async def _spawn_once(self) -> bool:
         # Ensure the data-dir exists so signal-cli can create its SQLite
         # store on first link. mkdir is a no-op on existing dirs.
@@ -346,6 +700,13 @@ class SignalSubprocessClient:
                     self._data_dir, e,
                 )
                 return False
+        # Pre-spawn: reap any orphan signal-cli that still owns the
+        # account-file lock.  Without this, the fresh jsonRpc daemon
+        # just stalls with ``Config file is in use by another instance,
+        # waiting…`` until an RPC timeout fires (2 min for
+        # ``uploadStickerPack``), which surfaces to the agent as an
+        # opaque upload failure.  Skips cleanly when there aren't any.
+        await self._reap_account_orphans()
         cmd = self._build_cmd()
         logger.info("signal: spawning %s", " ".join(cmd))
         try:
@@ -354,6 +715,20 @@ class SignalSubprocessClient:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                # New session detaches from copaw's controlling
+                # terminal so TTY signals (SIGINT, SIGHUP) from a
+                # dev shell don't take signal-cli down with us.
+                # We deliberately DON'T use ``PR_SET_PDEATHSIG``
+                # here — that signal is bound to the parent
+                # *thread*, not the parent process, and asyncio's
+                # fork happens on a helper thread whose lifetime
+                # is shorter than a single child.  Using it caused
+                # a SIGTERM storm every few seconds, killing the
+                # very signal-cli we just spawned.  The orphan
+                # safety net in ``_reap_account_orphans`` handles
+                # the "copaw crashed and left a lock-holding
+                # signal-cli behind" case at next-spawn time.
+                start_new_session=True,
             )
         except FileNotFoundError:
             logger.error("signal: binary not found: %s", self._signal_cli_path)

@@ -23,15 +23,13 @@ Pack lifecycle in one paragraph:
     just an attached webp) to the target handle.
 """
 
-from __future__ import annotations
-
 import json
 import logging
 import shutil
 import struct
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from agentscope.message import ImageBlock, TextBlock
@@ -281,44 +279,117 @@ async def signal_prepare_sticker_webp(
 async def signal_list_sticker_packs() -> ToolResponse:
     """List sticker packs known to this agent's Signal account.
 
-    Shows every pack signal-cli has on file — packs installed from
-    share links AND packs this account uploaded itself.  Use this
-    to discover ``pack_id`` values to feed into
-    ``signal_preview_sticker`` / ``signal_send_sticker``.
+    Merges two sources:
+
+    * ``listStickerPacks`` RPC — what signal-cli knows (installed
+      packs + packs uploaded from *any* tool, with authoritative
+      title/author/emoji metadata).
+    * Local sticker-pack registry
+      (``{media_dir}/sticker_packs.json``) — what CoPaw's sticker
+      tools uploaded or installed, with extra fields signal-cli
+      doesn't carry: agent-chosen ``label``, source-path lineage
+      for each sticker, ``previous_pack_id``/``superseded_by``
+      pointers linking ``signal_add_stickers_to_pack`` generations.
+
+    Packs that appear in both sources are merged key-by-key; when a
+    field shows up in both, signal-cli wins for the authoritative
+    pieces (title/author/installed/sticker emojis) and the registry
+    fills in CoPaw-side extras.
 
     Returns:
         `ToolResponse`:
             TextBlock with a JSON array of
-            ``{pack_id, title, author, installed, sticker_count,
-            stickers: [{id, emoji}]}``.  Empty array ``[]`` means
-            the account has no packs yet.
+            ``{pack_id, title, author, installed, source, label,
+            sticker_count, superseded_by, previous_pack_id,
+            stickers: [{id, emoji, source_path?, staged_path?}]}``.
+            ``source`` is ``"uploaded"`` / ``"installed"`` /
+            ``"external"`` (seen by signal-cli but not in our
+            registry).
     """
     try:
         channel = await _get_signal_channel()
     except LookupError as e:
         return _err(f"Error: {e}")
 
+    from ...app.channels.signal.sticker_pack_registry import load_registry
+
     raw = await channel.client.list_sticker_packs()
-    summary = []
+    registry = await load_registry(channel._media_dir)
+    registry_packs = registry.get("packs") or {}
+
+    summary: list[dict] = []
+    seen_ids: set[str] = set()
+
     for p in raw:
         if not isinstance(p, dict):
             continue
-        stickers = p.get("stickers") or []
+        pid = p.get("packId") or p.get("pack_id") or ""
+        reg = registry_packs.get(pid) or {}
+        cli_stickers = p.get("stickers") or []
+        reg_stickers = {
+            int(s.get("id", 0)): s
+            for s in (reg.get("stickers") or [])
+            if isinstance(s, dict)
+        }
+        merged_stickers = []
+        for s in cli_stickers:
+            if not isinstance(s, dict):
+                continue
+            sid = int(s.get("id", 0))
+            base = {"id": sid, "emoji": s.get("emoji") or ""}
+            rs = reg_stickers.get(sid)
+            if rs:
+                if rs.get("source_path"):
+                    base["source_path"] = rs["source_path"]
+                if rs.get("staged_path"):
+                    base["staged_path"] = rs["staged_path"]
+            merged_stickers.append(base)
         summary.append({
-            "pack_id": p.get("packId") or p.get("pack_id") or "",
-            "title": p.get("title") or "",
-            "author": p.get("author") or "",
+            "pack_id": pid,
+            "title": p.get("title") or reg.get("title") or "",
+            "author": p.get("author") or reg.get("author") or "",
             "installed": bool(p.get("installed", False)),
-            "sticker_count": len(stickers),
-            "stickers": [
-                {
-                    "id": int(s.get("id", 0)),
-                    "emoji": s.get("emoji") or "",
-                }
-                for s in stickers
-                if isinstance(s, dict)
-            ],
+            "source": reg.get("source") or "external",
+            "label": reg.get("label") or "",
+            "sticker_count": len(cli_stickers),
+            "superseded_by": reg.get("superseded_by") or "",
+            "previous_pack_id": reg.get("previous_pack_id") or "",
+            "stickers": merged_stickers,
         })
+        seen_ids.add(pid)
+
+    # Registry-only entries (pack exists in CoPaw history but
+    # signal-cli can no longer see it — rare, e.g. account re-link
+    # or manual pack deletion).  Surface them so the agent knows
+    # the pack_key / lineage still exists even if un-listable.
+    for pid, reg in registry_packs.items():
+        if pid in seen_ids:
+            continue
+        reg_stickers = [
+            {
+                "id": int(s.get("id", 0)),
+                "emoji": s.get("emoji") or "",
+                **({"source_path": s["source_path"]}
+                   if s.get("source_path") else {}),
+                **({"staged_path": s["staged_path"]}
+                   if s.get("staged_path") else {}),
+            }
+            for s in (reg.get("stickers") or [])
+            if isinstance(s, dict)
+        ]
+        summary.append({
+            "pack_id": pid,
+            "title": reg.get("title") or "",
+            "author": reg.get("author") or "",
+            "installed": False,
+            "source": reg.get("source") or "registry-only",
+            "label": reg.get("label") or "",
+            "sticker_count": len(reg_stickers),
+            "superseded_by": reg.get("superseded_by") or "",
+            "previous_pack_id": reg.get("previous_pack_id") or "",
+            "stickers": reg_stickers,
+        })
+
     return _ok_text(json.dumps(summary, ensure_ascii=False, indent=2))
 
 
@@ -384,6 +455,7 @@ async def signal_preview_sticker(
 async def signal_install_sticker_pack(
     pack_id: str,
     pack_key: str,
+    label: Optional[str] = None,
 ) -> ToolResponse:
     """Install a sticker pack someone shared with this account.
 
@@ -399,6 +471,11 @@ async def signal_install_sticker_pack(
         pack_key (`str`):
             Hex pack key — required (without it the signal.art
             link can't decrypt the pack manifest).
+        label (`str`, optional):
+            Short agent-chosen name (e.g. ``"crabs-shared"``) that
+            gets recorded in the registry.  Useful so the agent can
+            later find this pack by meaningful name instead of the
+            32-char hex id.
 
     Returns:
         `ToolResponse`:
@@ -421,6 +498,25 @@ async def signal_install_sticker_pack(
             "Common causes: wrong pack_key, pack was deleted, or "
             "signal-cli version mismatch.",
         )
+
+    from ...app.channels.signal.sticker_pack_registry import upsert_pack
+    try:
+        await upsert_pack(channel._media_dir, {
+            "pack_id": pack_id,
+            "pack_key": pack_key,
+            "source": "installed",
+            "label": (label or "").strip() or None,
+            "install_url": (
+                f"https://signal.art/addstickers/"
+                f"#pack_id={pack_id}&pack_key={pack_key}"
+            ),
+        })
+    except Exception as e:
+        # Install succeeded upstream — registry persistence failing
+        # is a soft error.  Log + surface so the agent knows but
+        # doesn't treat the pack as un-installed.
+        logger.warning("sticker-pack-registry upsert failed: %s", e)
+
     return _ok_text(
         f"Installed sticker pack {pack_id[:12]}... "
         "(visible in signal_list_sticker_packs now)."
@@ -431,6 +527,7 @@ async def signal_create_sticker_pack(
     title: str,
     author: str,
     stickers: list[dict],
+    label: Optional[str] = None,
 ) -> ToolResponse:
     """Create and upload a new sticker pack from local webp files.
 
@@ -520,9 +617,17 @@ async def signal_create_sticker_pack(
         manifest = {
             "title": title,
             "author": author,
-            "cover": {"id": 0, "emoji": resolved[0][1]},
+            # Signal-cli 0.14+ manifest format requires file/contentType.
+            # Do NOT duplicate the first sticker as cover — Signal CDN
+            # upload can reject some packs with ``Unable to parse entity``
+            # when cover and sticker point to the same file.  Omitting
+            # cover lets signal-cli use the first sticker automatically.
             "stickers": [
-                {"id": i, "emoji": emoji}
+                {
+                    "file": f"{i}.webp",
+                    "contentType": "image/webp",
+                    "emoji": emoji,
+                }
                 for i, (_, emoji) in enumerate(resolved)
             ],
         }
@@ -559,6 +664,7 @@ async def signal_create_sticker_pack(
         "install_url": url,
         "title": title,
         "author": author,
+        "label": (label or "").strip() or None,
         "staged_at": str(staging_dir),
         "stickers": [
             {
@@ -570,6 +676,15 @@ async def signal_create_sticker_pack(
             for i, (src, emoji) in enumerate(resolved)
         ],
     }
+    from ...app.channels.signal.sticker_pack_registry import upsert_pack
+    try:
+        await upsert_pack(channel._media_dir, {
+            **payload,
+            "source": "uploaded",
+        })
+    except Exception as e:
+        logger.warning("sticker-pack-registry upsert failed: %s", e)
+
     preamble = (
         f"Uploaded sticker pack '{title}' by '{author}' "
         f"({len(resolved)} stickers).\n"
@@ -582,6 +697,7 @@ async def signal_create_sticker_pack(
 async def signal_add_stickers_to_pack(
     base_pack_id: str,
     new_stickers: list[dict],
+    label: Optional[str] = None,
 ) -> ToolResponse:
     """Grow an existing pack by appending new stickers.
 
@@ -765,6 +881,22 @@ async def signal_add_stickers_to_pack(
             f"pack_id/pack_key fragment: {url}"
         )
     pack_id, pack_key = parsed
+
+    # Label precedence for the grown pack: explicit arg wins; else
+    # inherit the base pack's label from the registry so "crabs" →
+    # "crabs" across generations.  No registry entry for base =
+    # no inherited label.
+    from ...app.channels.signal.sticker_pack_registry import (
+        get_pack,
+        mark_superseded,
+        upsert_pack,
+    )
+    resolved_label = (label or "").strip() or None
+    if resolved_label is None:
+        base_entry = await get_pack(channel._media_dir, base_pack_id)
+        if base_entry and base_entry.get("label"):
+            resolved_label = base_entry["label"]
+
     payload = {
         "pack_id": pack_id,
         "pack_key": pack_key,
@@ -772,6 +904,7 @@ async def signal_add_stickers_to_pack(
         "install_url": url,
         "title": manifest["title"],
         "author": manifest["author"],
+        "label": resolved_label,
         "staged_at": str(staging_dir),
         "stickers": [
             {
@@ -783,6 +916,22 @@ async def signal_add_stickers_to_pack(
             for i, entry in enumerate(combined)
         ],
     }
+
+    try:
+        await upsert_pack(channel._media_dir, {
+            **payload,
+            "source": "uploaded",
+        })
+        # Mark the base as superseded so future ``signal_list_sticker_packs``
+        # output flags it for the agent.  No-op if the base was never
+        # in the registry (e.g. installed outside CoPaw before this
+        # feature shipped).
+        await mark_superseded(
+            channel._media_dir, base_pack_id, pack_id,
+        )
+    except Exception as e:
+        logger.warning("sticker-pack-registry upsert failed: %s", e)
+
     preamble = (
         f"Uploaded new pack superseding {base_pack_id[:12]}... with "
         f"{len(combined)} stickers ({len(existing)} existing + "

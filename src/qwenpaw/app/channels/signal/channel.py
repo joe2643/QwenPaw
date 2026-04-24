@@ -427,7 +427,7 @@ class SignalChannel(BaseChannel):
                     "signal: attachments found: %s",
                     json.dumps(attachments_raw)[:500],
                 )
-            if not body and not attachments_raw:
+            if not body and not attachments_raw and not data_message.get("sticker"):
                 return
 
             downloaded_media: List[Dict[str, str]] = []
@@ -439,6 +439,26 @@ class SignalChannel(BaseChannel):
                 local = await self.client.download_attachment(att_id, self._media_dir)
                 if local:
                     downloaded_media.append({"path": str(local), "type": ct})
+
+            # Sticker: dataMessage.sticker is Signal's in-band sticker
+            # reference ({packId, packKey, stickerId, emoji}) rather
+            # than a plain attachment.  Fetch the webp via
+            # ``getSticker`` (which auto-installs the pack when we
+            # have the pack key), feed it in as image/webp, and
+            # remember the emoji so downstream can include it in the
+            # "[sticker]" hint.  Marking ``is_sticker=True`` lets the
+            # content-parts builder emit the hint block without
+            # disturbing plain-image attachments.
+            sticker_info = data_message.get("sticker") or {}
+            if sticker_info:
+                sticker_path = await self._download_sticker(sticker_info)
+                if sticker_path:
+                    downloaded_media.append({
+                        "path": str(sticker_path),
+                        "type": "image/webp",
+                        "is_sticker": "1",
+                        "emoji": str(sticker_info.get("emoji") or ""),
+                    })
 
             # ── Access control ────────────────────────────────────
             if group_id:
@@ -539,6 +559,20 @@ class SignalChannel(BaseChannel):
                     except Exception:
                         pass
                 media_url = await resolve_media_url(str(p))
+                if m.get("is_sticker"):
+                    emoji = m.get("emoji") or ""
+                    hint = (
+                        f"[Signal sticker {emoji} at {p}]"
+                        if emoji
+                        else f"[Signal sticker at {p}]"
+                    )
+                    content_parts.append(TextContent(
+                        type=ContentType.TEXT, text=hint,
+                    ))
+                    content_parts.append(ImageContent(
+                        type=ContentType.IMAGE, image_url=media_url,
+                    ))
+                    continue
                 if ct.startswith("image/"):
                     content_parts.append(ImageContent(
                         type=ContentType.IMAGE, image_url=media_url,
@@ -691,6 +725,45 @@ class SignalChannel(BaseChannel):
 
         except Exception:
             logger.exception("signal: error processing inbound notification")
+
+    async def _download_sticker(
+        self,
+        sticker: Dict[str, Any],
+    ) -> Optional[Path]:
+        """Resolve a ``dataMessage.sticker`` reference into a local webp.
+
+        signal-cli reports stickers as ``{packId, packKey, stickerId,
+        emoji, ...}`` without an in-band attachment blob — the bytes
+        live on Signal's sticker-pack CDN keyed by pack.  We delegate
+        to :meth:`SignalSubprocessClient.get_sticker` which handles
+        the install-then-fetch dance when the pack isn't locally
+        cached yet.
+        """
+        pack_id = str(sticker.get("packId") or "").strip()
+        try:
+            sticker_id = int(sticker.get("stickerId"))
+        except (TypeError, ValueError):
+            logger.warning(
+                "signal: sticker field has non-int stickerId: %r",
+                sticker.get("stickerId"),
+            )
+            return None
+        if not pack_id:
+            return None
+        pack_key = sticker.get("packKey")
+        try:
+            return await self.client.get_sticker(
+                pack_id,
+                sticker_id,
+                self._media_dir,
+                pack_key=pack_key if isinstance(pack_key, str) else None,
+            )
+        except Exception as e:
+            logger.warning(
+                "signal: sticker fetch failed pack=%s id=%s: %s",
+                pack_id[:12], sticker_id, e,
+            )
+            return None
 
     async def _handle_inbound_reaction(
         self,
@@ -965,30 +1038,68 @@ class SignalChannel(BaseChannel):
                         except Exception:
                             pass
                     att_media_url = await resolve_media_url(str(local))
+                    # Inline the absolute local path into the
+                    # ``Media:`` label so the agent can pass it to
+                    # tools (codex image i2i, view_video,
+                    # transcribe) — mirrors the WhatsApp channel's
+                    # reply-to formatting.  Without the path the
+                    # text block is dead weight; the agent would
+                    # have to scan the sibling parts and guess
+                    # which attachment is which.
+                    local_path_str = str(local)
                     if att_ct.startswith("image/"):
                         parts.append(ImageContent(
                             type=ContentType.IMAGE, image_url=att_media_url,
                         ))
-                        media_labels.append("image")
+                        media_labels.append(f"image: {local_path_str}")
                     elif att_ct.startswith("video/"):
                         parts.append(VideoContent(
                             type=ContentType.VIDEO, video_url=att_media_url,
                         ))
-                        media_labels.append("video")
+                        media_labels.append(f"video: {local_path_str}")
                     elif att_ct.startswith("audio/"):
                         parts.append(AudioContent(
                             type=ContentType.AUDIO, data=att_media_url,
                         ))
-                        media_labels.append("audio")
+                        media_labels.append(f"audio: {local_path_str}")
                     else:
+                        base = (
+                            f"file: {att_fname}" if att_fname else "file"
+                        )
                         parts.append(FileContent(
                             type=ContentType.FILE, file_url=att_media_url,
                         ))
-                        media_labels.append(
-                            f"file: {att_fname}" if att_fname else "file",
-                        )
+                        media_labels.append(f"{base} ({local_path_str})")
                     continue
             media_labels.append(att_fname or att_ct or "attachment")
+
+        # Signal stores stickers on quoted messages in a separate
+        # ``sticker`` field rather than the ``attachments`` array —
+        # handle it the same way the direct-inbound path does so
+        # the agent sees ``sticker: <path>`` in the reply-context
+        # label and gets the webp inlined for visual reference.
+        quote_sticker = quote.get("sticker") or {}
+        if quote_sticker:
+            sticker_path = await self._download_sticker(quote_sticker)
+            if sticker_path:
+                emoji = str(quote_sticker.get("emoji") or "").strip()
+                label = (
+                    f"sticker {emoji} ({sticker_path})"
+                    if emoji
+                    else f"sticker ({sticker_path})"
+                )
+                media_labels.append(label)
+                parts.append(ImageContent(
+                    type=ContentType.IMAGE,
+                    image_url=await resolve_media_url(str(sticker_path)),
+                ))
+            else:
+                emoji = str(quote_sticker.get("emoji") or "").strip()
+                media_labels.append(
+                    f"sticker {emoji} (fetch failed)"
+                    if emoji
+                    else "sticker (fetch failed)",
+                )
 
         if quote_text or media_labels:
             lines = [
