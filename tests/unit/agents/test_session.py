@@ -334,3 +334,455 @@ async def test_load_whitespace_only(sess, tmp_session_dir):
     mod = FakeModule()
     await sess.load_session_state("test:session", user_id="", memory=mod)
     assert mod.data is None
+
+
+# =========================================================================
+# Restart-behaviour invariants
+#
+# These tests pin down what actually survives a CoPaw restart and where
+# the gaps are.  Each test is named against a concrete user-visible
+# symptom so a regression here can be triaged without re-reading the
+# runner.
+# =========================================================================
+
+
+@pytest.mark.asyncio
+async def test_round_trip_preserves_session_state(sess, tmp_session_dir):
+    """Save-then-load must restore the exact same state dict — this
+    is the invariant "the whatsapp context file is readable after a
+    restart".  A break here means even a graceful restart would drop
+    memory.
+    """
+    mod = FakeModule()
+    mod.data = {
+        "content": [
+            [{"id": "a", "role": "user", "content": "hi"}, []],
+            [{"id": "b", "role": "assistant", "content": "hello"}, []],
+        ],
+        "_compressed_summary": "",
+    }
+    await sess.save_session_state(
+        "whatsapp:+85251159218", user_id="+85251159218", memory=mod,
+    )
+
+    # Fresh module — simulates a new process loading the file.
+    fresh = FakeModule()
+    await sess.load_session_state(
+        "whatsapp:+85251159218", user_id="+85251159218", memory=fresh,
+    )
+    assert fresh.data == mod.data
+
+
+@pytest.mark.asyncio
+async def test_dm_and_group_sessions_do_not_collide(sess, tmp_session_dir):
+    """Same user_id across DM vs group must write to different files.
+    A collision here causes the "one channel's restart nukes another"
+    bug mode the WAL fix earlier solved at the WAL layer — we want
+    the same guarantee at the session-state layer.
+    """
+    dm_mod = FakeModule()
+    dm_mod.data = {"content": [[{"role": "user", "content": "dm"}, []]],
+                   "_compressed_summary": ""}
+    group_mod = FakeModule()
+    group_mod.data = {"content": [[{"role": "user", "content": "group"}, []]],
+                      "_compressed_summary": ""}
+
+    await sess.save_session_state(
+        "whatsapp:+85251159218", user_id="+85251159218", memory=dm_mod,
+    )
+    await sess.save_session_state(
+        "whatsapp:group:120363421135228220@g.us",
+        user_id="group--120363421135228220@g.us",
+        memory=group_mod,
+    )
+
+    loaded_dm = FakeModule()
+    loaded_group = FakeModule()
+    await sess.load_session_state(
+        "whatsapp:+85251159218", user_id="+85251159218", memory=loaded_dm,
+    )
+    await sess.load_session_state(
+        "whatsapp:group:120363421135228220@g.us",
+        user_id="group--120363421135228220@g.us",
+        memory=loaded_group,
+    )
+    assert loaded_dm.data == dm_mod.data
+    assert loaded_group.data == group_mod.data
+    # Two distinct files must exist on disk — if one nuked the other
+    # the load would surface the wrong payload or a missing file.
+    files = sorted(os.listdir(tmp_session_dir))
+    assert len(files) == 2, f"expected 2 files, got {files}"
+
+
+@pytest.mark.asyncio
+async def test_overwrite_same_session_replaces_not_appends(
+    sess, tmp_session_dir,
+):
+    """Successive saves to the same session must fully replace the
+    prior content (not merge / not append a second JSON object).
+    If this breaks, reloading after a restart either picks the wrong
+    turn or trips the 'extra data' decoder path.
+    """
+    mod = FakeModule()
+    mod.data = {"content": [[{"role": "user", "content": "old"}, []]],
+                "_compressed_summary": ""}
+    await sess.save_session_state("s", user_id="u", memory=mod)
+
+    mod.data = {"content": [[{"role": "user", "content": "new"}, []]],
+                "_compressed_summary": "summary"}
+    await sess.save_session_state("s", user_id="u", memory=mod)
+
+    fresh = FakeModule()
+    await sess.load_session_state("s", user_id="u", memory=fresh)
+    assert fresh.data["content"][0][0]["content"] == "new"
+    assert fresh.data["_compressed_summary"] == "summary"
+
+
+class _FakeTaskTracker:
+    """Minimal stand-in for ``TaskTracker`` — just enough surface
+    for ``Runner.shutdown_handler`` to exercise its drain logic
+    without pulling in the real broker.
+    """
+
+    def __init__(self, active_keys: list[str] | None = None) -> None:
+        self._active = list(active_keys or [])
+        self.wait_all_done_calls: list[float] = []
+        self._drain_delay = 0.0
+
+    async def list_active_tasks(self) -> list[str]:
+        return list(self._active)
+
+    async def has_active_tasks(self) -> bool:
+        return bool(self._active)
+
+    async def wait_all_done(self, timeout: float) -> bool:
+        self.wait_all_done_calls.append(timeout)
+        # Simulate tasks completing after ``_drain_delay`` seconds
+        # (or never, if > timeout).
+        if self._drain_delay <= timeout:
+            await asyncio.sleep(0)  # yield once
+            self._active.clear()
+            return True
+        return False
+
+
+class _FakeRunner:
+    """Stand-in with just the ``_task_tracker`` attribute and the
+    real ``shutdown_handler`` method bound onto it."""
+
+    def __init__(self, agent_id: str, tracker) -> None:
+        self.agent_id = agent_id
+        self._task_tracker = tracker
+        # Bind the real method so we test production code.
+        from qwenpaw.app.runner.runner import AgentRunner
+        self.shutdown_handler = AgentRunner.shutdown_handler.__get__(self)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_handler_returns_true_when_no_active_tasks():
+    """Idle shutdown must be instant — no tasks in flight means
+    nothing to drain."""
+    runner = _FakeRunner("default", _FakeTaskTracker(active_keys=[]))
+    ok = await runner.shutdown_handler(timeout=5.0)
+    assert ok is True
+    assert runner._task_tracker.wait_all_done_calls == []
+
+
+@pytest.mark.asyncio
+async def test_shutdown_handler_waits_for_in_flight_tasks():
+    """With tasks in flight, ``wait_all_done`` must be called with
+    the requested timeout so their ``finally`` blocks (session save)
+    run before process exit."""
+    tracker = _FakeTaskTracker(active_keys=["chat-1", "chat-2"])
+    runner = _FakeRunner("default", tracker)
+    ok = await runner.shutdown_handler(timeout=7.5)
+    assert ok is True
+    assert tracker.wait_all_done_calls == [7.5]
+    assert await tracker.list_active_tasks() == []
+
+
+@pytest.mark.asyncio
+async def test_shutdown_handler_returns_false_on_timeout():
+    """If drain exceeds the timeout, the handler reports failure so
+    the caller can log which runner's state wasn't flushed."""
+    tracker = _FakeTaskTracker(active_keys=["chat-1"])
+    tracker._drain_delay = 999.0  # simulate never-finishing task
+    runner = _FakeRunner("default", tracker)
+    ok = await runner.shutdown_handler(timeout=0.1)
+    assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_shutdown_handler_noop_when_tracker_absent():
+    """A runner without a tracker (e.g. early-init state) must not
+    crash during shutdown — just report clean."""
+    from qwenpaw.app.runner.runner import AgentRunner
+    class _Bare:
+        agent_id = "x"
+        _task_tracker = None
+        shutdown_handler = AgentRunner.shutdown_handler
+    ok = await _Bare().shutdown_handler(timeout=1.0)
+    assert ok is True
+
+
+@pytest.mark.asyncio
+async def test_shutdown_all_runners_drains_each_workspace():
+    """``MultiAgentManager.shutdown_all_runners`` must iterate every
+    loaded workspace's runner in parallel and call its
+    ``shutdown_handler`` — this is the lifespan hook that replaces
+    the old empty shutdown_handler."""
+    from qwenpaw.app.multi_agent_manager import MultiAgentManager
+
+    calls: list[tuple[str, float]] = []
+
+    class _StubRunner:
+        def __init__(self, agent_id: str) -> None:
+            self.agent_id = agent_id
+
+        async def shutdown_handler(self, timeout: float = 30.0) -> bool:
+            calls.append((self.agent_id, timeout))
+            return True
+
+    class _StubWorkspace:
+        def __init__(self, agent_id: str) -> None:
+            self.agent_id = agent_id
+            self.runner = _StubRunner(agent_id)
+
+    mgr = MultiAgentManager()
+    mgr.agents = {
+        "default": _StubWorkspace("default"),
+        "FSkZzR": _StubWorkspace("FSkZzR"),
+    }
+
+    await mgr.shutdown_all_runners(timeout=12.0)
+    # Each workspace's runner must have been drained; order unimportant
+    # (parallel), only identity and timeout matter.
+    assert sorted(calls) == sorted([("default", 12.0), ("FSkZzR", 12.0)])
+
+
+@pytest.mark.asyncio
+async def test_shutdown_all_runners_survives_runner_exception():
+    """One broken runner must not block the others — its failure is
+    logged and the rest still drain.  Without this invariant a single
+    buggy agent could stall every restart."""
+    from qwenpaw.app.multi_agent_manager import MultiAgentManager
+
+    calls: list[str] = []
+
+    class _GoodRunner:
+        async def shutdown_handler(self, timeout: float = 30.0) -> bool:
+            calls.append("good")
+            return True
+
+    class _BadRunner:
+        async def shutdown_handler(self, timeout: float = 30.0) -> bool:
+            raise RuntimeError("upstream service unreachable")
+
+    class _Ws:
+        def __init__(self, runner) -> None:
+            self.runner = runner
+
+    mgr = MultiAgentManager()
+    mgr.agents = {
+        "good": _Ws(_GoodRunner()),
+        "bad": _Ws(_BadRunner()),
+    }
+    # Must not raise.
+    await mgr.shutdown_all_runners(timeout=1.0)
+    assert calls == ["good"]
+
+
+@pytest.mark.asyncio
+async def test_finally_block_saves_even_on_mid_stream_cancellation(
+    sess, tmp_session_dir,
+):
+    """Async-generator contract: ``finally`` in an async generator
+    runs when the consumer stops iterating (gc / aclose / cancel).
+    ``query_handler`` relies on this to persist session state after
+    a reply — if Python ever changed semantics (or if someone
+    restructures the handler and drops the finally), the restart
+    recovery silently regresses.  Lock it in.
+    """
+    mod = FakeModule()
+    mod.data = {"content": [], "_compressed_summary": ""}
+
+    saved = asyncio.Event()
+
+    async def fake_reply_generator():
+        try:
+            for i in range(10):
+                await asyncio.sleep(0)
+                yield f"chunk-{i}"
+        finally:
+            # Mimic the real runner's finally: update + save session.
+            mod.data["content"].append(
+                [{"role": "assistant", "content": "partial"}, []],
+            )
+            await sess.save_session_state(
+                "cancel-test", user_id="u", memory=mod,
+            )
+            saved.set()
+
+    gen = fake_reply_generator()
+    # Consume one chunk then close — simulates the downstream channel
+    # dropping the generator when the user hits /stop.
+    first = await gen.__anext__()
+    assert first == "chunk-0"
+    await gen.aclose()
+
+    assert saved.is_set(), "finally must run on aclose"
+    # And the save must have landed on disk.
+    fresh = FakeModule()
+    await sess.load_session_state("cancel-test", user_id="u", memory=fresh)
+    assert fresh.data["content"][0][0]["content"] == "partial"
+
+
+import asyncio  # noqa: E402 — late import keeps earlier tests hermetic
+
+
+# =========================================================================
+# Atomic write + .prev backup recovery
+# =========================================================================
+
+
+@pytest.mark.asyncio
+async def test_save_creates_prev_backup_after_first_overwrite(
+    sess, tmp_session_dir,
+):
+    """Every save after the first must leave a ``.prev`` sibling
+    with the previous content — that's the safety net the load-side
+    fallback relies on."""
+    mod = FakeModule()
+    mod.data = {"content": [[{"role": "user", "content": "turn-1"}, []]],
+                "_compressed_summary": ""}
+    await sess.save_session_state("s", user_id="u", memory=mod)
+
+    # First save — no backup yet.
+    path = os.path.join(tmp_session_dir, "u_s.json")
+    assert os.path.exists(path)
+    assert not os.path.exists(path + ".prev")
+
+    # Second save rotates the first one to .prev.
+    mod.data = {"content": [[{"role": "user", "content": "turn-2"}, []]],
+                "_compressed_summary": ""}
+    await sess.save_session_state("s", user_id="u", memory=mod)
+
+    assert os.path.exists(path)
+    assert os.path.exists(path + ".prev")
+    with open(path + ".prev") as fp:
+        prev = json.load(fp)
+    assert prev["memory"]["content"][0][0]["content"] == "turn-1"
+
+
+@pytest.mark.asyncio
+async def test_save_is_atomic_no_tmp_file_left_behind(
+    sess, tmp_session_dir,
+):
+    """After a successful save, ``<path>.tmp`` must not linger —
+    if it does, a later ``save`` could pick up a stale tmp file
+    mid-replace and race.  ``os.replace`` already renames atomically
+    so this is really an implementation smoke test."""
+    mod = FakeModule()
+    mod.data = {"content": [], "_compressed_summary": ""}
+    await sess.save_session_state("s", user_id="u", memory=mod)
+
+    path = os.path.join(tmp_session_dir, "u_s.json")
+    assert os.path.exists(path)
+    assert not os.path.exists(path + ".tmp")
+
+
+@pytest.mark.asyncio
+async def test_save_never_leaves_primary_missing_between_steps(
+    sess, tmp_session_dir,
+):
+    """Regression guard: on 2026-04-24 a SIGKILL hit between the
+    ``os.replace(primary → .prev)`` and the following write, leaving
+    the primary gone and ``.prev`` one revision behind.  The current
+    ordering (write tmp first, copy-to-prev, then replace) must
+    guarantee primary is referenced at every instant.
+
+    Simulates the crash by interposing on ``os.replace``: after any
+    call, the primary file path MUST exist on disk.
+    """
+    import os as _os
+    import unittest.mock as _mock
+
+    mod = FakeModule()
+    mod.data = {
+        "content": [[{"role": "user", "content": "turn-1"}, []]],
+        "_compressed_summary": "",
+    }
+    await sess.save_session_state("s", user_id="u", memory=mod)
+    path = os.path.join(tmp_session_dir, "u_s.json")
+    assert os.path.exists(path)
+
+    # Second save — wrap os.replace to verify primary never disappears.
+    mod.data = {
+        "content": [[{"role": "user", "content": "turn-2"}, []]],
+        "_compressed_summary": "",
+    }
+
+    original_replace = _os.replace
+    primary_missing_seen = False
+
+    def _checked_replace(src, dst):
+        nonlocal primary_missing_seen
+        original_replace(src, dst)
+        # After ANY replace call, primary must still be reachable.
+        if not _os.path.exists(path):
+            primary_missing_seen = True
+
+    with _mock.patch("os.replace", side_effect=_checked_replace):
+        await sess.save_session_state("s", user_id="u", memory=mod)
+
+    assert not primary_missing_seen, (
+        "primary disappeared at some point during save_session_state "
+        "— SIGKILL in that window = full context loss."
+    )
+
+
+@pytest.mark.asyncio
+async def test_load_recovers_from_prev_when_primary_missing(
+    sess, tmp_session_dir,
+):
+    """The real-world symptom: primary session file went missing
+    between a successful save and the next load (root cause still
+    unknown).  The ``.prev`` sibling must serve as a fallback so
+    the agent's memory doesn't blank out on restart."""
+    mod = FakeModule()
+    mod.data = {
+        "content": [[{"role": "user", "content": "important ctx"}, []]],
+        "_compressed_summary": "",
+    }
+    await sess.save_session_state("s", user_id="u", memory=mod)
+    # Second save to create a .prev.
+    mod.data = {
+        "content": [[{"role": "user", "content": "newer"}, []]],
+        "_compressed_summary": "",
+    }
+    await sess.save_session_state("s", user_id="u", memory=mod)
+
+    path = os.path.join(tmp_session_dir, "u_s.json")
+    # Simulate the mystery deleter — wipe the primary but leave .prev.
+    os.remove(path)
+    assert not os.path.exists(path)
+    assert os.path.exists(path + ".prev")
+
+    fresh = FakeModule()
+    await sess.load_session_state("s", user_id="u", memory=fresh)
+    # Got the OLDER content (from the .prev rotation) — that's the
+    # correct failure mode: up to one turn stale, but non-empty.
+    assert fresh.data is not None
+    assert fresh.data["content"][0][0]["content"] == "important ctx"
+
+
+@pytest.mark.asyncio
+async def test_load_skips_when_both_primary_and_prev_missing(
+    sess, tmp_session_dir,
+):
+    """No file + no backup → fall back to the historic "skip"
+    behaviour; don't crash, don't populate the module."""
+    mod = FakeModule()
+    await sess.load_session_state("no:such:session", user_id="u", memory=mod)
+    assert mod.data is None
+

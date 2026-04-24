@@ -115,18 +115,75 @@ class SafeJSONSession(SessionBase):
         user_id: str = "",
         **state_modules_mapping,
     ) -> None:
-        """Save state modules to a JSON file using async I/O."""
+        """Save state modules to a JSON file using atomic write +
+        rotating ``.prev`` backup.
+
+        **Why the ``.prev`` rotation exists.**  Between 10:00-13:00
+        on 2026-04-24 we observed multiple ``Session file ... does
+        not exist`` log entries on the DM session file between a
+        known-good ``Saved session state ... successfully`` and the
+        next inbound message's load.  No code path in CoPaw or the
+        systemd unit was found that deletes session files, but the
+        file was demonstrably gone on disk.  Rather than keep
+        searching for the deleter, this routine now (a) writes via
+        ``<path>.tmp`` + ``os.replace`` so a crash mid-write never
+        leaves an empty file, and (b) keeps the prior full version
+        at ``<path>.prev`` so the matching ``load_session_state``
+        can fall through to it when the primary vanishes — context
+        survives even when we don't yet know what's erasing it.
+        """
         state_dicts = {
             name: state_module.state_dict()
             for name, state_module in state_modules_mapping.items()
         }
         session_save_path = self._get_save_path(session_id, user_id=user_id)
+        prev_path = session_save_path + ".prev"
+        tmp_path = session_save_path + ".tmp"
+
+        # **Write-first, rotate-after ordering is load-bearing.**  The
+        # original ordering did ``os.replace(primary → .prev)`` THEN
+        # wrote the new file — a SIGKILL between those two steps (we
+        # saw one on 2026-04-24 when ``systemctl stop`` escalated
+        # after ``shutdown_all_runners`` took too long) left the
+        # primary gone, the ``.prev`` intact but behind, and a huge
+        # chunk of recent history (compaction-resistant but not
+        # flushed to ``.prev`` yet) wiped.  The safe sequence:
+        #
+        #   1. Write new state to ``<path>.tmp``  (primary untouched)
+        #   2. ``shutil.copy2(primary → .prev)``  (backup without
+        #      removing primary, so primary is NEVER unreferenced)
+        #   3. ``os.replace(.tmp → primary)``     (atomic swap;
+        #      primary becomes new state, no window where it's gone)
+        #
+        # Any crash during step 1 leaves primary intact; crash during
+        # step 2 leaves primary intact and ``.prev`` may be stale (no
+        # loss); crash during step 3 leaves either the old primary
+        # (if rename hasn't happened) or the new primary (if it
+        # has) — never a nothing-at-all window.
+
+        # Step 1: write new state to tmp
         with open(
-            session_save_path,
+            tmp_path,
             "w",
             encoding="utf-8",
         ) as f:
             f.write(json.dumps(state_dicts, ensure_ascii=False))
+
+        # Step 2: non-destructive copy of current primary to .prev
+        #         (only if primary already exists — first save skips)
+        if os.path.exists(session_save_path):
+            try:
+                import shutil
+                shutil.copy2(session_save_path, prev_path)
+            except Exception as e:
+                logger.warning(
+                    "save_session_state: failed to copy %s → .prev "
+                    "(backup will be stale on next load): %s",
+                    session_save_path, e,
+                )
+
+        # Step 3: atomic swap tmp → primary
+        os.replace(tmp_path, session_save_path)
 
         logger.info(
             "Saved session state to %s successfully.",
@@ -140,8 +197,40 @@ class SafeJSONSession(SessionBase):
         allow_not_exist: bool = True,
         **state_modules_mapping,
     ) -> None:
-        """Load state modules from a JSON file using async I/O."""
+        """Load state modules from a JSON file using async I/O.
+
+        Falls through to the ``.prev`` sibling written by
+        :meth:`save_session_state` when the primary is missing — the
+        symptom we're covering: a live session file that had been
+        saved successfully moments earlier is sometimes gone at load
+        time (root cause still under investigation, see the save
+        routine's docstring).  A stale ``.prev`` is much better than
+        an empty agent memory on restart.
+        """
         session_save_path = self._get_save_path(session_id, user_id=user_id)
+        prev_path = session_save_path + ".prev"
+
+        # Primary missing but backup present → recover, surface a
+        # loud warning so ops notice the deletion pattern and so
+        # tests / monitoring can assert the fallback actually fired.
+        if not os.path.exists(session_save_path) and os.path.exists(
+            prev_path,
+        ):
+            try:
+                import shutil
+                shutil.copy2(prev_path, session_save_path)
+                logger.warning(
+                    "Session file %s was missing; recovered from %s "
+                    "— some tail turns since the last rotation may "
+                    "be lost.",
+                    session_save_path, prev_path,
+                )
+            except Exception as e:
+                logger.error(
+                    "load_session_state: failed to recover from %s: %s",
+                    prev_path, e,
+                )
+
         if os.path.exists(session_save_path):
             async with aiofiles.open(
                 session_save_path,
