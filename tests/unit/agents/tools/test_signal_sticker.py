@@ -310,10 +310,14 @@ async def test_create_sticker_pack_stages_and_uploads(
     assert (staged / "1.webp").read_bytes() == s1.read_bytes()
     manifest = json.loads((staged / "manifest.json").read_text())
     assert manifest["title"] == "Title"
-    assert manifest["cover"] == {"id": 0, "emoji": "🦀"}
+    # signal-cli's uploadStickerPack requires per-entry ``file`` +
+    # ``contentType``.  The ``id`` shape Signal Desktop uses would
+    # fail upload with "Must set a 'file' field on each sticker".
+    # No explicit cover — signal-cli auto-uses the first sticker.
+    assert "cover" not in manifest
     assert manifest["stickers"] == [
-        {"id": 0, "emoji": "🦀"},
-        {"id": 1, "emoji": "🐚"},
+        {"file": "0.webp", "contentType": "image/webp", "emoji": "🦀"},
+        {"file": "1.webp", "contentType": "image/webp", "emoji": "🐚"},
     ]
     # upload_sticker_pack was called with the manifest path.
     call = fake_channel.client.upload_sticker_pack.await_args
@@ -634,7 +638,14 @@ async def test_add_stickers_to_pack_merges_existing_and_new(
     assert (staged / "2.webp").is_file()
     assert (staged / "manifest.json").is_file()
     manifest = json.loads((staged / "manifest.json").read_text())
-    assert manifest["cover"] == {"id": 0, "emoji": "🦀"}
+    # Same manifest contract as create: ``file``/``contentType``/
+    # ``emoji`` per entry, no explicit cover.
+    assert "cover" not in manifest
+    assert manifest["stickers"] == [
+        {"file": "0.webp", "contentType": "image/webp", "emoji": "🦀"},
+        {"file": "1.webp", "contentType": "image/webp", "emoji": "🐚"},
+        {"file": "2.webp", "contentType": "image/webp", "emoji": "🦀"},
+    ]
 
 
 async def test_add_stickers_to_pack_rejects_missing_base(

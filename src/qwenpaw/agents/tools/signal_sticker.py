@@ -851,12 +851,22 @@ async def signal_add_stickers_to_pack(
                 "source_path": str(src),
             })
 
+        # Same manifest shape as ``signal_create_sticker_pack`` —
+        # ``file``/``contentType``/``emoji`` per entry.  The ``id``
+        # shape the Signal Desktop app uses is NOT what signal-cli's
+        # ``uploadStickerPack`` expects (it rejects with
+        # ``Must set a 'file' field on each sticker``).  Cover is
+        # omitted so signal-cli uses the first sticker automatically,
+        # same tradeoff as create (see note there).
         manifest = {
             "title": str(base_pack.get("title") or "CoPaw sticker pack"),
             "author": str(base_pack.get("author") or ""),
-            "cover": {"id": 0, "emoji": combined[0]["emoji"]},
             "stickers": [
-                {"id": i, "emoji": entry["emoji"]}
+                {
+                    "file": f"{i}.webp",
+                    "contentType": "image/webp",
+                    "emoji": entry["emoji"],
+                }
                 for i, entry in enumerate(combined)
             ],
         }
