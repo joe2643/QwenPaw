@@ -52,6 +52,10 @@ export interface CodexOAuthStatus {
   expires_in_s: number | null;
   auth_mode: string | null;
   account_id: string | null;
+  email: string | null;
+  plan_type: string | null;
+  org_title: string | null;
+  subscription_active_until: string | null;
   error: string | null;
 }
 

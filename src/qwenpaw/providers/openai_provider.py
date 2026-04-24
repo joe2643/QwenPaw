@@ -70,6 +70,33 @@ class OpenAIProvider(Provider):
             timeout=timeout,
         )
 
+    def _probe_client(self, model_id: str, timeout: float) -> AsyncOpenAI:
+        """Return a chat client that actually reaches this model for probing.
+
+        Codex-OAuth mode can't use the plain ``AsyncOpenAI`` probe
+        client — the sentinel ``api_key="oauth"`` would 401 on the
+        wrong URL (SDK defaults to ``/v1/chat/completions`` on the
+        ChatGPT-backend host, and there's no real bearer).  Route
+        through :class:`CodexOAuthChatModel` so probe traffic gets
+        OAuth refresh + chat→Responses translation, same path as
+        production calls.  Every other provider keeps the direct
+        ``AsyncOpenAI`` client.
+        """
+        if self._is_codex_oauth:
+            from .codex_oauth_model import CodexOAuthChatModel
+
+            model = CodexOAuthChatModel(
+                auth=self._get_codex_oauth(),
+                model_name=model_id,
+                stream=False,
+                api_key=None,
+                stream_tool_parsing=False,
+                client_kwargs={},
+                generate_kwargs={},
+            )
+            return model.client
+        return self._client(timeout=timeout)
+
     @staticmethod
     def _normalize_models_payload(payload: Any) -> List[ModelInfo]:
         models: List[ModelInfo] = []
@@ -122,10 +149,50 @@ class OpenAIProvider(Provider):
     async def fetch_models(self, timeout: float = 5) -> List[ModelInfo]:
         """Fetch available models."""
         if self._is_codex_oauth:
-            # Codex OAuth's allowed model set is a short hardcoded list
-            # — the ChatGPT backend rejects everything else server-side.
-            # Returning [] tells the UI "use configured models only".
-            return []
+            # The ChatGPT backend's ``/codex/models`` endpoint returns
+            # the exact catalogue this account can reach — the same
+            # source of truth the Codex CLI uses to populate its
+            # ``/model`` picker.  Beats any hardcoded list: when a new
+            # slug ships (or an old one loses access) the UI picks it
+            # up on the next Discover click without a CoPaw release.
+            try:
+                auth = self._get_codex_oauth()
+                raw = await auth.list_models(timeout=timeout)
+            except Exception:
+                # Discovery failures are non-fatal — the UI keeps any
+                # models the user previously saved via extra_models.
+                return []
+            infos: List[ModelInfo] = []
+            for entry in raw:
+                if not isinstance(entry, dict):
+                    continue
+                # ``visibility`` = "hide" is the backend's way of
+                # saying "internal model, don't surface in pickers"
+                # (e.g. gpt-oss-*).  Skip those — keep only the ones
+                # the Codex CLI would offer in its own menu.
+                if entry.get("visibility") != "list":
+                    continue
+                slug = entry.get("slug")
+                if not isinstance(slug, str) or not slug:
+                    continue
+                infos.append(
+                    ModelInfo(
+                        id=slug,
+                        name=(
+                            entry.get("display_name")
+                            if isinstance(entry.get("display_name"), str)
+                            and entry["display_name"]
+                            else slug
+                        ),
+                        # /codex/models doesn't report multimodal
+                        # capability — defer to the later probe.
+                        supports_multimodal=None,
+                        supports_image=None,
+                        supports_video=None,
+                        probe_source="codex-oauth-catalog",
+                    ),
+                )
+            return infos
         try:
             client = self._client(timeout=timeout)
             payload = await client.models.list(timeout=timeout)
@@ -347,7 +414,7 @@ class OpenAIProvider(Provider):
             self.base_url,
         )
         start_time = time.monotonic()
-        client = self._client(timeout=timeout)
+        client = self._probe_client(model_id, timeout=timeout)
         try:
             res = await client.chat.completions.create(
                 model=model_id,
@@ -468,7 +535,7 @@ class OpenAIProvider(Provider):
 
         is_http = video_url == _PROBE_VIDEO_URL
         req_timeout = timeout * 3 if is_http else timeout
-        client = self._client(timeout=req_timeout)
+        client = self._probe_client(model_id, timeout=req_timeout)
         try:
             res = await client.chat.completions.create(
                 model=model_id,

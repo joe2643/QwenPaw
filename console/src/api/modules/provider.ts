@@ -179,4 +179,9 @@ export const providerApi = {
 
   getCodexOAuthStatus: () =>
     request<CodexOAuthStatus>("/models/codex-oauth/login-status"),
+
+  reloadCodexOAuth: () =>
+    request<CodexOAuthStatus>("/models/codex-oauth/reload", {
+      method: "POST",
+    }),
 };

@@ -206,8 +206,33 @@ class CodexOAuthStatus(BaseModel):
     auth_mode: Optional[str] = Field(None, description="'chatgpt' for "
                                      "Plus/Pro OAuth, 'apikey' otherwise")
     account_id: Optional[str] = Field(None)
+    email: Optional[str] = Field(None, description="Signed-in email "
+                                 "from id_token claims")
+    plan_type: Optional[str] = Field(None, description="ChatGPT plan "
+                                     "(pro/plus/team/business/enterprise)")
+    org_title: Optional[str] = Field(None, description="Default org "
+                                     "title from id_token claims")
+    subscription_active_until: Optional[str] = Field(None)
     error: Optional[str] = Field(None, description="Reason credentials "
                                  "could not be loaded, if any")
+
+
+def _codex_status_from_creds(creds) -> "CodexOAuthStatus":
+    """Build a populated ``CodexOAuthStatus`` from a loaded CodexCredential.
+    Lives beside the endpoint so both the status and reload handlers
+    agree on which fields to surface."""
+    info = creds.account_info
+    return CodexOAuthStatus(
+        logged_in=True,
+        credentials_path=str(creds.auth_path),
+        expires_in_s=creds.seconds_until_expiry,
+        auth_mode=creds.auth_mode,
+        account_id=creds.account_id,
+        email=info.email,
+        plan_type=info.plan_type,
+        org_title=info.org_title,
+        subscription_active_until=info.subscription_active_until,
+    )
 
 
 @router.get(
@@ -228,13 +253,43 @@ async def codex_oauth_login_status() -> CodexOAuthStatus:
         auth = CodexAuth()
         creds = auth._creds  # populated synchronously by __init__
         assert creds is not None
+        return _codex_status_from_creds(creds)
+    except FileNotFoundError as e:
         return CodexOAuthStatus(
-            logged_in=True,
-            credentials_path=str(creds.auth_path),
-            expires_in_s=creds.seconds_until_expiry,
-            auth_mode=creds.auth_mode,
-            account_id=creds.account_id,
+            logged_in=False,
+            credentials_path=str(path),
+            error=str(e),
         )
+    except Exception as e:
+        return CodexOAuthStatus(
+            logged_in=False,
+            credentials_path=str(path),
+            error=f"{type(e).__name__}: {e}",
+        )
+
+
+@router.post(
+    "/codex-oauth/reload",
+    response_model=CodexOAuthStatus,
+    summary="Force-reload Codex auth from disk",
+)
+async def codex_oauth_reload(
+    provider_manager: ProviderManager = Depends(get_provider_manager),
+) -> CodexOAuthStatus:
+    """Explicit disk re-read for the UI's ``Reload`` button.  The
+    long-lived ``CodexAuth`` instance used by the running agent already
+    auto-picks-up external writes via mtime check in ``ensure_fresh``,
+    so this endpoint is primarily for confirmation: it rereads the file
+    immediately and returns the freshly-decoded account info (plan,
+    email, expiry) so the user can verify a new ``codex login`` took
+    effect without sending a real chat turn.
+    """
+    from ...providers.codex_auth import CodexAuth, _resolve_auth_path
+
+    path = _resolve_auth_path()
+    try:
+        creds = CodexAuth().reload()
+        return _codex_status_from_creds(creds)
     except FileNotFoundError as e:
         return CodexOAuthStatus(
             logged_in=False,

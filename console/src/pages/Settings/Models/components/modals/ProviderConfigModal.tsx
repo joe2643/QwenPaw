@@ -8,6 +8,7 @@ import {
   Button,
   Select,
 } from "@agentscope-ai/design";
+import { theme } from "antd";
 import {
   EFFORT_LEVELS,
   THINKING_DISPLAYS,
@@ -15,6 +16,15 @@ import {
   toGenerateKwargs,
   type ReasoningFormValue,
 } from "./reasoningConfig";
+import {
+  CODEX_EFFORT_LEVELS,
+  CODEX_SPEED_LEVELS,
+  fromGenerateKwargs as codexFromGenerateKwargs,
+  toGenerateKwargs as codexToGenerateKwargs,
+  type CodexEffortLevel,
+  type CodexSpeedLevel,
+  type CodexReasoningFormValue,
+} from "./codexReasoningConfig";
 import { useAppMessage } from "../../../../../hooks/useAppMessage";
 import {
   ApiOutlined,
@@ -287,9 +297,14 @@ interface OAuthLoginStatusPanelProps {
   loginCommand: string;
   /** Optional status badges shown next to "Logged in" — used to
    *  surface provider-specific fields (Claude: subscription plan,
-   *  Codex: auth_mode). */
+   *  Codex: plan / email / mode). */
   extraBadges?: { label: string; value: string }[];
   onRefresh: () => void;
+  /** Optional disk-reread action — shown as a second button beside
+   *  Refresh.  Only Codex needs this (the long-lived in-agent
+   *  ``CodexAuth`` caches creds across requests).  Claude Code's
+   *  status is recomputed from disk on every render. */
+  onReload?: () => void;
   onCopyLogin: () => void;
 }
 
@@ -299,9 +314,15 @@ function OAuthLoginStatusPanel({
   loginCommand,
   extraBadges,
   onRefresh,
+  onReload,
   onCopyLogin,
 }: OAuthLoginStatusPanelProps) {
   const loggedIn = status?.logged_in === true;
+  // Resolve theme-aware colors at render time.  We can't rely on
+  // ``var(--ant-color-fill-quaternary, ...)`` because this app runs AntD
+  // without ``cssVar: true``, so those variables never get emitted and
+  // the hardcoded light fallback wins in dark mode.
+  const { token } = theme.useToken();
   return (
     <div
       style={{
@@ -309,9 +330,9 @@ function OAuthLoginStatusPanel({
         flexDirection: "column",
         gap: 8,
         padding: "10px 12px",
-        border: "1px solid var(--ant-color-border, #d9d9d9)",
+        border: `1px solid ${token.colorBorder}`,
         borderRadius: 6,
-        background: "var(--ant-color-fill-quaternary, #fafafa)",
+        background: token.colorFillQuaternary,
       }}
     >
       <div
@@ -339,15 +360,26 @@ function OAuthLoginStatusPanel({
             · expires in {formatExpiresIn(status?.expires_in_s)}
           </span>
         )}
-        <Button
-          size="small"
-          icon={<ReloadOutlined />}
-          loading={loading}
-          onClick={onRefresh}
-          style={{ marginLeft: "auto" }}
-        >
-          Refresh
-        </Button>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          {onReload && (
+            <Button
+              size="small"
+              loading={loading}
+              onClick={onReload}
+              title="Re-read auth.json from disk (pick up a fresh codex login)"
+            >
+              Reload
+            </Button>
+          )}
+          <Button
+            size="small"
+            icon={<ReloadOutlined />}
+            loading={loading}
+            onClick={onRefresh}
+          >
+            Refresh
+          </Button>
+        </div>
       </div>
       {status?.error && (
         <div style={{ color: "#ff4d4f", fontSize: 12 }}>{status.error}</div>
@@ -366,7 +398,7 @@ function OAuthLoginStatusPanel({
           <code
             style={{
               padding: "2px 6px",
-              background: "var(--ant-color-fill-tertiary, #f0f0f0)",
+              background: token.colorFillTertiary,
               borderRadius: 4,
             }}
           >
@@ -403,14 +435,15 @@ function ReasoningSection({
 }: ReasoningSectionProps) {
   const { thinking_mode, thinking_display, effort, max_tokens } = value;
   const adaptiveOn = thinking_mode === "adaptive";
+  const { token } = theme.useToken();
   return (
     <div
       style={{
-        border: "1px solid var(--ant-color-border, #d9d9d9)",
+        border: `1px solid ${token.colorBorder}`,
         borderRadius: 6,
         padding: "12px 14px",
         marginBottom: 14,
-        background: "var(--ant-color-fill-quaternary, #fafafa)",
+        background: token.colorFillQuaternary,
       }}
     >
       <div style={{ fontWeight: 600, marginBottom: 8 }}>
@@ -524,6 +557,66 @@ function ReasoningSection({
   );
 }
 
+interface CodexReasoningSectionProps {
+  value: CodexReasoningFormValue;
+  onChange: (patch: Partial<CodexReasoningFormValue>) => void;
+}
+
+function CodexReasoningSection({
+  value,
+  onChange,
+}: CodexReasoningSectionProps) {
+  const { effort, speed } = value;
+  const { token } = theme.useToken();
+  return (
+    <div
+      style={{
+        border: `1px solid ${token.colorBorder}`,
+        borderRadius: 6,
+        padding: "12px 14px",
+        marginBottom: 14,
+        background: token.colorFillQuaternary,
+      }}
+    >
+      <div style={{ fontWeight: 600, marginBottom: 8 }}>Codex routing</div>
+      <Form.Item
+        label="Effort"
+        style={{ marginBottom: 12 }}
+        extra="ChatGPT backend budget: none=no thinking, xhigh=deepest. Default = low."
+      >
+        <Select
+          value={effort}
+          placeholder="(backend default = low)"
+          allowClear
+          onChange={(v) =>
+            onChange({
+              effort: (v ?? undefined) as CodexEffortLevel | undefined,
+            })
+          }
+          options={CODEX_EFFORT_LEVELS.map((e) => ({ label: e, value: e }))}
+        />
+      </Form.Item>
+      <Form.Item
+        label="Speed"
+        style={{ marginBottom: 0 }}
+        extra="Fast uses priority routing (~15-25% faster throughput, ~2x credit cost on Pro plan). Standard = default routing."
+      >
+        <Select
+          value={speed}
+          placeholder="(standard)"
+          allowClear
+          onChange={(v) =>
+            onChange({
+              speed: (v ?? undefined) as CodexSpeedLevel | undefined,
+            })
+          }
+          options={CODEX_SPEED_LEVELS.map((s) => ({ label: s, value: s }))}
+        />
+      </Form.Item>
+    </div>
+  );
+}
+
 interface ProviderConfigModalProps {
   provider: {
     id: string;
@@ -609,9 +702,32 @@ export function ProviderConfigModal({
           expires_in_s: null,
           auth_mode: null,
           account_id: null,
+          email: null,
+          plan_type: null,
+          org_title: null,
+          subscription_active_until: null,
           error: errMsg,
         });
       }
+    } finally {
+      setOauthLoading(false);
+    }
+  };
+
+  const reloadCodexOAuth = async () => {
+    if (!isCodexOAuth) return;
+    setOauthLoading(true);
+    try {
+      const status = await api.reloadCodexOAuth();
+      setCodexOAuthStatus(status);
+      message.success(
+        status.logged_in
+          ? `Auth reloaded · ${status.plan_type ?? "unknown plan"}`
+          : "Reloaded — no valid credentials on disk",
+      );
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      message.error(`Reload failed: ${errMsg}`);
     } finally {
       setOauthLoading(false);
     }
@@ -659,6 +775,25 @@ export function ProviderConfigModal({
       next.thinking_display = undefined;
     }
     const merged = toGenerateKwargs(parsedGenerateKwargs, next);
+    const text =
+      Object.keys(merged).length > 0
+        ? JSON.stringify(merged, null, 2)
+        : undefined;
+    form.setFieldValue("generate_kwargs_text", text);
+    setFormDirty(true);
+  };
+
+  // Codex OAuth reasoning (parallel two-way bind for the
+  // ``reasoning_effort`` kwarg that ``codex_translate`` reads).
+  const codexReasoning: CodexReasoningFormValue = useMemo(
+    () => codexFromGenerateKwargs(parsedGenerateKwargs),
+    [parsedGenerateKwargs],
+  );
+  const applyCodexReasoningPatch = (
+    patch: Partial<CodexReasoningFormValue>,
+  ) => {
+    const next: CodexReasoningFormValue = { ...codexReasoning, ...patch };
+    const merged = codexToGenerateKwargs(parsedGenerateKwargs, next);
     const text =
       Object.keys(merged).length > 0
         ? JSON.stringify(merged, null, 2)
@@ -1047,12 +1182,35 @@ export function ProviderConfigModal({
                 status={codexOAuthStatus}
                 loading={oauthLoading}
                 loginCommand="codex login"
-                extraBadges={
-                  codexOAuthStatus?.auth_mode
-                    ? [{ label: "mode", value: codexOAuthStatus.auth_mode }]
-                    : []
-                }
+                extraBadges={(() => {
+                  const badges: { label: string; value: string }[] = [];
+                  if (codexOAuthStatus?.plan_type) {
+                    badges.push({
+                      label: "plan",
+                      value: codexOAuthStatus.plan_type,
+                    });
+                  }
+                  if (codexOAuthStatus?.email) {
+                    badges.push({
+                      label: "email",
+                      value: codexOAuthStatus.email,
+                    });
+                  }
+                  if (
+                    codexOAuthStatus?.auth_mode &&
+                    codexOAuthStatus.auth_mode !== "chatgpt"
+                  ) {
+                    // Only surface mode when it's noteworthy (apikey);
+                    // the common "chatgpt" case is implied by plan/email.
+                    badges.push({
+                      label: "mode",
+                      value: codexOAuthStatus.auth_mode,
+                    });
+                  }
+                  return badges;
+                })()}
                 onRefresh={refreshOAuthStatus}
+                onReload={reloadCodexOAuth}
                 onCopyLogin={() => {
                   void navigator.clipboard.writeText("codex login");
                   message.success("Copied");
@@ -1115,6 +1273,13 @@ export function ProviderConfigModal({
               // happens server-side.  We surface them so users know
               // the provider-level default won't take effect on Haiku.
               haikuInList={provider.id === "claude-oauth"}
+            />
+          )}
+
+          {isCodexOAuth && advancedOpen && (
+            <CodexReasoningSection
+              value={codexReasoning}
+              onChange={applyCodexReasoningPatch}
             />
           )}
 

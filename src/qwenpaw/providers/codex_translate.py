@@ -10,37 +10,38 @@ field names (``input`` vs ``messages``), different tool-call shapes
 ``assistant.tool_calls`` / ``role=tool`` messages), different
 streaming events (``response.output_text.delta`` vs
 ``choice.delta.content``).  This module is the single place that
-knows how to map between the two, consumed by:
-
-* :mod:`qwenpaw.providers.codex_oauth_proxy` — a local FastAPI
-  server that presents an OpenAI-compat chat/completions endpoint
-  backed by the user's ChatGPT subscription.
-* :mod:`qwenpaw.providers.codex_oauth_model` — an agentscope
-  ``OpenAIChatModel`` subclass that does the same translation
-  in-process, so CoPaw agents can use ChatGPT OAuth without
-  running a separate daemon.
-
-Both consumers share the Responses-body builder, the SSE event
-parser, and the per-request ``StreamState``; only the final
-wrapping (HTTP SSE lines vs SDK ``ChatCompletionChunk`` objects)
-differs.
+knows how to map between the two, consumed by
+:mod:`qwenpaw.providers.codex_oauth_model` — an agentscope
+``OpenAIChatModel`` subclass that does the translation in-process,
+so CoPaw agents can use ChatGPT OAuth without a separate daemon.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 from typing import Any, AsyncIterator
 
 import httpx
 
+logger = logging.getLogger(__name__)
+
 # Models the ChatGPT backend actually serves under Codex OAuth.  Any
 # caller-supplied model ID outside this set is silently forced to the
 # default (upstream 400s otherwise — ``o3``, ``gpt-5-codex``, etc. are
 # rejected server-side for ChatGPT-account OAuth tokens).
-ALLOWED_MODELS = {"gpt-5.4", "gpt-5.2"}
-DEFAULT_MODEL = "gpt-5.4"
+# ``DEFAULT_MODEL`` is used only when the caller omits ``model``
+# entirely (empty/missing) — a programmer-error fallback.  Picked
+# ``gpt-5.2`` because it's the one slug the ChatGPT backend
+# currently advertises via ``/codex/models`` with ``visibility=list``
+# for consumer accounts; other slugs (gpt-5.4, gpt-5.4-mini) also
+# work today but aren't in the published catalogue and may be
+# revoked without notice.  No allow-list — we forward whatever the
+# caller / UI / discovery says, and the backend's 400 is the source
+# of truth for what this account can reach.
+DEFAULT_MODEL = "gpt-5.2"
 
 
 # =========================================================================
@@ -207,9 +208,18 @@ def build_responses_body(chat_body: dict) -> dict:
     fields the ChatGPT-account backend rejects silently (``max_output_tokens``,
     most sampling knobs) — forwarding them blindly yields 400.
     """
-    model = chat_body.get("model", DEFAULT_MODEL)
-    if model not in ALLOWED_MODELS:
-        model = DEFAULT_MODEL
+    # Pass whatever the caller asked for straight through to the
+    # upstream — the ChatGPT backend is the source of truth for
+    # which slugs its account tier can reach.  Silent coercion
+    # (``model not in ALLOWED_MODELS → DEFAULT_MODEL``) used to
+    # hide mis-configured agents: picking ``gpt-5.5`` in the UI
+    # would greenlight the test button while actually running
+    # ``gpt-5.4`` under the hood, because this branch rewrote the
+    # request behind the caller's back.  Now the backend 400
+    # propagates to the UI ("model not supported with a ChatGPT
+    # account"), which is the honest answer.  ``ALLOWED_MODELS``
+    # stays around as a probe-verified reference set.
+    model = chat_body.get("model") or DEFAULT_MODEL
     instructions, input_items = convert_messages_to_responses_input(
         chat_body.get("messages") or [],
     )
@@ -232,6 +242,33 @@ def build_responses_body(chat_body: dict) -> dict:
 
     reasoning_effort = chat_body.get("reasoning_effort") or "low"
     body["reasoning"] = {"effort": reasoning_effort}
+
+    # Speed tier — forwarded as ``service_tier`` to the Responses API.
+    # The caller passes a friendly value (``fast`` / ``standard`` /
+    # ``flex``) and we translate to the wire form the ChatGPT backend
+    # actually accepts: Codex CLI maps its ``Fast`` variant to the
+    # literal string ``"priority"`` (see codex-rs/core/src/client.rs).
+    # On a consumer ChatGPT account (Pro), backend reports
+    # ``service_tier: "default"`` on response.completed even when Fast
+    # was applied — reporting is misleading but the routing is real
+    # (measured ~15-25% throughput gain on gpt-5.4/5.5).
+    #
+    # ``standard`` resolves to no field at all, matching the Codex CLI
+    # default for non-enterprise plans.  Any non-``fast``/``flex``
+    # string is dropped with a warning rather than forwarded blindly,
+    # since the backend 400s on unknown values (``auto``, ``default``,
+    # ``fast``, ``standard`` all rejected on probe).
+    speed = chat_body.get("service_tier")
+    if speed == "fast":
+        body["service_tier"] = "priority"
+    elif speed == "flex":
+        body["service_tier"] = "flex"
+    elif speed and speed not in ("standard",):
+        logger.warning(
+            "Dropping unknown codex service_tier %r — accepted values "
+            "are fast / standard / flex",
+            speed,
+        )
 
     return body
 

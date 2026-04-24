@@ -720,22 +720,14 @@ PROVIDER_ANTHROPIC = AnthropicProvider(
 # official ``@openai/codex`` CLI.  The ``oauth`` sentinel tells
 # OpenAIProvider to route through ``CodexOAuthChatModel``, which
 # in-process translates chat/completions → Responses API.
-CODEX_OAUTH_MODELS: List[ModelInfo] = [
-    ModelInfo(
-        id="gpt-5.4",
-        name="GPT-5.4 (ChatGPT backend)",
-        supports_image=True,
-        supports_video=False,
-        probe_source="documentation",
-    ),
-    ModelInfo(
-        id="gpt-5.2",
-        name="GPT-5.2 (ChatGPT backend)",
-        supports_image=True,
-        supports_video=False,
-        probe_source="documentation",
-    ),
-]
+# No hardcoded catalogue.  The ChatGPT backend's ``/codex/models``
+# endpoint is the source of truth for what this account can reach —
+# the UI's Discover button + ``OpenAIProvider.fetch_models`` together
+# populate ``provider.models`` from that endpoint.  Any hardcoded
+# list would inevitably drift (new slugs shipping, old ones losing
+# account-tier access, e.g. ``gpt-5.5`` being gated off ChatGPT
+# subscriptions).
+CODEX_OAUTH_MODELS: List[ModelInfo] = []
 
 PROVIDER_CODEX_OAUTH = OpenAIProvider(
     id="codex-oauth",
@@ -750,6 +742,7 @@ PROVIDER_CODEX_OAUTH = OpenAIProvider(
     models=CODEX_OAUTH_MODELS,
     chat_model="OpenAIChatModel",
     freeze_url=True,
+    support_model_discovery=True,
     meta={
         "api_key_hint": (
             "No API key required — run `codex login` once to populate "

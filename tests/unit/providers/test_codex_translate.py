@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Unit tests for the OpenAI chat/completions ↔ Codex Responses API
-translation shared by ``codex_oauth_proxy`` and ``CodexOAuthChatModel``.
+translation used by ``CodexOAuthChatModel``.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from typing import AsyncIterator
 import pytest
 
 from qwenpaw.providers.codex_translate import (
-    ALLOWED_MODELS,
     DEFAULT_MODEL,
     StreamState,
     build_responses_body,
@@ -264,10 +263,26 @@ class TestBuildResponsesBody:
         body = build_responses_body({"model": "gpt-5.2", "messages": []})
         assert body["model"] == "gpt-5.2"
 
-    def test_unknown_model_forced_to_default(self):
-        body = build_responses_body({"model": "o3", "messages": []})
-        assert body["model"] == DEFAULT_MODEL
-        assert DEFAULT_MODEL in ALLOWED_MODELS
+    def test_unknown_model_passes_through_verbatim(self):
+        # Historically this coerced to DEFAULT_MODEL, which silently
+        # greenlit the UI's Test Connection button for unsupported
+        # slugs (e.g. ``gpt-5.5`` on a ChatGPT-account token).  The
+        # backend is now the source of truth — we forward what the
+        # caller asked and let its 400 ("not supported with a
+        # ChatGPT account") reach the user honestly.
+        body = build_responses_body({"model": "gpt-5.5", "messages": []})
+        assert body["model"] == "gpt-5.5"
+
+    def test_empty_model_defaults_to_default(self):
+        # Empty / missing model is still a programming error worth
+        # defaulting for — better than a 400 for an empty string.
+        for model in ("", None):
+            body = build_responses_body(
+                {"model": model, "messages": []}
+                if model is not None
+                else {"messages": []},
+            )
+            assert body["model"] == DEFAULT_MODEL
 
     def test_empty_instructions_filled_with_placeholder(self):
         # ChatGPT backend rejects empty ``instructions`` with 400.

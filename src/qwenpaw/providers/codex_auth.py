@@ -29,7 +29,7 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -48,28 +48,92 @@ DEFAULT_CHATGPT_BACKEND = "https://chatgpt.com/backend-api"
 # in-flight request never races the expiration edge.
 REFRESH_SAFETY_MARGIN_S = 5 * 60
 
+# ``version`` header + ``client_version`` query param advertised to
+# ChatGPT's Codex backend.  The backend gates which models this
+# token can reach on this value:
+#
+#   0.122.0: sees gpt-5.4 / 5.4-mini / 5.3-codex / 5.2
+#   0.200.0: above + gpt-5.5
+#
+# The Codex CLI source is the moving source of truth — bump when a
+# newer model is gated behind a newer client string.  Env override
+# lets ops flip this without a redeploy.  Too-fresh values never 400
+# (the backend only cares that it's >= the gate), so erring high is
+# safe.
+CODEX_CLIENT_VERSION: str = os.environ.get(
+    "QWENPAW_CODEX_CLIENT_VERSION", "0.200.0",
+)
 
-def _decode_jwt_exp_ms(jwt: str) -> int | None:
-    """Best-effort extract the ``exp`` claim (in ms) from a JWT.
 
-    Codex's access_token is a JWT signed by OpenAI; the ``exp`` claim
-    tells us when the server will stop accepting it.  Returns ``None``
-    when the token isn't a parseable JWT — caller falls back to an
-    mtime-based heuristic.
+def _decode_jwt_claims(jwt: str) -> dict | None:
+    """Best-effort base64url-decode the payload segment of a JWT and
+    return the claims dict.  Returns ``None`` when the token isn't a
+    parseable JWT.  Used for both the ``exp`` claim on the access_token
+    and the ChatGPT account-info claims on the id_token.
     """
     try:
         payload_b64 = jwt.split(".")[1]
-        # base64url, padded to a multiple of 4.
         payload_b64 += "=" * (-len(payload_b64) % 4)
-        payload = json.loads(
+        return json.loads(
             base64.urlsafe_b64decode(payload_b64.encode("ascii")),
         )
-        exp = payload.get("exp")
-        if isinstance(exp, (int, float)):
-            return int(exp * 1000)
     except Exception:
-        pass
+        return None
+
+
+def _decode_jwt_exp_ms(jwt: str) -> int | None:
+    """Best-effort extract the ``exp`` claim (in ms) from a JWT."""
+    claims = _decode_jwt_claims(jwt)
+    if claims is None:
+        return None
+    exp = claims.get("exp")
+    if isinstance(exp, (int, float)):
+        return int(exp * 1000)
     return None
+
+
+@dataclass
+class CodexAccountInfo:
+    """ChatGPT-account metadata extracted from the id_token claims.
+    All fields optional — tokens issued to API-key mode carry no
+    ChatGPT account info."""
+    email: str | None = None
+    plan_type: str | None = None  # "pro" / "plus" / "team" / "business" / "enterprise"
+    org_title: str | None = None
+    subscription_active_until: str | None = None  # ISO8601 from OpenAI
+
+
+def _extract_account_info(id_token: str | None) -> CodexAccountInfo:
+    """Pull ChatGPT account info out of the id_token claims.
+
+    OpenAI's id_token nests all ChatGPT-specific claims under the
+    ``https://api.openai.com/auth`` key, alongside top-level OIDC
+    claims like ``email``.  We surface just the human-facing subset
+    the UI shows (plan, email, org) and skip internal IDs.
+    """
+    if not id_token:
+        return CodexAccountInfo()
+    claims = _decode_jwt_claims(id_token)
+    if not claims:
+        return CodexAccountInfo()
+    openai_auth = claims.get("https://api.openai.com/auth") or {}
+    orgs = openai_auth.get("organizations") or []
+    default_org = next(
+        (o for o in orgs if isinstance(o, dict) and o.get("is_default")),
+        orgs[0] if orgs else None,
+    )
+    return CodexAccountInfo(
+        email=claims.get("email") if isinstance(claims.get("email"), str) else None,
+        plan_type=openai_auth.get("chatgpt_plan_type"),
+        org_title=(
+            default_org.get("title")
+            if isinstance(default_org, dict)
+            else None
+        ),
+        subscription_active_until=openai_auth.get(
+            "chatgpt_subscription_active_until",
+        ),
+    )
 
 
 def _resolve_auth_path() -> Path:
@@ -86,6 +150,7 @@ class CodexCredential:
     expires_at_ms: int  # wall-clock ms, from JWT exp or fallback
     auth_path: Path
     auth_mode: str = "chatgpt"
+    account_info: CodexAccountInfo = field(default_factory=CodexAccountInfo)
 
     @property
     def seconds_until_expiry(self) -> int:
@@ -109,6 +174,11 @@ class CodexAuth:
         self._auth_path = auth_path or _resolve_auth_path()
         self._lock = threading.Lock()
         self._creds: CodexCredential | None = None
+        # Track the file mtime we loaded from so ``ensure_fresh`` can
+        # detect external rewrites (a fresh ``codex login`` completing
+        # while CoPaw is running) and transparently pick up new tokens
+        # without a process restart.
+        self._loaded_mtime_ns: int = 0
         self._load()
 
     # ------------------------------------------------------------- #
@@ -121,6 +191,11 @@ class CodexAuth:
                 f"Codex auth file not found: {self._auth_path}. "
                 "Run `codex login` once to populate it.",
             )
+        # Read mtime BEFORE reading content so a concurrent write
+        # doesn't leave us with new content tagged as stale.  Using
+        # ``st_mtime_ns`` avoids float rounding issues at sub-second
+        # resolution.
+        stat = self._auth_path.stat()
         raw = json.loads(self._auth_path.read_text())
         tokens = raw.get("tokens") or {}
         access_token = tokens.get("access_token")
@@ -134,17 +209,20 @@ class CodexAuth:
         # JWT exp → ms; fall back to file mtime + 1h if unparseable.
         exp_ms = _decode_jwt_exp_ms(access_token)
         if exp_ms is None:
-            exp_ms = int(self._auth_path.stat().st_mtime * 1000) + 60 * 60 * 1000
+            exp_ms = int(stat.st_mtime * 1000) + 60 * 60 * 1000
 
+        id_token = tokens.get("id_token")
         self._creds = CodexCredential(
             access_token=access_token,
             refresh_token=refresh_token,
-            id_token=tokens.get("id_token"),
+            id_token=id_token,
             account_id=tokens.get("account_id"),
             expires_at_ms=exp_ms,
             auth_path=self._auth_path,
             auth_mode=str(raw.get("auth_mode") or "chatgpt"),
+            account_info=_extract_account_info(id_token),
         )
+        self._loaded_mtime_ns = stat.st_mtime_ns
 
     def _save(self, *, tokens: dict[str, Any]) -> None:
         """Write refreshed tokens back atomically, preserving other fields."""
@@ -158,6 +236,11 @@ class CodexAuth:
         tmp.write_text(json.dumps(raw, indent=2))
         os.chmod(tmp, 0o600)
         os.replace(tmp, self._auth_path)
+        # Advance our mtime marker so the freshly-rewritten file — which
+        # we just authored — is not treated as an external change by
+        # ``ensure_fresh``.  Without this, the very next call would
+        # redundantly ``_load`` the same bytes we just wrote.
+        self._loaded_mtime_ns = self._auth_path.stat().st_mtime_ns
 
     # ------------------------------------------------------------- #
     # Refresh                                                        #
@@ -223,9 +306,33 @@ class CodexAuth:
     async def ensure_fresh(self) -> CodexCredential:
         if self._creds is None:
             self._load()
+        else:
+            # Pick up out-of-band rewrites (eg. a fresh ``codex login``
+            # on the host while CoPaw keeps running).  stat() failures
+            # fall through to the cached creds — the next refresh will
+            # surface any real problem.
+            try:
+                disk_mtime_ns = self._auth_path.stat().st_mtime_ns
+            except OSError:
+                disk_mtime_ns = self._loaded_mtime_ns
+            if disk_mtime_ns > self._loaded_mtime_ns:
+                logger.info(
+                    "[CodexAuth] auth.json changed on disk — reloading",
+                )
+                self._load()
         assert self._creds is not None
         if self._creds.needs_refresh:
             await self._refresh()
+        return self._creds
+
+    def reload(self) -> CodexCredential:
+        """Force-reread ``auth.json`` from disk, regardless of mtime.
+        Used by the console's explicit Reload action.  Synchronous —
+        a subsequent request will refresh the token lazily if needed.
+        """
+        with self._lock:
+            self._load()
+        assert self._creds is not None
         return self._creds
 
     async def auth_headers(self) -> dict[str, str]:
@@ -236,7 +343,7 @@ class CodexAuth:
             # Codex CLI also sends these:
             "OpenAI-Beta": "responses=experimental",
             "originator": "codex_cli_rs",
-            "version": "0.122.0",
+            "version": CODEX_CLIENT_VERSION,
         }
         if creds.account_id:
             h["chatgpt-account-id"] = creds.account_id
@@ -252,6 +359,40 @@ class CodexAuth:
             "QWENPAW_CODEX_BACKEND_URL",
             DEFAULT_CHATGPT_BACKEND,
         )
+
+    async def list_models(
+        self,
+        *,
+        client_version: str | None = None,
+        timeout: float = 10.0,
+    ) -> list[dict]:
+        """Query the ChatGPT backend's model catalogue for this account.
+
+        Endpoint: ``GET {base_url}/codex/models?client_version=...``.
+        Requires a bearer token — refreshes before the call.
+
+        Returns the raw ``models`` array from the backend (each entry is
+        a dict with ``slug`` / ``display_name`` / ``visibility`` /
+        ``supported_reasoning_levels`` etc).  Callers filter /
+        transform into ``ModelInfo`` instances themselves so we don't
+        couple this low-level loader to the provider schema.
+
+        The ``client_version`` default matches the one sent on
+        ``auth_headers`` so the backend always sees a consistent
+        client identity.
+        """
+        headers = await self.auth_headers()
+        effective_version = client_version or CODEX_CLIENT_VERSION
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(
+                f"{self.base_url}/codex/models",
+                headers=headers,
+                params={"client_version": effective_version},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        models = data.get("models")
+        return models if isinstance(models, list) else []
 
 
 # -------------------------------------------------------------------------

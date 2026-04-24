@@ -2,8 +2,8 @@
 """In-process OpenAI chat-completions ↔ ChatGPT Responses bridge.
 
 Lets CoPaw agents hit a ChatGPT Plus/Pro subscription via Codex OAuth
-without running the local :mod:`codex_oauth_proxy` daemon.  Wraps
-agentscope's :class:`OpenAIChatModel` so that every outbound
+in-process — no separate daemon needed.  Wraps agentscope's
+:class:`OpenAIChatModel` so that every outbound
 ``client.chat.completions.create`` call is redirected to
 ``chatgpt.com/backend-api/codex/responses``, translated on both
 legs using the shared :mod:`codex_translate` helpers.
@@ -173,14 +173,20 @@ class _CodexOAuthAsyncStream:
             self._upstream = await self._stream_ctx.__aenter__()
             assert self._upstream is not None
             if self._upstream.status_code != 200:
+                # Capture everything we need *before* ``_cleanup``
+                # nulls ``self._upstream`` — otherwise the f-string
+                # below raises ``AttributeError: 'NoneType'`` and
+                # masks the real HTTP status the caller needs.
+                status = self._upstream.status_code
+                request = self._upstream.request
+                response = self._upstream
                 err_bytes = await self._upstream.aread()
                 err_body = err_bytes.decode("utf-8", errors="replace")
                 await self._cleanup()
                 raise httpx.HTTPStatusError(
-                    f"Codex upstream HTTP {self._upstream.status_code}: "
-                    f"{err_body[:500]}",
-                    request=self._upstream.request,
-                    response=self._upstream,
+                    f"Codex upstream HTTP {status}: {err_body[:500]}",
+                    request=request,
+                    response=response,
                 )
             self._iter = translate_responses_events_to_chat_chunks(
                 self._upstream, self._state,
