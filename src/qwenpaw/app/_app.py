@@ -482,9 +482,71 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
 
     _bg_task = asyncio.create_task(_background_startup())
 
+    # ================================================================
+    # Shutdown diagnostic — triggered by SIGTERM *before* uvicorn
+    # starts waiting for in-flight HTTP requests.  Without this, a
+    # hung agent-reply SSE stream (observed 2026-04-24 during a
+    # sticker-send retry loop) can make uvicorn wait the full
+    # ``TimeoutStopSec`` (90s on the systemd unit) without firing
+    # the FastAPI lifespan ``finally`` at all — result: no
+    # ``shutdown_all_runners``, session saves never flush, SIGKILL
+    # hits and every ``.json`` being mid-write loses its primary
+    # rename window.  This handler at least logs that the shutdown
+    # arrived + starts a deadman timer that force-logs stuck
+    # asyncio tasks before systemd escalates.
+    import signal as _signal
+
+    def _log_shutdown_signal(signum, frame):
+        logger.warning(
+            "SIGNAL %s received — beginning shutdown diagnostic.  "
+            "If you don't see 'Draining in-flight queries...' within "
+            "20s, uvicorn is still waiting on an HTTP request.",
+            _signal.Signals(signum).name,
+        )
+        # Dump asyncio task state for diagnosis.  Running this in
+        # a signal handler is safe because ``asyncio.all_tasks()``
+        # doesn't mutate loop state.
+        try:
+            loop = asyncio.get_event_loop()
+            tasks = [t for t in asyncio.all_tasks(loop) if not t.done()]
+            logger.warning(
+                "shutdown-diag: %d asyncio tasks still running", len(tasks),
+            )
+            for t in tasks[:20]:
+                logger.warning(
+                    "shutdown-diag: task=%s coro=%s",
+                    t.get_name(), getattr(t.get_coro(), "__qualname__", "?"),
+                )
+        except Exception as e:
+            logger.warning("shutdown-diag: task dump failed: %s", e)
+
+    # Register for SIGTERM + SIGINT; the uvicorn signal handlers
+    # will still fire after ours because Python chains.  Use the
+    # default-handler pattern rather than asyncio to avoid racing
+    # with uvicorn's own asyncio-level handler install.
+    try:
+        for _sig in (_signal.SIGTERM, _signal.SIGINT):
+            _prev = _signal.getsignal(_sig)
+            def _make_handler(prev):
+                def _h(signum, frame):
+                    _log_shutdown_signal(signum, frame)
+                    if callable(prev):
+                        try:
+                            prev(signum, frame)
+                        except Exception:
+                            pass
+                return _h
+            _signal.signal(_sig, _make_handler(_prev))
+    except Exception as e:
+        logger.warning("Could not install shutdown diagnostic handler: %s", e)
+
     try:
         yield
     finally:
+        logger.info(
+            "Lifespan shutdown finally-block entered at %s",
+            time.time(),
+        )
         # Cancel background startup if still in progress
         if not _bg_task.done():
             _bg_task.cancel()
@@ -544,8 +606,20 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
             except Exception as exc:
                 logger.error("Error stopping media server: %s", exc)
 
-        # Stop multi-agent manager (stops all agents and their components)
+        # Drain in-flight queries FIRST so each query_handler's
+        # finally-block save fires before workspaces tear down — the
+        # empty shutdown_handler used to miss this entire window,
+        # causing systemd restart to drop the last turn of whatever
+        # reply was running (see ``Runner.shutdown_handler`` /
+        # ``MultiAgentManager.shutdown_all_runners``).
         multi_agent_mgr = getattr(app.state, "multi_agent_manager", None)
+        if multi_agent_mgr is not None:
+            try:
+                await multi_agent_mgr.shutdown_all_runners(timeout=30.0)
+            except Exception as e:
+                logger.error(f"Error draining runners on shutdown: {e}")
+
+        # Stop multi-agent manager (stops all agents and their components)
         if multi_agent_mgr is not None:
             logger.info("Stopping MultiAgentManager...")
             try:
