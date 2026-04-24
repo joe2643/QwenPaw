@@ -121,10 +121,24 @@ def _collapse_embedded_newlines(cmd: str) -> str:
     * **Unix** ``sh -c`` treats an unquoted newline as a command separator,
       but correctly handles newlines inside quoted strings.
 
-    On Unix/macOS, newlines inside quoted strings are preserved so that
-    downstream commands receive the correct multi-line content (e.g.
-    ``--text "Hello\nWorld"``).  On Windows, all newlines are collapsed
-    to ensure the command at least executes successfully.
+    On Unix/macOS the original collapse-outside-quotes behaviour turned
+    out to be strictly destructive:
+
+    * **Heredocs** (``cat <<'EOF'\\nline1\\nline2\\nEOF``) depend on
+      the newline AFTER the ``<<TOKEN`` marker to start the body and
+      the newline BEFORE ``TOKEN`` on its own line to close it.
+      Collapsing those to spaces turns the heredoc body into a single
+      long ``cat <<'EOF' line1 line2 EOF`` line — ``sh`` reads forever
+      from stdin waiting for a bare ``EOF`` line that never arrives.
+    * **Multi-line commands** (``git status\\ngit diff``) become
+      ``git status git diff`` which parses as a single ``git`` invocation
+      with bogus arguments.
+
+    ``sh -c`` handles both correctly when newlines are left alone:
+    unquoted ``\\n`` is a command separator, quoted ``\\n`` stays in the
+    argument.  So on Unix we just hand the command straight through.
+    On Windows ``cmd.exe`` still truncates at the first newline, so we
+    keep the brute-force collapse there.
     """
     if "\n" not in cmd:
         return cmd
@@ -132,7 +146,9 @@ def _collapse_embedded_newlines(cmd: str) -> str:
         # cmd.exe truncates at newlines regardless of quoting — must
         # collapse all to ensure the command executes at all.
         return cmd.replace("\r\n", " ").replace("\n", " ")
-    return _collapse_newlines_outside_quotes(cmd)
+    # Unix: sh handles newlines correctly both as command separators
+    # and inside quoted strings — pass through verbatim.
+    return cmd
 
 
 def _sanitize_win_cmd(cmd: str) -> str:
