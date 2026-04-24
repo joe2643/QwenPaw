@@ -9,7 +9,7 @@ import enum
 import logging
 import os
 import time
-from typing import Dict, Set
+from typing import Any, Dict, Set
 
 from agentscope_runtime.engine.schemas.exception import (
     ConfigurationException,
@@ -497,6 +497,74 @@ class MultiAgentManager:
         # Await completion of all tasks, collecting exceptions
         await asyncio.gather(*tasks, return_exceptions=True)
         logger.info("All cleanup tasks cancelled/completed")
+
+    async def shutdown_all_runners(self, timeout: float = 30.0) -> None:
+        """Drain in-flight ``query_handler`` tasks across every
+        workspace's runner so their ``finally`` blocks run and the
+        latest session state lands on disk.
+
+        Must be called BEFORE :meth:`stop_all` — workspaces tearing
+        down yank the ``SafeJSONSession`` out from under any query
+        still trying to save.  Each runner is drained in parallel
+        (bounded by ``timeout`` total, not ``N*timeout``) so a slow
+        workspace doesn't starve others.
+
+        Args:
+            timeout: Per-runner deadline.  Matches uvicorn's default
+                ``graceful_timeout`` (30s) so the systemd stop
+                sequence doesn't escalate to SIGKILL mid-flush.
+        """
+        if not self.agents:
+            logger.debug("shutdown_all_runners: no agents loaded")
+            return
+
+        runners: list[tuple[str, Any]] = []
+        for agent_id, workspace in self.agents.items():
+            runner = getattr(workspace, "runner", None)
+            if runner is None:
+                continue
+            handler = getattr(runner, "shutdown_handler", None)
+            if handler is None:
+                continue
+            runners.append((agent_id, runner))
+
+        if not runners:
+            logger.debug(
+                "shutdown_all_runners: no runners with shutdown handler",
+            )
+            return
+
+        logger.info(
+            "Draining in-flight queries across %d runner(s) "
+            "(per-runner timeout=%.1fs)...",
+            len(runners),
+            timeout,
+        )
+
+        async def _drain(agent_id: str, runner: Any) -> tuple[str, bool]:
+            try:
+                ok = await runner.shutdown_handler(timeout=timeout)
+                return agent_id, bool(ok)
+            except Exception as e:
+                logger.error(
+                    "Error draining runner for %s: %s",
+                    agent_id, e, exc_info=True,
+                )
+                return agent_id, False
+
+        results = await asyncio.gather(
+            *(_drain(aid, r) for aid, r in runners),
+            return_exceptions=False,
+        )
+        incomplete = [aid for aid, ok in results if not ok]
+        if incomplete:
+            logger.warning(
+                "shutdown_all_runners: %d runner(s) did not fully drain "
+                "within timeout — some session state may be lost: %s",
+                len(incomplete), incomplete,
+            )
+        else:
+            logger.info("shutdown_all_runners: all runners drained")
 
     async def stop_all(self):
         """Stop all agent instances.

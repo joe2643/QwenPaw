@@ -450,6 +450,7 @@ class AgentRunner(Runner):
         # Set agent context for model creation
         from ..agent_context import (
             set_current_agent_id,
+            set_current_channel_meta,
             set_current_session_id,
         )
 
@@ -457,6 +458,13 @@ class AgentRunner(Runner):
 
         # Set session_id in context for token usage tracking
         set_current_session_id(session_id)
+
+        # Expose channel_meta (source / group_id / platform / etc.)
+        # to tool code so channel-aware tools can auto-resolve the
+        # current reply target instead of asking the agent to pass
+        # it explicitly.  Safe even when channel_meta is absent —
+        # tools treat None as "no current chat".
+        set_current_channel_meta(getattr(request, "channel_meta", None))
 
         agent = None
         chat = None
@@ -894,7 +902,71 @@ class AgentRunner(Runner):
         )
         self.session = SafeJSONSession(save_dir=session_dir)
 
-    async def shutdown_handler(self, *args, **kwargs):
+    async def shutdown_handler(
+        self, timeout: float = 30.0,
+    ) -> bool:
+        """Drain in-flight ``query_handler`` tasks so their
+        ``finally`` blocks (which save session state) run before the
+        process exits.
+
+        Called from the FastAPI lifespan shutdown *before* workspaces
+        start tearing down — otherwise a query that holds a reference
+        to ``self.session`` would see the underlying ``SafeJSONSession``
+        shut out while trying to flush its last turn.
+
+        Args:
+            timeout: Seconds to wait for all tracked tasks to finish.
+                Defaults to 30s — matches uvicorn's default
+                ``graceful_timeout`` so systemd's stop sequence
+                doesn't escalate to SIGKILL mid-save.  Set lower in
+                tests.
+
+        Returns:
+            ``True`` if every tracked task completed within the
+            timeout, ``False`` otherwise (tasks were still running
+            when we gave up).  A ``False`` here on real shutdown
+            means some session state didn't flush to disk — surface
+            to the user so they know what was lost.
         """
-        Shutdown handler.
-        """
+        tracker = getattr(self, "_task_tracker", None)
+        if tracker is None:
+            logger.debug(
+                "shutdown_handler: no task tracker attached (agent=%s)",
+                getattr(self, "agent_id", "?"),
+            )
+            return True
+
+        active_before = await tracker.list_active_tasks()
+        if not active_before:
+            logger.debug(
+                "shutdown_handler: no in-flight tasks for agent=%s",
+                getattr(self, "agent_id", "?"),
+            )
+            return True
+
+        logger.info(
+            "shutdown_handler: draining %d in-flight task(s) for "
+            "agent=%s (timeout=%.1fs): %s",
+            len(active_before),
+            getattr(self, "agent_id", "?"),
+            timeout,
+            active_before,
+        )
+        done = await tracker.wait_all_done(timeout=timeout)
+        if not done:
+            still = await tracker.list_active_tasks()
+            logger.warning(
+                "shutdown_handler: %d task(s) still running after "
+                "%.1fs — session state for these may be stale on "
+                "next boot (agent=%s): %s",
+                len(still),
+                timeout,
+                getattr(self, "agent_id", "?"),
+                still,
+            )
+        else:
+            logger.info(
+                "shutdown_handler: all tasks drained cleanly (agent=%s)",
+                getattr(self, "agent_id", "?"),
+            )
+        return done
