@@ -159,11 +159,24 @@ async def get_chat(
             detail=f"Chat not found: {chat_id}",
         )
 
+    status = await workspace.task_tracker.get_status(chat_id)
+
+    # Prefer the append-only chat log when one exists — it carries the
+    # full conversation including turns evicted by memory compaction
+    # and turns lost between save_session_state calls.  Fall back to
+    # reading the agent's memory state from session.json for chats
+    # that predate ``agents/chat_log.py``.
+    workspace_dir = getattr(workspace, "workspace_dir", None) or getattr(
+        workspace, "_workspace_dir", None,
+    )
+    log_messages = _read_chat_log_messages(workspace_dir, chat_id)
+    if log_messages is not None:
+        return ChatHistory(messages=log_messages, status=status)
+
     state = await session.get_session_state_dict(
         chat_spec.session_id,
         chat_spec.user_id,
     )
-    status = await workspace.task_tracker.get_status(chat_id)
     if not state:
         return ChatHistory(messages=[], status=status)
     memory_state = state.get("agent", {}).get("memory", {})
@@ -173,6 +186,51 @@ async def get_chat(
     memories = await memory.get_memory(prepend_summary=False)
     messages = agentscope_msg_to_message(memories)
     return ChatHistory(messages=messages, status=status)
+
+
+def _read_chat_log_messages(workspace_dir, chat_id: str):
+    """Best-effort reader for the per-chat append-only JSONL log.
+
+    Returns a list of message dicts (already shaped for ChatHistory)
+    when a log exists for *chat_id*, or ``None`` to signal the caller
+    should fall back to the legacy memory-based view.
+
+    Skips HINT-marked entries (transient agentscope nudges).  Does
+    NOT raise — any read error degrades gracefully to ``None``.
+    """
+    if not workspace_dir or not chat_id:
+        return None
+    try:
+        from ...agents.chat_log import read_log
+
+        from agentscope.message import Msg
+
+        entries = read_log(workspace_dir, chat_id)
+        if not entries:
+            return None
+        msgs = []
+        for entry in entries:
+            marks = entry.get("marks") or []
+            if "hint" in [str(m).lower() for m in marks]:
+                continue
+            data = entry.get("msg") or {}
+            try:
+                if hasattr(Msg, "from_dict"):
+                    msg = Msg.from_dict(data)
+                else:
+                    msg = Msg(
+                        name=data.get("name") or data.get("role") or "system",
+                        content=data.get("content") or [],
+                        role=data.get("role") or "system",
+                    )
+                msgs.append(msg)
+            except Exception:  # pylint: disable=broad-exception-caught
+                continue
+        if not msgs:
+            return None
+        return agentscope_msg_to_message(msgs)
+    except Exception:  # pylint: disable=broad-exception-caught
+        return None
 
 
 @router.put("/{chat_id}", response_model=ChatSpec)

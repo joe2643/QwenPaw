@@ -22,6 +22,10 @@ from anyio import ClosedResourceError
 from pydantic import BaseModel
 
 from ..app.mcp import HttpStatefulClient, StdIOStatefulClient
+from .chat_log import (
+    append_to_log as chat_log_append,
+    collect_unpersisted as chat_log_collect_unpersisted,
+)
 from .command_handler import CommandHandler
 from .hooks import BootstrapHook
 from .model_factory import create_model_and_formatter
@@ -190,6 +194,13 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
         if plan_notebook is not None:
             init_kwargs["plan_notebook"] = plan_notebook
         super().__init__(**init_kwargs)
+
+        # Wrap memory.add so every non-transient call also lands in the
+        # per-chat append-only log (see ``chat_log.py``).  Done once
+        # here, not lazily in reply(), so memory.add calls outside the
+        # reply path (long-term memory recall, observe, etc.) are also
+        # captured.
+        self._install_chat_log_wrapper()
 
         # Register memory tools provided by the memory manager
         if self.memory_manager is not None:
@@ -1065,6 +1076,146 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
             return
         setattr(formatter, "_qwenpaw_force_strip_media", enabled)
 
+    def _install_chat_log_wrapper(self) -> None:
+        """Wrap ``self.memory.add`` so every non-transient call also
+        appends to ``<workspace>/chats/<chat_id>.jsonl``.
+
+        Idempotent — calling twice is a no-op.  Stores the unwrapped
+        original on ``self._original_memory_add`` so reconcile-time
+        re-injection can bypass the wrapper (otherwise replaying log
+        entries would re-append them and the log would grow without
+        bound).
+
+        ``chat_id`` is read from ``self._request_context`` lazily at
+        each call — same instance can serve multiple chat_ids across
+        successive ``reply()`` invocations as the runner rotates the
+        request context.  No chat_id ⇒ no append (stand-alone /
+        warm-up / smoke calls don't pollute logs).
+        """
+        if getattr(self, "_chat_log_wrapped", False):
+            return
+        self._chat_log_wrapped = True
+        self._original_memory_add = self.memory.add  # type: ignore[attr-defined]
+
+        async def logged_add(memories, marks=None, **kwargs):
+            result = await self._original_memory_add(
+                memories, marks=marks, **kwargs,
+            )
+            try:
+                req_ctx = getattr(self, "_request_context", None) or {}
+                chat_id = req_ctx.get("chat_id") or ""
+                if not chat_id:
+                    return result
+                # HINT-marked entries are agentscope's transient nudges
+                # — skip them so the log only carries real conversation.
+                mark_str = (
+                    str(marks).lower()
+                    if marks is not None and not isinstance(
+                        marks, (list, tuple, set),
+                    )
+                    else " ".join(str(m).lower() for m in (marks or []))
+                )
+                if "hint" in mark_str:
+                    return result
+                workspace = self._workspace_dir or WORKING_DIR
+                chat_log_append(workspace, chat_id, memories, marks)
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.debug(
+                    "chat_log: append wrapper swallowed error: %s",
+                    e,
+                )
+            return result
+
+        self.memory.add = logged_add  # type: ignore[attr-defined]
+
+    async def _reconcile_chat_log_into_memory(self) -> None:
+        """Inject log entries that were captured between the last
+        successful ``save_session_state`` and the current process
+        start.
+
+        Called from ``reply()`` before ``super().reply()`` runs, so
+        the agent sees the unpersisted prior turn in its prompt
+        without us having to extend the boot path.
+
+        No-op when:
+        * No ``chat_id`` in request context (no log to read).
+        * No log file yet (first turn for this chat).
+        * Log entries all carry ``ts <= session.json mtime`` (nothing
+          was lost — last save covered everything).
+        * Every unpersisted entry's ``msg.id`` already happens to be
+          in current memory (rare, but possible if reload + reconcile
+          cross paths).
+
+        Failures are logged and swallowed.  A reconcile that errors
+        must NOT block the next reply — losing reconciliation is
+        recoverable, blocking the agent is not.
+        """
+        try:
+            req_ctx = getattr(self, "_request_context", None) or {}
+            chat_id = req_ctx.get("chat_id") or ""
+            if not chat_id:
+                return
+            workspace = self._workspace_dir or WORKING_DIR
+
+            # Watermark: session.json's mtime is the last-successful-save
+            # timestamp.  Compute its path the same way SafeJSONSession
+            # does (see ``runner/session.py:_get_save_path``).
+            session_id = req_ctx.get("session_id") or ""
+            user_id = req_ctx.get("user_id") or ""
+            session_path: Path | None = None
+            if session_id:
+                from ..app.runner.session import sanitize_filename
+
+                safe_sid = sanitize_filename(session_id)
+                safe_uid = sanitize_filename(user_id) if user_id else ""
+                fname = (
+                    f"{safe_uid}_{safe_sid}.json"
+                    if safe_uid
+                    else f"{safe_sid}.json"
+                )
+                session_path = (
+                    Path(workspace) / "sessions" / fname
+                )
+
+            memory_msg_ids: set[str] = set()
+            for pair in (self.memory.content or []):
+                # ``content`` is list[(Msg, marks)] — we only care about
+                # the Msg's id field for dedup.
+                m = pair[0] if isinstance(pair, tuple) else pair
+                if hasattr(m, "id") and m.id:
+                    memory_msg_ids.add(m.id)
+
+            unpersisted = chat_log_collect_unpersisted(
+                workspace,
+                chat_id,
+                session_path,
+                memory_msg_ids,
+            )
+            if not unpersisted:
+                return
+
+            # Inject via the UNWRAPPED add — going through the wrapper
+            # would re-append these entries to the log we just read.
+            original_add = getattr(self, "_original_memory_add", None)
+            if original_add is None:
+                logger.debug(
+                    "chat_log: reconcile skipped — no _original_memory_add",
+                )
+                return
+            await original_add(unpersisted)
+            logger.info(
+                "chat_log: reconciled %d unpersisted entr%s into memory "
+                "(chat=%s)",
+                len(unpersisted),
+                "y" if len(unpersisted) == 1 else "ies",
+                chat_id,
+            )
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.warning(
+                "chat_log: reconcile swallowed error: %s",
+                e,
+            )
+
     async def _reasoning(
         self,
         tool_choice: Literal["auto", "none", "required"] | None = None,
@@ -1571,6 +1722,16 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
         request_context = getattr(self, "_request_context", {}) or {}
         channel_name = request_context.get("channel", "console")
         workspace_dir = Path(self._workspace_dir or WORKING_DIR)
+
+        # Pull anything captured between the last save_session_state and
+        # now (e.g. SIGKILL casualties or Phase A tombstones whose
+        # session.json snapshot didn't make it to disk) back into
+        # ``self.memory`` BEFORE agentscope's ``super().reply()``
+        # processes the new user input.  This way the upcoming prompt
+        # carries the full prior turn even when ``session.json`` is
+        # behind the actual conversation.
+        await self._reconcile_chat_log_into_memory()
+
         with apply_skill_config_env_overrides(workspace_dir, channel_name):
             return await super().reply(
                 msg=msg,
