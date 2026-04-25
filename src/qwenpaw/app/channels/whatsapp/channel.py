@@ -113,51 +113,10 @@ class _WhatsAppAlbumBuffer:
 
 WHATSAPP_MAX_TEXT_LENGTH = 4096
 
-# Single source of truth for the timestamp string the agent sees on
-# WhatsApp inbound — render in the host's local timezone so the model
-# never has to reason across zones (whichever zone the operator runs
-# in is the one that matches their own clock).  Returns ``""`` on
-# any parse failure so the caller can substitute the raw value or
-# omit the prefix.
-def _format_local_timestamp(
-    ts,
-    style: str = "long",
-) -> str:
-    """Render ``ts`` (epoch seconds, epoch ms, str, or
-    ``datetime.datetime``) in the host's local timezone.
-
-    ``style="long"``  → ``"2026年4月25日 19:40:11 JST"`` (history block)
-    ``style="short"`` → ``"2026-04-25 19:40 JST"`` (envelope prefix)
-
-    The trailing label is whatever the system reports via
-    ``time.tzname`` for this moment (handles DST transitions
-    correctly because we resolve via ``astimezone()`` per call).
-    """
-    try:
-        if isinstance(ts, datetime.datetime):
-            # Naive datetime → assume local; aware datetime → convert.
-            dt = (
-                ts.astimezone()
-                if ts.tzinfo is not None
-                else ts.astimezone()
-            )
-        else:
-            ts_val = float(ts)
-            if ts_val > 1e12:
-                ts_val /= 1000  # epoch milliseconds → seconds
-            dt = datetime.datetime.fromtimestamp(ts_val).astimezone()
-    except (TypeError, ValueError, OverflowError):
-        return ""
-    tz_label = dt.strftime("%Z") or ""
-    if style == "short":
-        return (
-            dt.strftime("%Y-%m-%d %H:%M ") + tz_label
-        ).rstrip()
-    return (
-        f"{dt.year}年{dt.month}月{dt.day}日 "
-        + dt.strftime("%H:%M:%S ")
-        + tz_label
-    ).rstrip()
+# Shared host-local timestamp formatter — same shape used by every
+# chat channel so the agent gets a single, consistent envelope
+# pattern to parse.
+from .._format import format_local_timestamp as _format_local_timestamp  # noqa: E402
 from ....constant import WORKING_DIR
 
 _MEDIA_DIR = WORKING_DIR / "media" / "whatsapp"

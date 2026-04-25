@@ -1841,3 +1841,31 @@ def test_expand_mentions_prefers_phone_over_uuid() -> None:
     assert "+85251159218" in expanded
     # UUID must NOT leak into the bot's view when phone is available.
     assert "uuid:" not in expanded
+
+
+# ===================================================================
+# TestLocalTimestampShared
+# ===================================================================
+
+
+def test_signal_imports_shared_timestamp_helper():
+    """Signal must use the same ``_format_local_timestamp`` helper
+    as WhatsApp so the envelope timestamp shape stays consistent
+    across channels — agents can rely on a single regex to extract
+    the time."""
+    from qwenpaw.app.channels.signal import channel as sig_mod
+    from qwenpaw.app.channels._format import format_local_timestamp
+
+    # Same callable, not a re-implementation.
+    assert sig_mod._format_local_timestamp is format_local_timestamp
+
+
+def test_signal_timestamp_renders_in_local_tz():
+    """Smoke test: the helper produces a parseable local-tz
+    string for the kind of epoch values Signal hands us."""
+    from qwenpaw.app.channels.signal import channel as sig_mod
+
+    out = sig_mod._format_local_timestamp(1777106276, style="short")
+    # Format: YYYY-MM-DD HH:MM <ZONE>
+    assert "-04-" in out
+    assert ":" in out

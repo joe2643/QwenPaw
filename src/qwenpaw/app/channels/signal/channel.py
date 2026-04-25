@@ -42,6 +42,7 @@ from ..base import (
     ProcessHandler,
 )
 from ..media_utils import resolve_media_url
+from .._format import format_local_timestamp as _format_local_timestamp
 from .subprocess_client import SignalSubprocessClient
 
 logger = logging.getLogger(__name__)
@@ -819,7 +820,15 @@ class SignalChannel(BaseChannel):
                     media_to_add: List[str] = []
                     for h in history[-10:]:
                         ts = h.get("ts", "")
-                        ts_prefix = f"[{ts}] " if ts else ""
+                        ts_formatted = (
+                            _format_local_timestamp(ts, style="long")
+                            if ts else ""
+                        )
+                        ts_prefix = (
+                            f"[{ts_formatted}] "
+                            if ts_formatted
+                            else (f"[{ts}] " if ts else "")
+                        )
                         line = f"  {ts_prefix}{h['sender']}: {h['body']}"
                         mps = h.get("media") or []
                         if mps:
@@ -845,10 +854,18 @@ class SignalChannel(BaseChannel):
 
             sender_label = self._format_sender_display(source, source_uuid)
             is_group_flag = bool(group_id)
+            # Lead the envelope with the Signal send timestamp in
+            # local-system tz so the model can reason about "when
+            # was this" without guessing — same shape as the
+            # WhatsApp envelope so a single regex covers both
+            # channels.  Falls back to no prefix if the formatter
+            # can't parse the upstream timestamp.
+            ts_short = _format_local_timestamp(timestamp, style="short")
+            ts_prefix = f"[{ts_short}] " if ts_short else ""
             envelope_prefix = (
-                f"[Signal group {group_id}] {sender_label}"
+                f"{ts_prefix}[Signal group {group_id}] {sender_label}"
                 if is_group_flag
-                else f"[Signal DM] {sender_label}"
+                else f"{ts_prefix}[Signal DM] {sender_label}"
             )
             for i, part in enumerate(content_parts):
                 if hasattr(part, "type") and part.type == ContentType.TEXT:
