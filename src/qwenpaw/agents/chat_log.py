@@ -72,14 +72,50 @@ from agentscope.message import Msg
 logger = logging.getLogger(__name__)
 
 # Suffix used by every chat-log file.  Lives next to ``sessions/`` under
-# the workspace dir; one file per ``chat_id``.
+# the workspace dir; one file per (session_id, user_id), keyed
+# identically to ``session.json`` so the UI's chat→session→log
+# resolution is a direct rename of the same path components.
 LOG_SUBDIR = "chats"
 LOG_SUFFIX = ".jsonl"
 
 
-def chat_log_path(workspace_dir: str | Path, chat_id: str) -> Path:
-    """Resolve the JSONL path for *chat_id* under *workspace_dir*."""
-    return Path(workspace_dir) / LOG_SUBDIR / f"{chat_id}{LOG_SUFFIX}"
+def _safe_filename(name: str) -> str:
+    """Mirror ``runner/session.py:sanitize_filename`` so logs land at
+    paths the UI's chat→session resolver can predict.
+
+    Inlined (not imported) to keep this module dependency-free —
+    pulling ``runner/session.py`` would create a cycle since the
+    runner imports things that eventually import this file.
+    """
+    import re as _re
+
+    return _re.sub(r'[\\/:*?"<>|]', "--", name)
+
+
+def chat_log_filename(session_id: str, user_id: str = "") -> str:
+    """Compute the JSONL filename for a (session_id, user_id) pair.
+
+    Naming mirrors ``SafeJSONSession._get_save_path``: ``user_session``
+    when both are set, ``session`` alone when ``user_id`` is empty.
+    Concrete shape: ``{safe_user}_{safe_session}.jsonl``.
+    """
+    safe_sid = _safe_filename(session_id)
+    safe_uid = _safe_filename(user_id) if user_id else ""
+    if safe_uid:
+        return f"{safe_uid}_{safe_sid}{LOG_SUFFIX}"
+    return f"{safe_sid}{LOG_SUFFIX}"
+
+
+def chat_log_path(
+    workspace_dir: str | Path,
+    session_id: str,
+    user_id: str = "",
+) -> Path:
+    """Resolve the JSONL path for (session_id, user_id) under
+    ``<workspace_dir>/chats/``."""
+    return Path(workspace_dir) / LOG_SUBDIR / chat_log_filename(
+        session_id, user_id,
+    )
 
 
 def _serialise_msg(msg: Msg) -> dict[str, Any]:
@@ -120,9 +156,10 @@ def _deserialise_msg(data: dict[str, Any]) -> Msg:
 
 def append_to_log(
     workspace_dir: str | Path,
-    chat_id: str,
+    session_id: str,
     memories: Msg | list[Msg] | None,
     marks: Optional[Any] = None,
+    user_id: str = "",
 ) -> None:
     """Append one or more Msg objects to ``<workspace>/chats/<chat_id>.jsonl``.
 
@@ -151,7 +188,7 @@ def append_to_log(
         return
 
     try:
-        path = chat_log_path(workspace_dir, chat_id)
+        path = chat_log_path(workspace_dir, session_id, user_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(timezone.utc).isoformat()
         # Normalise marks to a list[str] for the on-disk shape.
@@ -176,25 +213,28 @@ def append_to_log(
                 f.write(line + "\n")
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.warning(
-            "chat_log: append failed for chat=%s: %s "
+            "chat_log: append failed for session=%s user=%s: %s "
             "(memory.add already succeeded; UI may be missing this turn)",
-            chat_id,
+            session_id,
+            user_id,
             e,
         )
 
 
 def read_log(
     workspace_dir: str | Path,
-    chat_id: str,
+    session_id: str,
+    user_id: str = "",
 ) -> list[dict[str, Any]]:
-    """Read all entries for *chat_id*, oldest first.
+    """Read all entries for the given (session_id, user_id), oldest
+    first.
 
     Returns a list of envelope dicts (each ``{"ts": ..., "marks":
     [...], "msg": {...}}``).  Skips malformed lines silently — a
     partial line from a half-written tail (process killed mid-write)
     must not blow up the whole reader.
     """
-    path = chat_log_path(workspace_dir, chat_id)
+    path = chat_log_path(workspace_dir, session_id, user_id)
     if not path.exists():
         return []
     out: list[dict[str, Any]] = []
@@ -209,15 +249,19 @@ def read_log(
                 except json.JSONDecodeError:
                     continue
     except OSError as e:
-        logger.warning("chat_log: read failed for chat=%s: %s", chat_id, e)
+        logger.warning(
+            "chat_log: read failed for session=%s user=%s: %s",
+            session_id, user_id, e,
+        )
     return out
 
 
 def collect_unpersisted(
     workspace_dir: str | Path,
-    chat_id: str,
+    session_id: str,
     session_json_path: Optional[str | Path],
     memory_msg_ids: set[str],
+    user_id: str = "",
 ) -> list[Msg]:
     """Build the list of Msg objects in the log that haven't yet been
     persisted into ``session.json``.
@@ -237,7 +281,7 @@ def collect_unpersisted(
     HINT-marked entries are skipped — they're transient nudges the
     parent ``ReActAgent`` would have ``delete_by_mark``-ed already.
     """
-    entries = read_log(workspace_dir, chat_id)
+    entries = read_log(workspace_dir, session_id, user_id)
     if not entries:
         return []
 
@@ -274,8 +318,8 @@ def collect_unpersisted(
             unpersisted.append(_deserialise_msg(msg_data))
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.debug(
-                "chat_log: skipping malformed entry for chat=%s: %s",
-                chat_id, e,
+                "chat_log: skipping malformed entry for session=%s: %s",
+                session_id, e,
             )
             continue
 

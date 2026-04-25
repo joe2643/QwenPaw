@@ -165,11 +165,15 @@ async def get_chat(
     # full conversation including turns evicted by memory compaction
     # and turns lost between save_session_state calls.  Fall back to
     # reading the agent's memory state from session.json for chats
-    # that predate ``agents/chat_log.py``.
+    # that predate ``agents/chat_log.py``.  Log files are keyed by
+    # ``(session_id, user_id)`` (same scheme as session.json) so the
+    # chat→session mapping the manager already does is enough.
     workspace_dir = getattr(workspace, "workspace_dir", None) or getattr(
         workspace, "_workspace_dir", None,
     )
-    log_messages = _read_chat_log_messages(workspace_dir, chat_id)
+    log_messages = _read_chat_log_messages(
+        workspace_dir, chat_spec.session_id, chat_spec.user_id,
+    )
     if log_messages is not None:
         return ChatHistory(messages=log_messages, status=status)
 
@@ -188,24 +192,29 @@ async def get_chat(
     return ChatHistory(messages=messages, status=status)
 
 
-def _read_chat_log_messages(workspace_dir, chat_id: str):
-    """Best-effort reader for the per-chat append-only JSONL log.
+def _read_chat_log_messages(
+    workspace_dir,
+    session_id: str,
+    user_id: str = "",
+):
+    """Best-effort reader for the append-only JSONL log keyed by
+    (session_id, user_id).
 
     Returns a list of message dicts (already shaped for ChatHistory)
-    when a log exists for *chat_id*, or ``None`` to signal the caller
-    should fall back to the legacy memory-based view.
+    when a log exists for the given session, or ``None`` to signal the
+    caller should fall back to the legacy memory-based view.
 
     Skips HINT-marked entries (transient agentscope nudges).  Does
     NOT raise — any read error degrades gracefully to ``None``.
     """
-    if not workspace_dir or not chat_id:
+    if not workspace_dir or not session_id:
         return None
     try:
         from ...agents.chat_log import read_log
 
         from agentscope.message import Msg
 
-        entries = read_log(workspace_dir, chat_id)
+        entries = read_log(workspace_dir, session_id, user_id)
         if not entries:
             return None
         msgs = []

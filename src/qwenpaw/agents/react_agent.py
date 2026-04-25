@@ -195,13 +195,6 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
             init_kwargs["plan_notebook"] = plan_notebook
         super().__init__(**init_kwargs)
 
-        # Wrap memory.add so every non-transient call also lands in the
-        # per-chat append-only log (see ``chat_log.py``).  Done once
-        # here, not lazily in reply(), so memory.add calls outside the
-        # reply path (long-term memory recall, observe, etc.) are also
-        # captured.
-        self._install_chat_log_wrapper()
-
         # Register memory tools provided by the memory manager
         if self.memory_manager is not None:
             memory_tools = self.memory_manager.list_memory_tools()
@@ -221,6 +214,14 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                 self.context_manager.get_agent_context()
             )
             logger.debug("Context manager configured")
+
+        # Wrap memory.add so every non-transient call also lands in the
+        # per-chat append-only log (see ``chat_log.py``).  MUST run
+        # AFTER the context_manager swap above (which replaces
+        # ``self.memory`` with an AgentContext) — wrapping the
+        # pre-swap InMemoryMemory would attach to a soon-discarded
+        # instance.
+        self._install_chat_log_wrapper()
 
         # Setup command handler
         self.command_handler = CommandHandler(
@@ -1103,8 +1104,9 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
             )
             try:
                 req_ctx = getattr(self, "_request_context", None) or {}
-                chat_id = req_ctx.get("chat_id") or ""
-                if not chat_id:
+                session_id = req_ctx.get("session_id") or ""
+                user_id = req_ctx.get("user_id") or ""
+                if not session_id:
                     return result
                 # HINT-marked entries are agentscope's transient nudges
                 # — skip them so the log only carries real conversation.
@@ -1118,7 +1120,10 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                 if "hint" in mark_str:
                     return result
                 workspace = self._workspace_dir or WORKING_DIR
-                chat_log_append(workspace, chat_id, memories, marks)
+                chat_log_append(
+                    workspace, session_id, memories, marks,
+                    user_id=user_id,
+                )
             except Exception as e:  # pylint: disable=broad-exception-caught
                 logger.debug(
                     "chat_log: append wrapper swallowed error: %s",
@@ -1152,30 +1157,25 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
         """
         try:
             req_ctx = getattr(self, "_request_context", None) or {}
-            chat_id = req_ctx.get("chat_id") or ""
-            if not chat_id:
+            session_id = req_ctx.get("session_id") or ""
+            user_id = req_ctx.get("user_id") or ""
+            if not session_id:
                 return
             workspace = self._workspace_dir or WORKING_DIR
 
             # Watermark: session.json's mtime is the last-successful-save
             # timestamp.  Compute its path the same way SafeJSONSession
             # does (see ``runner/session.py:_get_save_path``).
-            session_id = req_ctx.get("session_id") or ""
-            user_id = req_ctx.get("user_id") or ""
-            session_path: Path | None = None
-            if session_id:
-                from ..app.runner.session import sanitize_filename
+            from ..app.runner.session import sanitize_filename
 
-                safe_sid = sanitize_filename(session_id)
-                safe_uid = sanitize_filename(user_id) if user_id else ""
-                fname = (
-                    f"{safe_uid}_{safe_sid}.json"
-                    if safe_uid
-                    else f"{safe_sid}.json"
-                )
-                session_path = (
-                    Path(workspace) / "sessions" / fname
-                )
+            safe_sid = sanitize_filename(session_id)
+            safe_uid = sanitize_filename(user_id) if user_id else ""
+            fname = (
+                f"{safe_uid}_{safe_sid}.json"
+                if safe_uid
+                else f"{safe_sid}.json"
+            )
+            session_path = Path(workspace) / "sessions" / fname
 
             memory_msg_ids: set[str] = set()
             for pair in (self.memory.content or []):
@@ -1187,9 +1187,10 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
 
             unpersisted = chat_log_collect_unpersisted(
                 workspace,
-                chat_id,
+                session_id,
                 session_path,
                 memory_msg_ids,
+                user_id=user_id,
             )
             if not unpersisted:
                 return
@@ -1205,10 +1206,10 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
             await original_add(unpersisted)
             logger.info(
                 "chat_log: reconciled %d unpersisted entr%s into memory "
-                "(chat=%s)",
+                "(session=%s)",
                 len(unpersisted),
                 "y" if len(unpersisted) == 1 else "ies",
-                chat_id,
+                session_id,
             )
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning(
