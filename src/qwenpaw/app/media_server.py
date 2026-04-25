@@ -8,6 +8,7 @@ Single shared secret, no per-agent complexity.
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
 import mimetypes
 import os
@@ -49,6 +50,7 @@ class MediaServer:
         named_tunnel_name: str = "",
         named_tunnel_hostname: str = "",
         named_tunnel_config_file: str = "",
+        token_store_path: Optional[Path] = None,
     ):
         self.host = host
         self.port = port
@@ -66,10 +68,26 @@ class MediaServer:
         self._tunnel_driver = None  # CloudflareTunnelDriver, lazily created
         self._server_task: Optional[asyncio.Task] = None
         self._app: Optional[FastAPI] = None
+        # Token store is disk-backed so it survives copaw restarts.
+        # Without persistence, a restart wipes every token — any
+        # signed URL still inside an active conversation history
+        # then 403s with "Invalid token" the next time ChatGPT (or
+        # any consumer) tries to fetch it, even though the URL's
+        # ``exp`` query param hasn't elapsed yet.  Default lives
+        # next to the rest of the per-user copaw state under
+        # ``WORKING_DIR``; tests pass a tmp path to keep production
+        # untouched.
+        if token_store_path is None:
+            from ..constant import WORKING_DIR
+            self._token_store_path: Path = (
+                Path(WORKING_DIR).expanduser() / "media_token_store.json"
+            )
+        else:
+            self._token_store_path = Path(token_store_path)
         self._token_store: dict[
             str,
             tuple[str, int],
-        ] = {}  # token -> (raw_path, expires)
+        ] = self._load_token_store()
 
     def _create_app(self) -> "FastAPI":
         app = FastAPI(title="QwenPaw Media", docs_url=None, redoc_url=None)
@@ -134,6 +152,9 @@ class MediaServer:
             token = secrets.token_urlsafe(24)
             server._token_store[token] = (raw_path, expires)
             server._cleanup_expired_tokens()
+            # Persist the new token so a copaw restart doesn't make
+            # already-issued URLs fail with "Invalid token".
+            server._persist_token_store()
             return {
                 "url": f"{domain}/media?t={token}&exp={expires}&sig={sig}",
                 "expires": expires,
@@ -195,6 +216,74 @@ class MediaServer:
         expired = [k for k, v in self._token_store.items() if now > v[1]]
         for k in expired:
             del self._token_store[k]
+        if expired:
+            # Re-persist after a cleanup so the on-disk file doesn't
+            # grow unbounded across restarts.
+            self._persist_token_store()
+
+    def _load_token_store(self) -> dict[str, tuple[str, int]]:
+        """Read the token store from disk on startup, dropping any
+        entries whose ``expires`` already elapsed.  Best-effort:
+        a missing or corrupt file just yields an empty store —
+        clients with already-issued tokens will 403 once until
+        the URL is re-signed, same as the pre-persistence baseline.
+        """
+        path = self._token_store_path
+        if not path.exists():
+            return {}
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning(
+                "media-server: token store at %s unreadable (%s); "
+                "starting with empty store",
+                path, e,
+            )
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        now = int(time.time())
+        loaded: dict[str, tuple[str, int]] = {}
+        for token, entry in raw.items():
+            try:
+                raw_path, expires = entry[0], int(entry[1])
+            except Exception:
+                continue
+            if expires > now:
+                loaded[str(token)] = (str(raw_path), expires)
+        if loaded:
+            logger.info(
+                "media-server: restored %d signed-URL token(s) "
+                "from %s",
+                len(loaded), path,
+            )
+        return loaded
+
+    def _persist_token_store(self) -> None:
+        """Atomically write the in-memory store back to disk via
+        ``tmp + os.replace`` so a crash mid-write never leaves an
+        empty file."""
+        path = self._token_store_path
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            payload = {
+                token: [raw_path, expires]
+                for token, (raw_path, expires) in self._token_store.items()
+            }
+            tmp.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except Exception as e:
+            # Persistence is best-effort — falling back to in-memory
+            # only is the same behaviour we had before this change,
+            # so log and continue rather than failing the sign call.
+            logger.warning(
+                "media-server: failed to persist token store at %s: %s",
+                path, e,
+            )
 
     def _sign(self, file_path: str, expires: int) -> str:
         msg = f"{file_path}:{expires}"

@@ -33,14 +33,22 @@ def tmp_media(tmp_path):
 
 
 @pytest.fixture
-def server(tmp_media):
-    """Create a MediaServer with test config."""
+def server(tmp_media, tmp_path):
+    """Create a MediaServer with test config.
+
+    ``token_store_path`` is pinned inside ``tmp_path`` so issuing
+    tokens during the test never writes to the real
+    ``~/.copaw/media_token_store.json`` (production pollution
+    discovered 2026-04-25: a stale ``new_token`` entry showed up
+    in the live store after a test run).
+    """
     return MediaServer(
         port=0,
         secret="test-secret-12345",
         allowed_dirs=[str(tmp_media)],
         max_size_mb=1,
         tunnel_domain="https://media.example.com",
+        token_store_path=tmp_path / "media_token_store.json",
     )
 
 
@@ -491,3 +499,81 @@ class TestCloudflareTunnelIntegration:
             await srv.reconcile_tunnel(tunnel_mode="quick")
             assert fake_driver.start.await_count == 1
             fake_driver.stop.assert_not_awaited()
+
+
+# ---------------------------------------------------------------- #
+# Token store persistence (survives copaw restart)                 #
+# ---------------------------------------------------------------- #
+
+
+import json as _json
+import time as _time
+
+import pytest as _pytest
+
+
+class TestTokenStorePersistence:
+    """Without disk-persistence the token store is reset on every
+    copaw restart and any URL still inside an active conversation
+    history 403s with 'Invalid token' even when its ``exp`` query
+    param is fresh.  These tests pin the on-disk format and the
+    load/persist round-trip."""
+
+    def test_persist_then_load_round_trip(self, tmp_path) -> None:
+        from qwenpaw.app.media_server import MediaServer
+
+        s = MediaServer(secret="seed")
+        s._token_store_path = tmp_path / "store.json"
+        # Simulate two issued tokens.
+        s._token_store["abc"] = ("/tmp/a.png", int(_time.time()) + 3600)
+        s._token_store["def"] = ("/tmp/b.mp4", int(_time.time()) + 1800)
+        s._persist_token_store()
+
+        # Fresh server pointed at the same file recovers both.
+        s2 = MediaServer(secret="seed")
+        s2._token_store_path = s._token_store_path
+        s2._token_store = s2._load_token_store()
+        assert s2._token_store["abc"] == s._token_store["abc"]
+        assert s2._token_store["def"] == s._token_store["def"]
+
+    def test_load_drops_already_expired_entries(self, tmp_path) -> None:
+        from qwenpaw.app.media_server import MediaServer
+
+        s = MediaServer(secret="seed")
+        s._token_store_path = tmp_path / "store.json"
+        # One fresh, one already past expiry.
+        s._token_store["fresh"] = ("/tmp/fresh.png", int(_time.time()) + 60)
+        s._token_store["stale"] = ("/tmp/stale.png", int(_time.time()) - 60)
+        s._persist_token_store()
+
+        s2 = MediaServer(secret="seed")
+        s2._token_store_path = s._token_store_path
+        loaded = s2._load_token_store()
+        assert "fresh" in loaded
+        assert "stale" not in loaded
+
+    def test_corrupt_store_yields_empty_dict(self, tmp_path) -> None:
+        from qwenpaw.app.media_server import MediaServer
+
+        path = tmp_path / "store.json"
+        path.write_text("not valid json {")
+        s = MediaServer(secret="seed")
+        s._token_store_path = path
+        # Should NOT raise — corruption falls back to empty.
+        loaded = s._load_token_store()
+        assert loaded == {}
+
+    def test_cleanup_persists_after_removal(self, tmp_path) -> None:
+        from qwenpaw.app.media_server import MediaServer
+
+        s = MediaServer(secret="seed")
+        s._token_store_path = tmp_path / "store.json"
+        s._token_store["fresh"] = ("/tmp/x", int(_time.time()) + 60)
+        s._token_store["stale"] = ("/tmp/y", int(_time.time()) - 60)
+        s._persist_token_store()
+        assert "stale" in _json.loads(s._token_store_path.read_text())
+
+        s._cleanup_expired_tokens()
+        on_disk = _json.loads(s._token_store_path.read_text())
+        assert "stale" not in on_disk
+        assert "fresh" in on_disk
