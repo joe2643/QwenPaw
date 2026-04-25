@@ -310,10 +310,13 @@ class WhatsAppChannel(BaseChannel):
         # Time window after the album header during which arriving
         # imageMessage/videoMessage from the same (sender, chat) are
         # treated as album children.  WhatsApp normally delivers all
-        # children within < 1 s; 5 s gives plenty of slack for
-        # network jitter without risking accidental collation of a
-        # genuinely-fresh next message.
-        self._album_timeout_s: float = 5.0
+        # children within < 1 s, but cross-LID-resolution +
+        # downloads can stretch past 5 s on slow links — observed
+        # 2026-04-25 a 2-image album partial-flushed at 5 s with
+        # only 1 path captured, leaving the other child to dispatch
+        # as a separate turn.  10 s covers the realistic worst
+        # case without pushing absurdly into a fresh message.
+        self._album_timeout_s: float = 10.0
 
         if self.enabled and not NEONIZE_AVAILABLE:
             logger.error("whatsapp: neonize not installed, channel disabled")
@@ -1230,6 +1233,27 @@ class WhatsAppChannel(BaseChannel):
             msg_id = info.ID
             timestamp = info.Timestamp
 
+            # Cache the sender's PushName from this inbound's Info
+            # so even un-mentioned messages buffered into group
+            # history surface a nickname instead of just the
+            # phone — addresses the "phone with no name" case
+            # the user flagged on 2026-04-25.  PushName is the
+            # name the sender chose for themselves, present even
+            # when the contact isn't in the bot's address book.
+            try:
+                sender_str_for_push = _jid_to_str(sender_jid)
+                push_name = (
+                    getattr(info, "PushName", "") or ""
+                )
+                if push_name and sender_str_for_push:
+                    cached = self._lid_cache.setdefault(
+                        sender_str_for_push, {},
+                    )
+                    if not cached.get("name"):
+                        cached["name"] = push_name
+            except Exception:
+                pass
+
             logger.info(
                 "whatsapp: [RAW] sender=%s chat=%s is_group=%s is_from_me=%s",
                 _jid_to_str(sender_jid),
@@ -1503,7 +1527,20 @@ class WhatsAppChannel(BaseChannel):
                         line = f"  {ts_prefix}{h['sender']}: {h['body']}"
                         media_paths = h.get("media") or []
                         if media_paths:
-                            line += f"  [media: {len(media_paths)}]"
+                            # Inline absolute paths so the agent can
+                            # reference any past media by file path
+                            # without having to grep ``content_parts``.
+                            # Cap rendered paths at 5 to keep the
+                            # block scannable; surplus collapses to
+                            # ``+N more`` so token spend stays
+                            # predictable on chats with media-heavy
+                            # history.
+                            shown = media_paths[:5]
+                            extra = len(media_paths) - len(shown)
+                            line += f"  [media: {', '.join(shown)}"
+                            if extra > 0:
+                                line += f", +{extra} more"
+                            line += "]"
                             for mp in media_paths:
                                 if os.path.isfile(mp):
                                     media_to_add.append(mp)
@@ -2058,14 +2095,31 @@ class WhatsAppChannel(BaseChannel):
                     e,
                 )
 
-        # Try contact store for name
+        # Try contact store for name.  WhatsApp populates one of
+        # several name-bearing fields depending on whether the
+        # other party is in the bot's address book or just sent
+        # via push profile — fall through them in priority order
+        # (FullName = saved contact name, BusinessName = WA Business
+        # display, PushName = the name the sender chose for
+        # themselves).  PushName is the most commonly-set one for
+        # group strangers, which is exactly the "phone shown
+        # without nickname" case the user flagged on 2026-04-25.
         if client:
             try:
                 contact = client.contact
                 if contact:
                     info = contact.get(lid_jid or lid_str)
-                    if info and hasattr(info, "FullName"):
-                        result["name"] = info.FullName or ""
+                    if info:
+                        for attr in (
+                            "FullName",
+                            "BusinessName",
+                            "PushName",
+                            "FirstName",
+                        ):
+                            val = getattr(info, attr, "") or ""
+                            if val:
+                                result["name"] = val
+                                break
             except Exception:
                 pass
 
@@ -2073,10 +2127,19 @@ class WhatsAppChannel(BaseChannel):
         return result
 
     def _format_sender(self, lid_str: str) -> str:
-        """Format sender for display: +85251159218 (Joe) or fallback to LID."""
+        """Format sender for display: +85251159218 (Joe) or fallback to LID.
+
+        Bot's own LID maps to ``name="bot"`` in the cache; render
+        that as ``(You)`` instead — clearer from the agent's own
+        point of view when its prior turns appear in group
+        history (the agent IS the "you" the user is talking to).
+        """
         cached = self._lid_cache.get(lid_str, {})
         phone = cached.get("phone", "")
         name = cached.get("name", "")
+        # Re-label the bot's own marker for the agent's POV.
+        if name == "bot":
+            name = "You"
         if phone and name:
             return f"+{phone} ({name})"
         if phone:

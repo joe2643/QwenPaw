@@ -2388,3 +2388,73 @@ async def test_quote_with_album_falls_back_to_count_on_cache_miss():
     )
     text = parts[0].text
     assert "album with 3 images + 1 video" in text
+
+
+# ===================================================================
+# TestSenderFormatting — bot → "(You)" + PushName fallback
+# ===================================================================
+
+
+class TestFormatSender:
+    def test_bot_label_renders_as_you(self):
+        """Bot's own LID is cached as ``name="bot"`` — _format_sender
+        re-labels it ``(You)`` so the agent's prior turns in group
+        history read naturally from the model's POV."""
+        ch = _make_channel()
+        ch._lid_cache["bot@lid"] = {"phone": "817089933036", "name": "bot"}
+        assert ch._format_sender("bot@lid") == "+817089933036 (You)"
+
+    def test_human_name_passes_through(self):
+        ch = _make_channel()
+        ch._lid_cache["x@lid"] = {"phone": "85251159218", "name": "Joe"}
+        assert ch._format_sender("x@lid") == "+85251159218 (Joe)"
+
+    def test_phone_only_no_paren(self):
+        ch = _make_channel()
+        ch._lid_cache["x@lid"] = {"phone": "85251159218", "name": ""}
+        assert ch._format_sender("x@lid") == "+85251159218"
+
+
+@pytest.mark.asyncio
+async def test_resolve_lid_falls_back_to_pushname():
+    """Saved-contact name (FullName) is empty for group strangers
+    — fall through to BusinessName / PushName / FirstName so the
+    nickname surfaces alongside the phone instead of leaving
+    just the +phone bare."""
+    ch = _make_channel()
+
+    # Mock client.contact.get returning an info with only PushName.
+    info = MagicMock(spec=["FullName", "BusinessName", "PushName", "FirstName"])
+    info.FullName = ""
+    info.BusinessName = ""
+    info.PushName = "JoeyDDD"
+    info.FirstName = ""
+
+    contact = MagicMock()
+    contact.get = MagicMock(return_value=info)
+    client = MagicMock()
+    client.contact = contact
+    client.get_pn_from_lid = AsyncMock(return_value=MagicMock(User="85251159218"))
+
+    out = await ch._resolve_lid(client, "abc@lid", MagicMock())
+    assert out["phone"] == "85251159218"
+    assert out["name"] == "JoeyDDD"
+
+
+@pytest.mark.asyncio
+async def test_resolve_lid_prefers_fullname_when_set():
+    """Saved-contact FullName beats PushName in the priority ladder."""
+    ch = _make_channel()
+    info = MagicMock(spec=["FullName", "BusinessName", "PushName", "FirstName"])
+    info.FullName = "Joe Saved"
+    info.BusinessName = ""
+    info.PushName = "Joey-pushname"
+    info.FirstName = "JoeFirst"
+    contact = MagicMock()
+    contact.get = MagicMock(return_value=info)
+    client = MagicMock()
+    client.contact = contact
+    client.get_pn_from_lid = AsyncMock(return_value=MagicMock(User="852"))
+
+    out = await ch._resolve_lid(client, "x@lid", MagicMock())
+    assert out["name"] == "Joe Saved"
