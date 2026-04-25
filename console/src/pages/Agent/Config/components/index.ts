@@ -6,4 +6,5 @@ export { LightContextCard } from "./LightContextCard";
 export { ReMeLightMemoryCard } from "./ReMeLightMemoryCard";
 export { ToolExecutionLevelCard } from "./ToolExecutionLevelCard";
 export { MemPalaceCard } from "./MemPalaceCard";
+export { SkillClawCaptureCard } from "./SkillClawCaptureCard";
 export { FallbackVideoModelCard } from "./FallbackVideoModelCard";

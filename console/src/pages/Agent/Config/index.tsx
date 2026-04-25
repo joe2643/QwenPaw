@@ -8,6 +8,7 @@ import {
   LlmRateLimiterCard,
   ToolExecutionLevelCard,
   MemPalaceCard,
+  SkillClawCaptureCard,
   FallbackVideoModelCard,
 } from "./components";
 import { PageHeader } from "@/components/PageHeader";
@@ -157,6 +158,18 @@ function AgentConfigPage() {
       children: (
         <div className={styles.tabContent}>
           <MemPalaceCard />
+        </div>
+      ),
+    });
+
+    // SkillClaw session capture — toggleable hook that appends every
+    // turn to ``conversations.jsonl`` for SkillClaw evolve_server.
+    baseTabs.push({
+      key: "skillclawCapture",
+      label: <span className={styles.tabLabel}>SkillClaw</span>,
+      children: (
+        <div className={styles.tabContent}>
+          <SkillClawCaptureCard />
         </div>
       ),
     });
