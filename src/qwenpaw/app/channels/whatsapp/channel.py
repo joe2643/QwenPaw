@@ -116,7 +116,9 @@ WHATSAPP_MAX_TEXT_LENGTH = 4096
 # Shared host-local timestamp formatter — same shape used by every
 # chat channel so the agent gets a single, consistent envelope
 # pattern to parse.
-from .._format import format_local_timestamp as _format_local_timestamp  # noqa: E402
+from .._format import (
+    format_local_timestamp as _format_local_timestamp,
+)  # noqa: E402
 from ....constant import WORKING_DIR
 
 _MEDIA_DIR = WORKING_DIR / "media" / "whatsapp"
@@ -1054,29 +1056,48 @@ class WhatsAppChannel(BaseChannel):
         # the index, etc.).
         if quoted_msg.HasField("albumMessage"):
             cached_paths = self._lookup_inbound_media(
-                chat_str, stanza_id,
+                chat_str,
+                stanza_id,
             )
             for p in cached_paths:
                 ext = Path(p).suffix.lower()
-                if ext in {".jpg", ".jpeg", ".png", ".gif",
-                           ".webp", ".bmp"}:
+                if ext in {
+                    ".jpg",
+                    ".jpeg",
+                    ".png",
+                    ".gif",
+                    ".webp",
+                    ".bmp",
+                }:
                     media_types.append(f"image: {p}")
-                    extra_parts.append(ImageContent(
-                        type=ContentType.IMAGE,
-                        image_url=await resolve_media_url(p),
-                    ))
-                elif ext in {".mp4", ".mov", ".avi", ".webm",
-                             ".mkv", ".mpeg"}:
+                    extra_parts.append(
+                        ImageContent(
+                            type=ContentType.IMAGE,
+                            image_url=await resolve_media_url(p),
+                        ),
+                    )
+                elif ext in {
+                    ".mp4",
+                    ".mov",
+                    ".avi",
+                    ".webm",
+                    ".mkv",
+                    ".mpeg",
+                }:
                     media_types.append(f"video: {p}")
                 else:
                     media_types.append(f"file: {p}")
             if not cached_paths:
                 # Cache miss — fall back to the count placeholder.
                 ai = getattr(
-                    quoted_msg.albumMessage, "expectedImageCount", 0,
+                    quoted_msg.albumMessage,
+                    "expectedImageCount",
+                    0,
                 )
                 av = getattr(
-                    quoted_msg.albumMessage, "expectedVideoCount", 0,
+                    quoted_msg.albumMessage,
+                    "expectedVideoCount",
+                    0,
                 )
                 counts = []
                 if ai:
@@ -1084,8 +1105,7 @@ class WhatsAppChannel(BaseChannel):
                 if av:
                     counts.append(f"{av} video{'s' if av != 1 else ''}")
                 media_types.append(
-                    f"album with {' + '.join(counts)}"
-                    if counts else "album",
+                    f"album with {' + '.join(counts)}" if counts else "album",
                 )
 
         if not quote_body and not media_types:
@@ -1242,12 +1262,11 @@ class WhatsAppChannel(BaseChannel):
             # when the contact isn't in the bot's address book.
             try:
                 sender_str_for_push = _jid_to_str(sender_jid)
-                push_name = (
-                    getattr(info, "PushName", "") or ""
-                )
+                push_name = getattr(info, "PushName", "") or ""
                 if push_name and sender_str_for_push:
                     cached = self._lid_cache.setdefault(
-                        sender_str_for_push, {},
+                        sender_str_for_push,
+                        {},
                     )
                     if not cached.get("name"):
                         cached["name"] = push_name
@@ -1289,13 +1308,17 @@ class WhatsAppChannel(BaseChannel):
             # carries the parent message's ID, not its media keys.
             if self._last_extracted_media_paths and msg_id:
                 self._record_inbound_media(
-                    chat_str, msg_id, self._last_extracted_media_paths,
+                    chat_str,
+                    msg_id,
+                    self._last_extracted_media_paths,
                 )
             media_local_paths = list(self._last_extracted_media_paths)
 
             # Extract quoted/replied-to message content
             quote_parts = await self._extract_quote_content(
-                client, msg, chat_str=chat_str,
+                client,
+                msg,
+                chat_str=chat_str,
             )
             if quote_parts:
                 content_parts = quote_parts + content_parts
@@ -1516,11 +1539,13 @@ class WhatsAppChannel(BaseChannel):
                             try:
                                 # Check if timestamp is in milliseconds (length > 10)
                                 ts_formatted = _format_local_timestamp(
-                                    ts, style="long",
+                                    ts,
+                                    style="long",
                                 )
                                 ts_prefix = (
                                     f"[{ts_formatted}] "
-                                    if ts_formatted else f"[{ts}] "
+                                    if ts_formatted
+                                    else f"[{ts}] "
                                 )
                             except Exception:
                                 ts_prefix = f"[{ts}] "
@@ -1951,7 +1976,9 @@ class WhatsAppChannel(BaseChannel):
         # eviction policy.
         if buffer.gathered_paths:
             self._record_inbound_media(
-                chat_str, buffer.header_msg_id, buffer.gathered_paths,
+                chat_str,
+                buffer.header_msg_id,
+                buffer.gathered_paths,
             )
 
         # Header info objects for routing — info comes from the
@@ -2631,10 +2658,8 @@ class WhatsAppChannel(BaseChannel):
                     from agentscope_runtime.engine.schemas.agent_schemas import (  # noqa: E501
                         MessageType,
                     )
-                    if (
-                        getattr(event, "type", None)
-                        != MessageType.REASONING
-                    ):
+
+                    if getattr(event, "type", None) != MessageType.REASONING:
                         await self.on_event_message_completed(
                             request,
                             to_handle,

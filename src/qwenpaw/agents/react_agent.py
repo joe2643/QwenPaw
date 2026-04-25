@@ -1100,7 +1100,9 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
 
         async def logged_add(memories, marks=None, **kwargs):
             result = await self._original_memory_add(
-                memories, marks=marks, **kwargs,
+                memories,
+                marks=marks,
+                **kwargs,
             )
             try:
                 req_ctx = getattr(self, "_request_context", None) or {}
@@ -1112,8 +1114,10 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                 # — skip them so the log only carries real conversation.
                 mark_str = (
                     str(marks).lower()
-                    if marks is not None and not isinstance(
-                        marks, (list, tuple, set),
+                    if marks is not None
+                    and not isinstance(
+                        marks,
+                        (list, tuple, set),
                     )
                     else " ".join(str(m).lower() for m in (marks or []))
                 )
@@ -1121,7 +1125,10 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                     return result
                 workspace = self._workspace_dir or WORKING_DIR
                 chat_log_append(
-                    workspace, session_id, memories, marks,
+                    workspace,
+                    session_id,
+                    memories,
+                    marks,
                     user_id=user_id,
                 )
             except Exception as e:  # pylint: disable=broad-exception-caught
@@ -1178,7 +1185,7 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
             session_path = Path(workspace) / "sessions" / fname
 
             memory_msg_ids: set[str] = set()
-            for pair in (self.memory.content or []):
+            for pair in self.memory.content or []:
                 # ``content`` is list[(Msg, marks)] — we only care about
                 # the Msg's id field for dedup.
                 m = pair[0] if isinstance(pair, tuple) else pair
@@ -1366,8 +1373,11 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
             )
 
             history = list(self.memory.content)  # [(msg, marks), ...]
-            last_pair = history[-1] if history else None
-            last_msg = last_pair[0] if last_pair else None
+            last_msg = None
+            if history:
+                last_pair = history[-1]
+                if isinstance(last_pair, (list, tuple)) and last_pair:
+                    last_msg = last_pair[0]
 
             is_empty_placeholder = (
                 last_msg is not None

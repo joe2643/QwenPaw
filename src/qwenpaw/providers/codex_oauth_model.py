@@ -253,7 +253,8 @@ class CodexOAuthChatModel(OpenAIChatModel):
                 _input_items = len(responses_body.get("input") or [])
                 logger.info(
                     "Codex POST body=%d KB, input items=%d",
-                    _body_bytes // 1024, _input_items,
+                    _body_bytes // 1024,
+                    _input_items,
                 )
             except Exception:
                 pass
@@ -302,14 +303,12 @@ class CodexOAuthChatModel(OpenAIChatModel):
                             # backend.  Back off and retry without
                             # mutating the request.
                             if (
-                                upstream.status_code
-                                in _TRANSIENT_RETRY_STATUS
+                                upstream.status_code in _TRANSIENT_RETRY_STATUS
                                 and transient_attempts_left > 0
                             ):
                                 transient_attempts_left -= 1
-                                delay = (
-                                    _TRANSIENT_RETRY_BASE_DELAY_S
-                                    * (2 ** transient_attempt_idx)
+                                delay = _TRANSIENT_RETRY_BASE_DELAY_S * (
+                                    2**transient_attempt_idx
                                 )
                                 transient_attempt_idx += 1
                                 logger.warning(
@@ -322,6 +321,7 @@ class CodexOAuthChatModel(OpenAIChatModel):
                                     transient_attempts_left,
                                 )
                                 import asyncio as _asyncio
+
                                 await _asyncio.sleep(delay)
                                 state = StreamState(
                                     model=responses_body["model"],
@@ -467,9 +467,8 @@ class _CodexOAuthAsyncStream:
                     and self._transient_attempts_left > 0
                 ):
                     self._transient_attempts_left -= 1
-                    delay = (
-                        _TRANSIENT_RETRY_BASE_DELAY_S
-                        * (2 ** self._transient_attempt_idx)
+                    delay = _TRANSIENT_RETRY_BASE_DELAY_S * (
+                        2**self._transient_attempt_idx
                     )
                     self._transient_attempt_idx += 1
                     logger.warning(

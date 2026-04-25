@@ -397,34 +397,23 @@ async def translate_responses_events_to_chat_chunks(
 
         ev_type = ev.get("type", "")
 
-        # Text deltas — non-message items (reasoning summary)
-        # always drop.  Message items split by ``phase``:
-        #   - ``commentary`` (Codex/gpt-5.x scratch preamble like
-        #     "Need view_video maybe...") emits as
-        #     ``reasoning_content`` — agentscope reads that into
-        #     a ``ThinkingBlock`` which the runner adapter turns
-        #     into a ``MessageType.REASONING`` event, which the
-        #     channel layer already drops from user-facing send
-        #     while the Console UI still renders it in the
-        #     thinking pane.
-        #   - ``final_answer`` (or missing — older models)
-        #     emits as ``content`` and reaches the channel as
-        #     before.
-        # Result: scratch never leaks to chat surfaces but UI
-        # operators retain full visibility into the model's
-        # internal reasoning.  Reference: OpenClaw's metadata-
-        # based phase routing.
+        # Text deltas — drop only when the active item is a non-
+        # message type (e.g. ``reasoning`` summary).  Message
+        # items in BOTH phases (``commentary`` + ``final_answer``)
+        # forward as regular content because that's how the user
+        # actually wants to see the model talking — polite acks
+        # ("OK, let me look") are commentary in ChatGPT's
+        # classification but are real user-visible text in
+        # OpenClaw's reference implementation, and silently
+        # dropping them feels worse than the occasional scratch
+        # fragment leaking through.  Reference: OpenClaw's
+        # ``openai-ws-stream.ts`` forwards every output_text
+        # delta unconditionally; phase is metadata only.
         if ev_type == "response.output_text.delta":
             if state.active_item_type not in (None, "message"):
                 continue
             delta_text = ev.get("delta", "") or ""
-            if not delta_text:
-                continue
-            if state.active_item_phase == "commentary":
-                yield _chat_chunk(
-                    state, {"reasoning_content": delta_text},
-                )
-            else:
+            if delta_text:
                 yield _chat_chunk(state, {"content": delta_text})
             continue
 
@@ -435,11 +424,12 @@ async def translate_responses_events_to_chat_chunks(
             state.active_item_type = item_type
             # ChatGPT Responses API tags message items with
             # ``phase`` ("commentary" or "final_answer") on the
-            # output_item itself.  Capture so the text-delta
-            # filter above can route by it.  Default to None
-            # for non-message items / models that don't expose
-            # the field.
-            state.active_item_phase = item.get("phase") if item_type == "message" else None
+            # output_item itself.  We retain the value on the
+            # state purely for diagnostics — text routing no
+            # longer keys off it (see output_text.delta comment).
+            state.active_item_phase = (
+                item.get("phase") if item_type == "message" else None
+            )
             if item_type == "function_call":
                 idx = len(state.tool_calls)
                 item_id = item.get("id", "")
@@ -553,14 +543,12 @@ async def collect_as_chat_completion(
 
         t = ev.get("type", "")
 
-        # Same item / phase gates as the streaming path — skip
-        # text deltas from non-message items (reasoning summary)
-        # AND from message items in ``commentary`` phase (Codex
-        # scratch preamble).
+        # Same item gate as the streaming path — only drop text
+        # from non-message items (reasoning summary).  Both
+        # commentary and final_answer phases forward as regular
+        # content (see streaming-path comment for rationale).
         if t == "response.output_text.delta":
             if state.active_item_type not in (None, "message"):
-                continue
-            if state.active_item_phase == "commentary":
                 continue
             content_parts.append(ev.get("delta", "") or "")
             continue

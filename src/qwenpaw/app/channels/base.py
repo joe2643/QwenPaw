@@ -520,20 +520,17 @@ class BaseChannel(ABC):
             # users want them.
             from ..agent_context import get_current_agent_id
             from ...config.config import load_agent_config
+
             try:
                 agent_id = get_current_agent_id()
-                agent_cfg = (
-                    load_agent_config(agent_id) if agent_id else None
-                )
+                agent_cfg = load_agent_config(agent_id) if agent_id else None
                 active = (
                     getattr(agent_cfg, "active_model", None)
                     if agent_cfg
                     else None
                 )
-                provider = (
-                    getattr(active, "provider_id", "") or ""
-                ).lower()
-                buffer_preamble = (provider == "codex-oauth")
+                provider = (getattr(active, "provider_id", "") or "").lower()
+                buffer_preamble = provider == "codex-oauth"
             except Exception:
                 buffer_preamble = False
 
@@ -545,7 +542,10 @@ class BaseChannel(ABC):
                     pend_event, pend_meta = pending_message_send
                     pending_message_send = None
                     await self.on_event_message_completed(
-                        request, to_handle, pend_event, pend_meta,
+                        request,
+                        to_handle,
+                        pend_event,
+                        pend_meta,
                     )
 
             async for event in process_iterator:
@@ -613,7 +613,8 @@ class BaseChannel(ABC):
                         logger.info(
                             "channel: dropped codex-oauth preamble text "
                             "before %s/%s",
-                            obj, msg_type,
+                            obj,
+                            msg_type,
                         )
                         pending_message_send = None
 

@@ -169,10 +169,14 @@ async def get_chat(
     # ``(session_id, user_id)`` (same scheme as session.json) so the
     # chat→session mapping the manager already does is enough.
     workspace_dir = getattr(workspace, "workspace_dir", None) or getattr(
-        workspace, "_workspace_dir", None,
+        workspace,
+        "_workspace_dir",
+        None,
     )
     log_messages = _read_chat_log_messages(
-        workspace_dir, chat_spec.session_id, chat_spec.user_id,
+        workspace_dir,
+        chat_spec.session_id,
+        chat_spec.user_id,
     )
     if log_messages is not None:
         return ChatHistory(messages=log_messages, status=status)

@@ -835,20 +835,22 @@ class TestCollectAsChatCompletion:
             await collect_as_chat_completion(upstream, state)
 
 
-class TestPhaseBasedCommentaryDrop:
+class TestPhaseAgnosticTextForwarding:
     """ChatGPT Responses API tags assistant message items with
     ``phase``: ``commentary`` for scratch preamble, ``final_answer``
-    for the user-facing reply.  Both share the same
-    ``response.output_text.delta`` event stream — only the parent
-    ``output_item.added.item.phase`` distinguishes them.
-    Reference: OpenClaw's metadata-based detection
-    (``OpenAIResponsesAssistantPhase`` in their codebase).
+    for the user-facing reply.  We forward BOTH phases as regular
+    content because that's how OpenClaw's reference implementation
+    treats them — phase is metadata for replay fidelity, not a
+    routing gate.  Polite acks like "OK, let me look" are tagged
+    ``commentary`` by ChatGPT but are real user-visible text in
+    OpenClaw.  Dropping them silently feels worse than the rare
+    scratch fragment leaking through.
     """
 
     @pytest.mark.asyncio
-    async def test_commentary_phase_text_dropped_in_stream(self):
-        """Commentary-phase deltas (Codex scratch like 'Need view_video')
-        must NOT reach the chat-completion content."""
+    async def test_commentary_phase_text_forwarded_in_stream(self):
+        """Commentary-phase deltas reach the chat-completion content
+        the same as final_answer (matches OpenClaw behavior)."""
         state = StreamState(model="gpt-5.5")
         upstream = _FakeUpstream([
             _sse({
@@ -860,9 +862,9 @@ class TestPhaseBasedCommentaryDrop:
                 },
             }),
             _sse({"type": "response.output_text.delta",
-                  "delta": "Need view_video maybe"}),
+                  "delta": "OK, let me look"}),
             _sse({"type": "response.output_text.delta",
-                  "delta": " returns note?"}),
+                  "delta": " at that."}),
             _sse({"type": "response.output_item.done"}),
             _sse({
                 "type": "response.output_item.added",
@@ -887,13 +889,11 @@ class TestPhaseBasedCommentaryDrop:
             c["choices"][0]["delta"].get("content", "")
             for c in chunks
         )
-        # Only the final_answer text reaches the channel.
-        assert text == "Hello user!"
-        assert "Need view_video" not in text
+        assert text == "OK, let me look at that.Hello user!"
 
     @pytest.mark.asyncio
     async def test_final_answer_passes_through(self):
-        """Sanity: final_answer phase text is forwarded as before."""
+        """Sanity: final_answer phase text is forwarded."""
         state = StreamState(model="gpt-5.5")
         upstream = _FakeUpstream([
             _sse({
@@ -924,10 +924,7 @@ class TestPhaseBasedCommentaryDrop:
     @pytest.mark.asyncio
     async def test_missing_phase_treated_as_final_answer(self):
         """Backwards compat: when the older API doesn't expose
-        ``phase`` on message items, default behaviour is to
-        forward the text (assume final_answer).  Prevents
-        regression for non-Codex providers that share this
-        translator and never set the field."""
+        ``phase`` on message items, the text still forwards."""
         state = StreamState(model="gpt-5.4")
         upstream = _FakeUpstream([
             _sse({
@@ -952,8 +949,8 @@ class TestPhaseBasedCommentaryDrop:
         assert text == "ok"
 
     @pytest.mark.asyncio
-    async def test_commentary_drop_in_collect(self):
-        """Same gate works on the non-streaming drain path."""
+    async def test_both_phases_forwarded_in_collect(self):
+        """Same forwarding works on the non-streaming drain path."""
         state = StreamState(model="gpt-5.5")
         upstream = _FakeUpstream([
             _sse({
@@ -965,7 +962,7 @@ class TestPhaseBasedCommentaryDrop:
                 },
             }),
             _sse({"type": "response.output_text.delta",
-                  "delta": "scratch text"}),
+                  "delta": "ack "}),
             _sse({"type": "response.output_item.done"}),
             _sse({
                 "type": "response.output_item.added",
@@ -982,4 +979,4 @@ class TestPhaseBasedCommentaryDrop:
                   "response": {"output": []}}),
         ])
         body = await collect_as_chat_completion(upstream, state)
-        assert body["choices"][0]["message"]["content"] == "user-facing"
+        assert body["choices"][0]["message"]["content"] == "ack user-facing"

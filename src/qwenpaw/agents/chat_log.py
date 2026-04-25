@@ -113,8 +113,13 @@ def chat_log_path(
 ) -> Path:
     """Resolve the JSONL path for (session_id, user_id) under
     ``<workspace_dir>/chats/``."""
-    return Path(workspace_dir) / LOG_SUBDIR / chat_log_filename(
-        session_id, user_id,
+    return (
+        Path(workspace_dir)
+        / LOG_SUBDIR
+        / chat_log_filename(
+            session_id,
+            user_id,
+        )
     )
 
 
@@ -400,7 +405,9 @@ def read_log(
     except OSError as e:
         logger.warning(
             "chat_log: read failed for session=%s user=%s: %s",
-            session_id, user_id, e,
+            session_id,
+            user_id,
+            e,
         )
     return out
 
@@ -439,7 +446,8 @@ def collect_unpersisted(
         try:
             mtime = os.path.getmtime(str(session_json_path))
             watermark_iso = datetime.fromtimestamp(
-                mtime, tz=timezone.utc,
+                mtime,
+                tz=timezone.utc,
             ).isoformat()
         except OSError:
             watermark_iso = None
@@ -468,7 +476,8 @@ def collect_unpersisted(
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.debug(
                 "chat_log: skipping malformed entry for session=%s: %s",
-                session_id, e,
+                session_id,
+                e,
             )
             continue
 

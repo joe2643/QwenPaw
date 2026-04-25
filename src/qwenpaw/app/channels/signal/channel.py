@@ -822,7 +822,8 @@ class SignalChannel(BaseChannel):
                         ts = h.get("ts", "")
                         ts_formatted = (
                             _format_local_timestamp(ts, style="long")
-                            if ts else ""
+                            if ts
+                            else ""
                         )
                         ts_prefix = (
                             f"[{ts_formatted}] "
@@ -1701,10 +1702,8 @@ class SignalChannel(BaseChannel):
                     from agentscope_runtime.engine.schemas.agent_schemas import (  # noqa: E501
                         MessageType,
                     )
-                    if (
-                        getattr(event, "type", None)
-                        == MessageType.REASONING
-                    ):
+
+                    if getattr(event, "type", None) == MessageType.REASONING:
                         continue
                     logger.info(
                         "signal: message_completed, sending to %s",
