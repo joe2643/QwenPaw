@@ -540,7 +540,7 @@ class BaseChannel(ABC):
                     buffer_preamble = (provider == "codex-oauth")
             except Exception:
                 buffer_preamble = False
-            logger.debug(
+            logger.info(
                 "channel _stream_with_tracker: buffer_preamble=%s "
                 "(workspace_agent=%s)",
                 buffer_preamble,

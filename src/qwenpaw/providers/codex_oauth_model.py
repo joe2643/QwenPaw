@@ -69,6 +69,11 @@ _MAX_STRIP_RETRIES: int = 5
 # number of times with exponential backoff before surfacing the
 # error to the agent.  Bounded so a sustained outage still
 # fails fast instead of holding the user's turn open for minutes.
+#
+# 507 ("Insufficient Storage" / "exceeded request buffer limit")
+# is deliberately NOT in this set — retrying the same too-big
+# body re-hits the same limit.  Surface immediately so the
+# caller / user can shorten the conversation or compact context.
 _TRANSIENT_RETRY_STATUS = {502, 503, 504}
 _MAX_TRANSIENT_RETRIES: int = 3
 _TRANSIENT_RETRY_BASE_DELAY_S: float = 0.5  # 0.5, 1.0, 2.0 backoff
@@ -238,6 +243,20 @@ class CodexOAuthChatModel(OpenAIChatModel):
                     "request before POST",
                     pruned,
                 )
+            # Log request size up-front so a 507 ("exceeded request
+            # buffer limit") later in the call has a paired before-
+            # the-fact size we can correlate with — saves the
+            # operator from having to rebuild the body to see why
+            # ChatGPT bounced it.
+            try:
+                _body_bytes = len(json.dumps(responses_body))
+                _input_items = len(responses_body.get("input") or [])
+                logger.info(
+                    "Codex POST body=%d KB, input items=%d",
+                    _body_bytes // 1024, _input_items,
+                )
+            except Exception:
+                pass
             client_wants_stream = bool(call_kwargs.get("stream", False))
             state = StreamState(model=responses_body["model"])
 
