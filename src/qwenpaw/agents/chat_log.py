@@ -118,21 +118,170 @@ def chat_log_path(
     )
 
 
+_MEDIA_BLOCK_TYPES = ("image", "video", "audio", "file")
+
+
+def _signed_url_token(url: str) -> Optional[str]:
+    """Extract the ``t=`` opaque token from a media-server signed URL,
+    or ``None`` for non-signed URLs.
+
+    Format mirrors :meth:`MediaServer.sign_url`'s return shape:
+    ``{domain}/media?t={token}&exp={expires}&sig={sig}``.  Anything
+    else is left alone — we only want to reverse-look-up tokens we
+    minted.
+    """
+    if not url or "?t=" not in url and "&t=" not in url:
+        return None
+    if "/media?" not in url and "/media&" not in url:
+        return None
+    try:
+        from urllib.parse import urlparse, parse_qs
+
+        qs = parse_qs(urlparse(url).query)
+        tok = qs.get("t", [None])[0]
+        return tok or None
+    except Exception:  # pylint: disable=broad-exception-caught
+        return None
+
+
+def _media_token_store_path() -> Path:
+    """Resolve the media-server token-store JSON path.
+
+    Mirrors ``MediaServer.__init__``'s default
+    ``WORKING_DIR/media_token_store.json``.  Imported lazily so this
+    module can be used in tests without a CoPaw config loaded.
+    """
+    from ..constant import WORKING_DIR
+
+    return Path(WORKING_DIR).expanduser() / "media_token_store.json"
+
+
+def _lookup_signed_token(token: str) -> Optional[str]:
+    """Reverse-lookup a media-server token to its local file path.
+
+    Reads ``WORKING_DIR/media_token_store.json`` (the same file
+    ``MediaServer`` persists tokens to on every ``/sign`` call).
+    Returns the local path when the token is known and the file
+    still exists; ``None`` otherwise.
+
+    Read-only — chat_log never writes the token store.  Best-effort:
+    a corrupted / missing JSON returns ``None`` so callers fall back
+    to the original URL.
+    """
+    if not token:
+        return None
+    try:
+        store_path = _media_token_store_path()
+        if not store_path.exists():
+            return None
+        with store_path.open("r", encoding="utf-8") as f:
+            store = json.load(f)
+        entry = store.get(token)
+        if not entry:
+            return None
+        # Entry shape: [path, expires_ts]
+        path = entry[0] if isinstance(entry, (list, tuple)) else entry
+        if not isinstance(path, str):
+            return None
+        # Verify the file still exists — a stale token pointing at a
+        # cleaned-up file is worse than no file_path at all.
+        if not Path(path).is_file():
+            return None
+        return path
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+
+
+def _file_uri_to_path(url: str) -> Optional[str]:
+    """Decode ``file:///<path>`` into the bare local path.  Returns
+    ``None`` for non-``file://`` URLs."""
+    if not url or not url.startswith("file://"):
+        return None
+    try:
+        from urllib.request import url2pathname
+        from urllib.parse import urlparse
+
+        return url2pathname(urlparse(url).path)
+    except Exception:  # pylint: disable=broad-exception-caught
+        return None
+
+
+def _enrich_block_with_file_path(block: dict[str, Any]) -> None:
+    """In-place: ensure media blocks carry ``source.file_path`` so the
+    log survives signed-URL TTL expiry.
+
+    Three sources of truth, in order:
+
+    1. ``source.file_path`` already set — skip (someone upstream did it).
+    2. ``source.url`` is a ``file://`` URI — decode the path verbatim.
+    3. ``source.url`` is a media-server signed URL — pull the ``t``
+       token, look it up against the on-disk token store.
+
+    Anything else (third-party HTTPS URL, raw base64 with no on-disk
+    file, malformed source) leaves the block untouched.  The log still
+    contains the original ``source`` so a UI consumer can display the
+    image; only the **recoverable on-restart** guarantee is what
+    file_path adds.
+    """
+    if not isinstance(block, dict):
+        return
+    if block.get("type") not in _MEDIA_BLOCK_TYPES:
+        return
+    src = block.get("source")
+    if not isinstance(src, dict):
+        return
+    if src.get("file_path"):
+        return
+
+    url = src.get("url") or ""
+    if not isinstance(url, str):
+        return
+
+    fp = _file_uri_to_path(url)
+    if fp is None:
+        token = _signed_url_token(url)
+        if token:
+            fp = _lookup_signed_token(token)
+    if fp:
+        src["file_path"] = fp
+
+
+def _enrich_msg_with_file_paths(msg_data: dict[str, Any]) -> None:
+    """Apply :func:`_enrich_block_with_file_path` to every block in a
+    serialised Msg dict.  No-op for messages with non-list content
+    (plain string body)."""
+    content = msg_data.get("content")
+    if not isinstance(content, list):
+        return
+    for block in content:
+        _enrich_block_with_file_path(block)
+
+
 def _serialise_msg(msg: Msg) -> dict[str, Any]:
     """Serialise a Msg to a dict the log can store as one JSON line.
 
     Prefers :meth:`Msg.to_dict` when available (agentscope ≥ 0.x);
     falls back to a manual minimal projection for stand-in objects in
     tests.
+
+    Post-processes media blocks via :func:`_enrich_msg_with_file_paths`
+    so signed-URL-only blocks pick up a sibling ``source.file_path``
+    pointing at the original local file.  This way a log entry stays
+    recoverable past the signed URL's 24-hour TTL — restart-time
+    reconcile (or UI replay) can fall back to the file path when the
+    URL is dead.
     """
     if hasattr(msg, "to_dict") and callable(msg.to_dict):
-        return msg.to_dict()
-    return {
-        "id": getattr(msg, "id", None),
-        "name": getattr(msg, "name", None),
-        "role": getattr(msg, "role", None),
-        "content": getattr(msg, "content", None),
-    }
+        data = msg.to_dict()
+    else:
+        data = {
+            "id": getattr(msg, "id", None),
+            "name": getattr(msg, "name", None),
+            "role": getattr(msg, "role", None),
+            "content": getattr(msg, "content", None),
+        }
+    _enrich_msg_with_file_paths(data)
+    return data
 
 
 def _deserialise_msg(data: dict[str, Any]) -> Msg:

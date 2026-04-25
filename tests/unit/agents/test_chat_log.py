@@ -217,6 +217,173 @@ class TestCollectUnpersisted:
         assert texts == ["real"]
 
 
+class TestMediaFilePathEnrichment:
+    """When a block already has ``source.file_path``, leave it.  When
+    only a ``file://`` URI or a media-server signed URL is present,
+    enrich so log readers can recover the on-disk file even after the
+    signed URL's TTL expires."""
+
+    def _img_msg(self, source: dict) -> Msg:
+        m = Msg(
+            name="user",
+            content=[{"type": "image", "source": source}],
+            role="user",
+        )
+        return m
+
+    def test_file_uri_source_gains_file_path(
+        self, workspace: Path, tmp_path: Path,
+    ):
+        # Create a real file so the URI-decode path has something
+        # plausible to point at.  We don't actually require the file
+        # to exist for ``file://`` decoding — that's why this test
+        # uses tmp_path rather than a fixture.
+        local = tmp_path / "img.png"
+        local.write_bytes(b"\x89PNG")
+
+        append_to_log(
+            workspace, "media-fileuri",
+            self._img_msg({"type": "url", "url": local.as_uri()}),
+        )
+        entries = read_log(workspace, "media-fileuri")
+        block = entries[0]["msg"]["content"][0]
+        assert block["source"]["file_path"] == str(local)
+        # Original URL still preserved — UI may want both
+        assert block["source"]["url"] == local.as_uri()
+
+    def test_existing_file_path_is_preserved(self, workspace: Path):
+        append_to_log(
+            workspace, "media-explicit",
+            self._img_msg({
+                "type": "url",
+                "url": "https://example.com/foo.png",
+                "file_path": "/explicitly/set/by/caller.png",
+            }),
+        )
+        block = read_log(workspace, "media-explicit")[0]["msg"]["content"][0]
+        assert block["source"]["file_path"] == "/explicitly/set/by/caller.png"
+
+    def test_signed_url_resolved_via_token_store(
+        self, workspace: Path, tmp_path: Path, monkeypatch,
+    ):
+        # Plant a token-store JSON the resolver will read.
+        target = tmp_path / "actual_image.jpg"
+        target.write_bytes(b"\xff\xd8\xff")
+        store = tmp_path / "media_token_store.json"
+        store.write_text(json.dumps({
+            "abc-token-123": [str(target), 9999999999],
+            "stale-token": ["/path/that/does/not/exist", 9999999999],
+        }))
+
+        # Point _media_token_store_path at our test file.
+        from qwenpaw.agents import chat_log as mod
+        monkeypatch.setattr(mod, "_media_token_store_path", lambda: store)
+
+        # Block whose URL carries the recognised token gets enriched.
+        append_to_log(
+            workspace, "media-signed-known",
+            self._img_msg({
+                "type": "url",
+                "url": (
+                    "https://media.joe2643.work/media?"
+                    "t=abc-token-123&exp=9999999999&sig=deadbeef"
+                ),
+            }),
+        )
+        block = read_log(
+            workspace, "media-signed-known",
+        )[0]["msg"]["content"][0]
+        assert block["source"]["file_path"] == str(target)
+
+        # Stale token (file gone) → no file_path injected; URL kept.
+        append_to_log(
+            workspace, "media-signed-stale",
+            self._img_msg({
+                "type": "url",
+                "url": (
+                    "https://media.joe2643.work/media?"
+                    "t=stale-token&exp=9999999999&sig=ff"
+                ),
+            }),
+        )
+        stale = read_log(
+            workspace, "media-signed-stale",
+        )[0]["msg"]["content"][0]
+        assert "file_path" not in stale["source"]
+
+    def test_unknown_signed_token_leaves_block_alone(
+        self, workspace: Path, tmp_path: Path, monkeypatch,
+    ):
+        store = tmp_path / "media_token_store.json"
+        store.write_text("{}")
+        from qwenpaw.agents import chat_log as mod
+        monkeypatch.setattr(mod, "_media_token_store_path", lambda: store)
+
+        append_to_log(
+            workspace, "media-signed-unknown",
+            self._img_msg({
+                "type": "url",
+                "url": (
+                    "https://media.joe2643.work/media?"
+                    "t=never-issued&exp=1&sig=x"
+                ),
+            }),
+        )
+        block = read_log(
+            workspace, "media-signed-unknown",
+        )[0]["msg"]["content"][0]
+        assert "file_path" not in block["source"]
+
+    def test_third_party_url_left_alone(self, workspace: Path):
+        append_to_log(
+            workspace, "media-thirdparty",
+            self._img_msg({
+                "type": "url",
+                "url": "https://i.imgur.com/abcdef.png",
+            }),
+        )
+        block = read_log(
+            workspace, "media-thirdparty",
+        )[0]["msg"]["content"][0]
+        # No file_path because we have no way to recover the file
+        # without downloading.  Keeping the URL alone is correct
+        # behaviour.
+        assert "file_path" not in block["source"]
+
+    def test_base64_source_left_alone(self, workspace: Path):
+        # Base64 already self-contained — no need to add file_path.
+        append_to_log(
+            workspace, "media-b64",
+            self._img_msg({
+                "type": "base64",
+                "media_type": "image/png",
+                "data": "iVBORw0KGgoAAAA",
+            }),
+        )
+        block = read_log(workspace, "media-b64")[0]["msg"]["content"][0]
+        assert "file_path" not in block["source"]
+
+    def test_non_media_blocks_unaffected(self, workspace: Path):
+        m = Msg(
+            name="user",
+            content=[
+                {"type": "text", "text": "hi"},
+                {
+                    "type": "tool_use",
+                    "id": "t1",
+                    "name": "x",
+                    "input": {},
+                },
+            ],
+            role="user",
+        )
+        append_to_log(workspace, "no-media", m)
+        blocks = read_log(workspace, "no-media")[0]["msg"]["content"]
+        assert blocks[0] == {"type": "text", "text": "hi"}
+        # tool_use untouched
+        assert "file_path" not in blocks[1]
+
+
 class TestPathLayout:
     def test_path_under_chats_subdir(self, workspace: Path):
         p = chat_log_path(workspace, "abc-123")
