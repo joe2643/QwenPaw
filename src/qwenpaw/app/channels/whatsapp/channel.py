@@ -655,9 +655,15 @@ class WhatsAppChannel(BaseChannel):
         types rather than attempting (and failing) to download.
         """
         # contextInfo lives on extendedTextMessage, imageMessage, etc.
+        # ``albumMessage`` is included so that replies whose quoted
+        # target is itself a multi-image / multi-video album still
+        # surface a reply block (the album's contextInfo points at
+        # the quoted message; the album body itself is just an
+        # announcement of how many media items will arrive next).
         ctx = None
         for field in ("extendedTextMessage", "imageMessage", "videoMessage",
-                       "audioMessage", "documentMessage", "stickerMessage"):
+                       "audioMessage", "documentMessage", "stickerMessage",
+                       "albumMessage"):
             if msg.HasField(field):
                 sub = getattr(msg, field)
                 if hasattr(sub, "contextInfo"):
@@ -781,6 +787,29 @@ class WhatsAppChannel(BaseChannel):
         if quoted_msg.HasField("stickerMessage"):
             st_path = await _try_download("webp")
             media_types.append(f"sticker: {st_path}" if st_path else "sticker")
+
+        # AlbumMessage: WhatsApp's multi-image / multi-video container.
+        # The album body itself doesn't carry the actual media — it
+        # just announces ``expectedImageCount`` / ``expectedVideoCount``
+        # and the individual items arrive as separate messages.  When
+        # the user replies to an album we can't download the items
+        # from ``quoted_msg`` (the keys live on the children, not the
+        # album), but we still surface a labelled placeholder so the
+        # agent knows the user is referring to a multi-media bundle
+        # rather than seeing an empty reply block.
+        if quoted_msg.HasField("albumMessage"):
+            ai = getattr(quoted_msg.albumMessage, "expectedImageCount", 0)
+            av = getattr(quoted_msg.albumMessage, "expectedVideoCount", 0)
+            counts = []
+            if ai:
+                counts.append(f"{ai} image{'s' if ai != 1 else ''}")
+            if av:
+                counts.append(f"{av} video{'s' if av != 1 else ''}")
+            media_types.append(
+                f"album with {' + '.join(counts)}"
+                if counts
+                else "album",
+            )
 
         if not quote_body and not media_types:
             return []

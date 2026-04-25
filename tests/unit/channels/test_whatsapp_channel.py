@@ -463,6 +463,99 @@ class TestExtractQuoteContent:
         parts = await ch._extract_quote_content(MagicMock(), msg)
         assert parts == []
 
+    async def test_quote_with_album_describes_counts(self):
+        """Replying to a multi-image album: ``albumMessage`` is just
+        a count announcement (the actual images arrive as separate
+        messages), so the quote block must surface the labelled
+        placeholder ``"album with N images + M videos"`` rather
+        than returning an empty parts list — without this fix the
+        agent loses any signal that the user is referring to a
+        multi-media bundle.
+        """
+        ch = _make_channel()
+        ctx = MagicMock()
+        ctx.HasField = lambda name: name == "quotedMessage"
+        ctx.participant = "alb_sender@s.whatsapp.net"
+        ctx.stanzaId = "stanza_album"
+
+        album = MagicMock()
+        album.expectedImageCount = 3
+        album.expectedVideoCount = 1
+
+        quoted = MagicMock()
+        quoted.conversation = ""
+        quoted.HasField = lambda name: name == "albumMessage"
+        quoted.albumMessage = album
+        ctx.quotedMessage = quoted
+
+        etm = MagicMock()
+        etm.text = "look at these"
+        etm.contextInfo = ctx
+        msg = _make_proto_message(extendedTextMessage=etm)
+
+        parts = await ch._extract_quote_content(MagicMock(), msg)
+        assert len(parts) >= 1
+        text = parts[0].text
+        assert "UNTRUSTED reply-to" in text
+        assert "Media: album with 3 images + 1 video" in text
+
+    async def test_quote_with_image_only_album(self):
+        """Album with images only (no videos) drops the video
+        clause from the placeholder."""
+        ch = _make_channel()
+        ctx = MagicMock()
+        ctx.HasField = lambda name: name == "quotedMessage"
+        ctx.participant = "alb_sender@s.whatsapp.net"
+        ctx.stanzaId = "stanza_album_img"
+
+        album = MagicMock()
+        album.expectedImageCount = 4
+        album.expectedVideoCount = 0
+
+        quoted = MagicMock()
+        quoted.conversation = ""
+        quoted.HasField = lambda name: name == "albumMessage"
+        quoted.albumMessage = album
+        ctx.quotedMessage = quoted
+
+        etm = MagicMock()
+        etm.text = ""
+        etm.contextInfo = ctx
+        msg = _make_proto_message(extendedTextMessage=etm)
+
+        parts = await ch._extract_quote_content(MagicMock(), msg)
+        text = parts[0].text
+        assert "Media: album with 4 images" in text
+        assert "video" not in text
+
+    async def test_inbound_album_message_finds_contextinfo(self):
+        """If the user's REPLY message is itself the album header,
+        the contextInfo lives on ``albumMessage`` — the field-
+        scanning loop in ``_extract_quote_content`` must include
+        ``albumMessage`` so the quote is still extracted.
+        """
+        ch = _make_channel()
+        ctx = MagicMock()
+        ctx.HasField = lambda name: name == "quotedMessage"
+        ctx.participant = "sender@s.whatsapp.net"
+        ctx.stanzaId = "stanza_album_inbound"
+
+        # Quoted message is a plain text — we just need to verify
+        # the loop reaches contextInfo via the album field.
+        quoted = MagicMock()
+        quoted.conversation = "earlier text"
+        quoted.HasField = lambda name: False
+        ctx.quotedMessage = quoted
+
+        album = MagicMock()
+        album.contextInfo = ctx
+        # Inbound is an album header (no extendedTextMessage).
+        msg = _make_proto_message(albumMessage=album)
+
+        parts = await ch._extract_quote_content(MagicMock(), msg)
+        assert len(parts) >= 1
+        assert "earlier text" in parts[0].text
+
     async def test_quote_participant_lid_resolution(self):
         ch = _make_channel()
         # Pre-populate LID cache
