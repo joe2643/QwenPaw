@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Load image or video files into the LLM context for analysis."""
 
+import asyncio
 import logging
 import mimetypes
 import os
@@ -13,6 +14,23 @@ from agentscope.message import ImageBlock, TextBlock, VideoBlock
 from agentscope.tool import ToolResponse
 
 logger = logging.getLogger(__name__)
+
+
+class _MimoUnsupportedFormatError(Exception):
+    """Mimo (and likely other Qwen-family endpoints) returned a 400
+    saying the multimodal payload is unprocessable.  Two flavours
+    seen in production:
+
+    - ``"Multimodal data is corrupted or cannot be processed."``
+      → codec the decoder can't handle (e.g. AV1).
+    - ``"only mp4/wmv/mov/avi are supported"``
+      → container the endpoint refuses (e.g. .webm).
+
+    Both are recoverable by transcoding to H.264-in-MP4 and
+    retrying once.  Distinct from a generic non-200 so the caller
+    can decide whether the retry is worth it; other 400s fall
+    through to the existing ``return None`` placeholder path.
+    """
 
 _IMAGE_EXTENSIONS = {
     ".png",
@@ -395,6 +413,87 @@ def _is_qwen_family(provider_id: str) -> bool:
     return any(p.startswith(x) for x in _QWEN_FAMILY_PREFIXES)
 
 
+# Markers seen in Mimo's HTTP 400 body when the upload is rejected
+# for codec / container reasons.  Both flavours correspond to
+# situations a transcode-to-H264-in-MP4 pass can resolve, so we
+# treat them as the same "try transcoding once" signal.
+_MIMO_FORMAT_REJECTION_MARKERS = (
+    "Multimodal data is corrupted",   # AV1 etc. — late decode failure
+    "only mp4/wmv/mov/avi",           # webm container — early reject
+    "invalid video format",
+)
+
+
+def _is_format_rejection(body_text: str) -> bool:
+    """Return True iff Mimo's 400 response body matches one of the
+    known codec/container rejection markers.  Other 400s (auth,
+    rate-limit, bad request shape) keep the existing behaviour
+    (return None, no retry)."""
+    text = body_text or ""
+    return any(m in text for m in _MIMO_FORMAT_REJECTION_MARKERS)
+
+
+async def _transcode_to_h264_mp4(src_path: str) -> str | None:
+    """Transcode ``src_path`` to H.264 + AAC inside an MP4 container,
+    640px wide (height auto), CRF 23 / veryfast.  Returns the new
+    path (sibling of ``src_path``) or ``None`` on any failure.
+
+    These knobs are the empirical sweet spot from the 2026-04-25
+    AV1-rejection benchmark: ~10s wall on the local machine for an
+    8-min 65 MB AV1 source, output ~63 MB H.264-in-MP4 that mimo
+    accepts and analyses end-to-end (vs ~2m49s for VP9-in-MP4 which
+    is also ~16% bigger and offers no decoder-coverage advantage).
+    """
+    if not src_path or not os.path.exists(src_path):
+        logger.warning(
+            "view_video: transcode source missing or unreadable: %s",
+            src_path,
+        )
+        return None
+    p = Path(src_path)
+    # Distinct suffix so we never overwrite the original; idempotent
+    # if the transcoded sibling already exists from a prior run.
+    out = p.with_name(p.stem + ".h264.mp4")
+    if out.exists() and out.stat().st_size > 0:
+        logger.debug(
+            "view_video: reusing existing transcode %s", out,
+        )
+        return str(out)
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", str(p),
+        "-vf", "scale=640:-2",
+        "-c:v", "libx264", "-crf", "23", "-preset", "veryfast",
+        "-c:a", "aac", "-b:a", "64k",
+        str(out),
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, err = await proc.communicate()
+    except FileNotFoundError:
+        logger.warning(
+            "view_video: ffmpeg binary not on PATH; cannot transcode",
+        )
+        return None
+    if proc.returncode != 0:
+        logger.warning(
+            "view_video: ffmpeg transcode failed (rc=%s): %s",
+            proc.returncode, (err or b"").decode("utf-8", errors="replace")[:300],
+        )
+        # Clean the half-written output so a future call can retry.
+        try:
+            if out.exists():
+                out.unlink()
+        except OSError:
+            pass
+        return None
+    return str(out)
+
+
 async def _build_fallback_video_messages(
     video_block: VideoBlock,
     prompt: str,
@@ -584,33 +683,49 @@ async def _describe_video_via_qwen_family_httpx(
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=30)) as hc:
             resp = await hc.post(url, json=body, headers=headers)
-        if resp.status_code != 200:
-            logger.warning(
-                "view_video: Qwen fallback HTTP %d: %s",
-                resp.status_code, resp.text[:400],
-            )
-            return None
-        j = resp.json()
-        choices = j.get("choices") or []
-        if not choices:
-            logger.warning(
-                "view_video: Qwen fallback response missing choices: %s",
-                str(j)[:400],
-            )
-            return None
-        msg = (choices[0] or {}).get("message") or {}
-        text = msg.get("content") or ""
-        result = str(text).strip() or None
-        logger.info(
-            "view_video: Qwen fallback returned %d chars (usage=%s)",
-            len(result or ""), j.get("usage"),
-        )
-        return result
     except Exception as e:
+        # Network-level failures aren't recoverable here.
         logger.warning(
             "view_video: Qwen fallback httpx call failed: %s", e,
         )
         return None
+
+    if resp.status_code != 200:
+        logger.warning(
+            "view_video: Qwen fallback HTTP %d: %s",
+            resp.status_code, resp.text[:400],
+        )
+        # Codec / container rejections are recoverable by
+        # transcoding; raise a typed exception so the orchestrator
+        # can detect this case and retry once with H.264.  Other
+        # non-200s keep the existing ``return None`` semantics.
+        if resp.status_code == 400 and _is_format_rejection(resp.text):
+            raise _MimoUnsupportedFormatError(resp.text[:400])
+        return None
+
+    try:
+        j = resp.json()
+    except Exception as e:
+        logger.warning(
+            "view_video: Qwen fallback returned non-JSON body: %s", e,
+        )
+        return None
+
+    choices = j.get("choices") or []
+    if not choices:
+        logger.warning(
+            "view_video: Qwen fallback response missing choices: %s",
+            str(j)[:400],
+        )
+        return None
+    msg = (choices[0] or {}).get("message") or {}
+    text = msg.get("content") or ""
+    result = str(text).strip() or None
+    logger.info(
+        "view_video: Qwen fallback returned %d chars (usage=%s)",
+        len(result or ""), j.get("usage"),
+    )
+    return result
 
 
 async def _describe_video_via_fallback(
@@ -645,9 +760,59 @@ async def _describe_video_via_fallback(
         # provider still goes through agentscope so its native
         # formatter (Gemini etc.) handles translation.
         if _is_qwen_family(provider_id):
-            return await _describe_video_via_qwen_family_httpx(
-                messages, chat_model, model_id,
-            )
+            try:
+                return await _describe_video_via_qwen_family_httpx(
+                    messages, chat_model, model_id,
+                )
+            except _MimoUnsupportedFormatError as fmt_err:
+                # Mimo rejected the codec/container.  Transcode the
+                # local file to H.264 + AAC inside MP4 (the safe
+                # superset across mimo/qwen-vl) and try once more.
+                # We deliberately retry only once — a second
+                # rejection means something else is wrong and the
+                # user is better served by the placeholder hint
+                # than another minute of transcode time.
+                local_src = (video_block.get("source") or {}).get("url") or ""
+                if not local_src or local_src.startswith(
+                    ("http://", "https://", "data:"),
+                ):
+                    logger.warning(
+                        "view_video: %s rejected format (%s) and source "
+                        "is remote (%s) — cannot transcode; giving up",
+                        model_id, str(fmt_err)[:120], local_src[:80],
+                    )
+                    return None
+                logger.info(
+                    "view_video: %s rejected format (%s); transcoding "
+                    "%s → H.264-in-MP4 and retrying once",
+                    model_id, str(fmt_err)[:120], local_src,
+                )
+                transcoded = await _transcode_to_h264_mp4(local_src)
+                if not transcoded:
+                    return None
+                retry_block = {
+                    **video_block,
+                    "source": {
+                        **(video_block.get("source") or {}),
+                        "url": transcoded,
+                    },
+                }
+                retry_messages = await _build_fallback_video_messages(
+                    retry_block, prompt, provider_id,
+                )
+                if retry_messages is None:
+                    return None
+                try:
+                    return await _describe_video_via_qwen_family_httpx(
+                        retry_messages, chat_model, model_id,
+                    )
+                except _MimoUnsupportedFormatError as second_err:
+                    logger.warning(
+                        "view_video: transcode retry also rejected by "
+                        "%s (%s); giving up",
+                        model_id, str(second_err)[:120],
+                    )
+                    return None
         response = await chat_model(messages)
         # Agentscope chat models can stream (AsyncGenerator) or return
         # a single ChatResponse depending on the ``stream`` init flag.

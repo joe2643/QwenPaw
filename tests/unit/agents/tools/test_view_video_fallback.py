@@ -538,3 +538,234 @@ async def test_non_qwen_family_unreachable_signer_preserves_path(
 
     video_block = fake.last_messages[0]["content"][0]
     assert video_block.get("source", {}).get("url") == str(tmp_video)
+
+
+# ---------------------------------------------------------------- #
+# Transcode-on-400 retry path                                      #
+# ---------------------------------------------------------------- #
+
+
+class TestFormatRejectionDetection:
+    def test_corrupted_marker_matches(self):
+        assert vm._is_format_rejection(
+            '{"error":{"message":"Multimodal data is corrupted or '
+            'cannot be processed."}}',
+        )
+
+    def test_only_mp4_marker_matches(self):
+        assert vm._is_format_rejection(
+            'invalid video format, only mp4/wmv/mov/avi are supported',
+        )
+
+    def test_other_400_does_not_match(self):
+        # Auth / rate-limit / shape errors must NOT trigger transcode.
+        assert not vm._is_format_rejection("rate limit exceeded")
+        assert not vm._is_format_rejection("invalid api key")
+        assert not vm._is_format_rejection("")
+
+
+class _SequencedFakeHttpxClient:
+    """Like _FakeHttpxClient but returns a different response on
+    each successive POST.  Used to simulate the
+    "first call rejects, second call succeeds after transcode" flow.
+    """
+
+    def __init__(self, responses: list["_FakeHttpxResponse"]) -> None:
+        self._responses = list(responses)
+        self.calls: list[dict] = []
+
+    async def __aenter__(self) -> "_SequencedFakeHttpxClient":
+        return self
+
+    async def __aexit__(self, *_exc) -> None:
+        return None
+
+    async def post(self, url: str, json: dict, headers: dict):
+        self.calls.append({"url": url, "json": json, "headers": headers})
+        if not self._responses:
+            raise RuntimeError("test ran out of canned responses")
+        return self._responses.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_qwen_400_corrupted_triggers_transcode_then_retry(
+    tmp_video: Path,
+) -> None:
+    """First mimo POST returns 400 'corrupted' — view_video should
+    transcode the local file to H.264-in-MP4, sign the new path,
+    and POST again.  Verifies the orchestration: 2 POSTs happen,
+    the second one carries a different signed URL, and the final
+    text is the one from the second response."""
+    fake_chat = _FakeChatModel()
+
+    # Two responses: 400 corrupted, then 200 with text.
+    rejection = _FakeHttpxResponse(
+        status_code=400,
+        body={"error": {"message": "Multimodal data is corrupted "
+                                    "or cannot be processed."}},
+    )
+    rejection.text = (
+        '{"error":{"message":"Multimodal data is corrupted '
+        'or cannot be processed."}}'
+    )
+    success = _FakeHttpxResponse(
+        status_code=200,
+        body={
+            "choices": [{
+                "message": {"content": "After transcode: a cat yawns."},
+            }],
+        },
+    )
+    fake_http = _SequencedFakeHttpxClient([rejection, success])
+
+    # Sign returns a sentinel URL; the second sign on the
+    # transcoded sibling returns a *different* URL so we can verify
+    # the retry POSTed against it.
+    sign_calls: list[str] = []
+
+    async def _fake_sign(path: str):
+        sign_calls.append(path)
+        return f"https://media.example/sig?p={Path(path).name}"
+
+    transcode_calls: list[str] = []
+
+    async def _fake_transcode(path: str) -> str | None:
+        transcode_calls.append(path)
+        # Return a sibling path; the file doesn't have to exist
+        # because resolve_media_url is mocked.
+        out = str(Path(path).with_name(Path(path).stem + ".h264.mp4"))
+        return out
+
+    with patch.object(vm, "_check_multimodal_support", return_value=False), \
+         patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
+         patch.object(
+             vm, "_resolve_fallback_video_model",
+             return_value=(fake_chat, "mimo", "mimo-v2.5"),
+         ), \
+         patch.object(vm, "_transcode_to_h264_mp4", _fake_transcode), \
+         patch("qwenpaw.app.channels.media_utils.resolve_media_url", _fake_sign), \
+         patch("httpx.AsyncClient", return_value=fake_http):
+        resp = await view_video(str(tmp_video))
+
+    # Two POSTs: the rejected one and the retry.
+    assert len(fake_http.calls) == 2, (
+        f"expected 2 mimo POSTs, got {len(fake_http.calls)}"
+    )
+    # Transcode fired exactly once with the local source.
+    assert transcode_calls == [str(tmp_video)]
+    # The second POST's video_url points at the *transcoded* file.
+    second_url = (
+        fake_http.calls[1]["json"]["messages"][0]["content"][0]
+        ["video_url"]["url"]
+    )
+    assert "h264.mp4" in second_url
+    # Final text comes from the successful retry, not the rejection.
+    text = "".join(
+        b.get("text", "") for b in resp.content if b.get("type") == "text"
+    )
+    assert "After transcode" in text
+
+
+@pytest.mark.asyncio
+async def test_describe_video_via_fallback_skips_transcode_for_remote_source():
+    """Direct unit test for ``_describe_video_via_fallback``: when
+    ``video_block.source.url`` is already a remote URL, the
+    transcode branch must be skipped (we have no local file to
+    feed to ffmpeg).  The format rejection surfaces as ``None``
+    so the caller substitutes the placeholder hint upstream."""
+    fake_chat = _FakeChatModel()
+    rejection = _FakeHttpxResponse(
+        status_code=400,
+        body={"error": {"message": "Multimodal data is corrupted"}},
+    )
+    rejection.text = (
+        '{"error":{"message":"Multimodal data is corrupted"}}'
+    )
+    fake_http = _SequencedFakeHttpxClient([rejection])
+    transcode_called = {"n": 0}
+
+    async def _fake_transcode(path: str):
+        transcode_called["n"] += 1
+        return None
+
+    async def _passthrough(path: str):
+        return path  # already a URL → no signing happens
+
+    remote_block = {
+        "type": "video",
+        "source": {"url": "https://example.com/video.mp4"},
+    }
+
+    with patch.object(vm, "_transcode_to_h264_mp4", _fake_transcode), \
+         patch("qwenpaw.app.channels.media_utils.resolve_media_url",
+               _passthrough), \
+         patch("httpx.AsyncClient", return_value=fake_http):
+        result = await vm._describe_video_via_fallback(
+            remote_block, "describe", (fake_chat, "mimo", "mimo-v2.5"),
+        )
+
+    assert result is None
+    assert len(fake_http.calls) == 1
+    assert transcode_called["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_qwen_other_400_does_not_transcode(
+    tmp_video: Path,
+) -> None:
+    """A non-format 400 (e.g. auth error) must keep the existing
+    ``return None`` path — no ffmpeg, no second POST."""
+    fake_chat = _FakeChatModel()
+    rejection = _FakeHttpxResponse(
+        status_code=400,
+        body={"error": {"message": "invalid api key"}},
+    )
+    rejection.text = '{"error":{"message":"invalid api key"}}'
+    fake_http = _SequencedFakeHttpxClient([rejection])
+
+    transcode_called = {"n": 0}
+
+    async def _fake_transcode(path: str):
+        transcode_called["n"] += 1
+        return None
+
+    async def _fake_sign(path: str):
+        return "https://media.example/sig"
+
+    with patch.object(vm, "_check_multimodal_support", return_value=False), \
+         patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
+         patch.object(
+             vm, "_resolve_fallback_video_model",
+             return_value=(fake_chat, "mimo", "mimo-v2.5"),
+         ), \
+         patch.object(vm, "_transcode_to_h264_mp4", _fake_transcode), \
+         patch("qwenpaw.app.channels.media_utils.resolve_media_url", _fake_sign), \
+         patch("httpx.AsyncClient", return_value=fake_http):
+        await view_video(str(tmp_video))
+
+    assert len(fake_http.calls) == 1
+    assert transcode_called["n"] == 0
+
+
+class TestTranscodeToH264Mp4:
+    @pytest.mark.asyncio
+    async def test_missing_source_returns_none(self):
+        result = await vm._transcode_to_h264_mp4("/nonexistent/foo.mp4")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_existing_transcode_is_reused(self, tmp_path):
+        # Pre-create the .h264.mp4 sibling — should short-circuit
+        # without invoking ffmpeg.
+        src = tmp_path / "vid.mp4"
+        src.write_bytes(b"\x00" * 16)
+        out = tmp_path / "vid.h264.mp4"
+        out.write_bytes(b"already transcoded")
+        # ffmpeg is intentionally NOT patched; if the implementation
+        # tries to run it the test would still pass on systems with
+        # ffmpeg installed but for the wrong reason.  Instead we
+        # patch create_subprocess_exec to fail loudly so we'd notice.
+        with patch("asyncio.create_subprocess_exec",
+                   side_effect=AssertionError("ffmpeg should not run")):
+            result = await vm._transcode_to_h264_mp4(str(src))
+        assert result == str(out)
