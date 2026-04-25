@@ -1069,17 +1069,46 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
         self,
         tool_choice: Literal["auto", "none", "required"] | None = None,
     ) -> Msg:
-        """Override reasoning with proactive media filtering.
+        """Override reasoning with proactive media filtering and a
+        durable error tombstone.
 
-        1. Proactive layer: if the model does not support
-           multimodal, strip media blocks *before* calling.
-        2. Passive layer: if the model call still fails with a
-           bad-request / media error, strip remaining blocks and retry.
-        3. If the model IS marked as multimodal but still errors on
-           media, log a warning about possibly inaccurate capability flag.
+        Layers, outside-in:
+
+        1. Outer wrapper: if reasoning raises (after retries below
+           are exhausted), record an error stub in memory before
+           re-raising.  Without this, an upstream HTTP error during
+           the very first SSE event leaves only an empty assistant
+           ``Msg(content=[])`` in memory (parent's ``finally`` adds
+           it, but it's contentless) — the next turn has no record
+           of what went wrong, so retries are blind.  Skips
+           ``CancelledError`` to leave the interrupt path's
+           fake-tool-result writes alone.
+
+        2. Proactive media filter: strip media before calling when
+           the model is not flagged multimodal.
+
+        3. Passive bad-request / media fallback: if the model call
+           still 400s on media, strip remaining blocks and retry.
 
         Calls ``super()._reasoning`` to keep the ToolGuardMixin
         interception active.
+        """
+        try:
+            return await self._reasoning_with_media_fallback(tool_choice)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            await self._record_reasoning_failure(e, tool_choice)
+            raise
+
+    async def _reasoning_with_media_fallback(
+        self,
+        tool_choice: Literal["auto", "none", "required"] | None = None,
+    ) -> Msg:
+        """Inner reasoning path: media filtering + bad-request retry.
+
+        Extracted so the outer ``_reasoning`` can wrap it cleanly with
+        the error-tombstone path without entangling retry control flow.
         """
         # --- Proactive filtering layer ---
         if not get_active_model_supports_multimodal():
@@ -1144,6 +1173,93 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
             msg = await super()._reasoning(tool_choice=tool_choice)
 
         return await self._auto_continue_if_text_only(msg, tool_choice)
+
+    async def _record_reasoning_failure(
+        self,
+        exc: Exception,
+        tool_choice: Literal["auto", "none", "required"] | None,
+    ) -> None:
+        """Stamp memory with an audit entry describing the failed turn.
+
+        Two scenarios to handle, distinguished by whether the parent's
+        try/finally already wrote a placeholder ``assistant`` Msg:
+
+        * **Handshake or first-chunk error** — parent's ``finally``
+          ran with ``msg.content = []`` (no chunks ever yielded), so
+          the last memory entry is a contentless assistant Msg.
+          Replace its content in place so the agent's next prompt
+          carries actual context, not an empty turn.
+
+        * **Mid-stream error after partial yield** — the assistant
+          Msg in memory holds whatever chunks 1..N did yield (text,
+          thinking, tool_use).  Don't overwrite it; append a
+          ``system``-role note instead so the partial work survives
+          and the next turn knows the stream was cut.
+
+        * **No assistant placeholder at all** (e.g. tool guard
+          rejected before model call) — append a fresh ``system``
+          note.
+
+        Best-effort: any internal failure here is logged and
+        swallowed — we MUST not mask the original exception by
+        raising from a tombstone helper.
+        """
+        try:
+            from agentscope.message import TextBlock
+
+            err_text = (
+                f"[reasoning failed: {type(exc).__name__}: "
+                f"{str(exc)[:300]}; tool_choice={tool_choice}; "
+                "next user turn will retry from this point]"
+            )
+
+            history = list(self.memory.content)  # [(msg, marks), ...]
+            last_pair = history[-1] if history else None
+            last_msg = last_pair[0] if last_pair else None
+
+            is_empty_placeholder = (
+                last_msg is not None
+                and getattr(last_msg, "role", None) == "assistant"
+                and (
+                    not last_msg.content
+                    or (
+                        isinstance(last_msg.content, list)
+                        and not last_msg.get_content_blocks("text")
+                        and not last_msg.get_content_blocks("tool_use")
+                        and not last_msg.get_content_blocks("thinking")
+                    )
+                )
+            )
+
+            if is_empty_placeholder:
+                last_msg.content = [
+                    TextBlock(type="text", text=err_text),
+                ]
+                logger.warning(
+                    "_reasoning failed (%s); replaced empty assistant "
+                    "placeholder in memory with error stub",
+                    exc,
+                )
+                return
+
+            stub = Msg(
+                "system",
+                [TextBlock(type="text", text=err_text)],
+                "system",
+            )
+            await self.memory.add(stub)
+            logger.warning(
+                "_reasoning failed (%s); appended error stub to memory "
+                "(prior assistant content preserved)",
+                exc,
+            )
+        except Exception as stub_err:  # pylint: disable=broad-exception-caught
+            logger.warning(
+                "Failed to record reasoning failure to memory: %s "
+                "(original error: %s)",
+                stub_err,
+                exc,
+            )
 
     # pylint: disable=too-many-branches
     async def _summarizing(self) -> Msg:
