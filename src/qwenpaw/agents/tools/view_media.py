@@ -454,14 +454,29 @@ async def _build_fallback_video_messages(
             },
         ]
 
-    # Unknown provider: pass agentscope-style VideoBlock and hope
-    # the chat model's formatter translates it (agentscope's
-    # Gemini path does; OpenAI's does not).
+    # Unknown provider: keep agentscope's VideoBlock shape so the
+    # downstream formatter can do its provider-specific translation,
+    # but first run the source URL through the media server so
+    # local paths become signed HTTPS URLs.  Almost every cloud
+    # endpoint we route fallback traffic to (DeepSeek, ZAI, custom
+    # OpenAI-compat providers) expects a fetchable URL — handing
+    # them a bare local path leaks the path into the request body
+    # and the request fails server-side.  ``resolve_media_url``
+    # is a no-op for already-HTTP(S) sources so this is safe to
+    # call unconditionally.
+    resolved_block = video_block
+    if url:
+        resolved = await resolve_media_url(url)
+        if resolved and resolved != url:
+            resolved_block = {
+                **video_block,
+                "source": {**source, "url": resolved},
+            }
     return [
         {
             "role": "user",
             "content": [
-                video_block,
+                resolved_block,
                 TextBlock(type="text", text=prompt),
             ],
         },

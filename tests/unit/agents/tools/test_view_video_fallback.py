@@ -479,17 +479,53 @@ async def test_qwen_family_sign_failure_yields_generic_hint(
 
 
 @pytest.mark.asyncio
-async def test_non_qwen_family_uses_original_shape(
+async def test_non_qwen_family_signs_then_passes_through_block(
     tmp_video: Path,
 ) -> None:
-    # Gemini / unknown providers keep the agentscope VideoBlock as-
-    # is; the chat model's own formatter handles translation.
+    # Non-Qwen providers (DeepSeek / ZAI / custom OpenAI-compat /
+    # Gemini) keep the agentscope VideoBlock shape so each
+    # provider's formatter can do its own translation, BUT the
+    # source URL is first signed through the media server so
+    # downstream endpoints receive a fetchable HTTPS URL instead
+    # of a bare local path that the server can't reach.
     fake = _FakeChatModel()
     sign_called = {"n": 0}
+    signed_url = "https://media.example/local/abc123?sig=ok"
 
     async def _fake_sign(path: str):
         sign_called["n"] += 1
-        return None
+        return signed_url
+
+    with patch.object(vm, "_check_multimodal_support", return_value=False), \
+         patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
+         patch.object(
+             vm, "_resolve_fallback_video_model",
+             return_value=(fake, "deepseek", "deepseek-vl"),
+         ), \
+         patch("qwenpaw.app.channels.media_utils.resolve_media_url", _fake_sign):
+        await view_video(str(tmp_video))
+
+    # Media server is asked to sign exactly once.
+    assert sign_called["n"] == 1
+    video_block = fake.last_messages[0]["content"][0]
+    assert video_block["type"] == "video"
+    # Block shape preserved (agentscope ``source`` wrapper);
+    # only the URL inside is rewritten to the signed one.
+    assert video_block.get("source", {}).get("url") == signed_url
+
+
+@pytest.mark.asyncio
+async def test_non_qwen_family_unreachable_signer_preserves_path(
+    tmp_video: Path,
+) -> None:
+    # When the media server is unreachable ``resolve_media_url``
+    # returns the original path — the VideoBlock then passes
+    # through unchanged so any formatter that can still handle a
+    # local file (e.g. agentscope's Gemini SDK upload) gets one.
+    fake = _FakeChatModel()
+
+    async def _passthrough(path: str):
+        return path
 
     with patch.object(vm, "_check_multimodal_support", return_value=False), \
          patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
@@ -497,12 +533,8 @@ async def test_non_qwen_family_uses_original_shape(
              vm, "_resolve_fallback_video_model",
              return_value=(fake, "gemini", "gemini-2.5-pro"),
          ), \
-         patch("qwenpaw.app.channels.media_utils.resolve_media_url", _fake_sign):
+         patch("qwenpaw.app.channels.media_utils.resolve_media_url", _passthrough):
         await view_video(str(tmp_video))
 
-    # Gemini path doesn't sign.
-    assert sign_called["n"] == 0
     video_block = fake.last_messages[0]["content"][0]
-    assert video_block["type"] == "video"
-    # agentscope-style ``source`` wrapper is preserved.
     assert video_block.get("source", {}).get("url") == str(tmp_video)
