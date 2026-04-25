@@ -517,25 +517,35 @@ class BaseChannel(ABC):
             #
             # Only enabled for codex-oauth agents: Claude / Qwen
             # preambles ("I'll fetch that") are intentional and
-            # users want them.
-            from ..agent_context import get_current_agent_id
+            # users want them.  We resolve the agent via the
+            # channel's bound workspace because the
+            # ``get_current_agent_id`` ContextVar isn't set until
+            # ``AgentRunner.stream_query`` runs — which happens
+            # AFTER ``_stream_with_tracker`` enters this loop, so
+            # reading it here always returned ``None`` and the
+            # buffering code was a silent no-op.
             from ...config.config import load_agent_config
+            buffer_preamble = False
             try:
-                agent_id = get_current_agent_id()
-                agent_cfg = (
-                    load_agent_config(agent_id) if agent_id else None
+                workspace = getattr(self, "_workspace", None)
+                agent_id = (
+                    getattr(workspace, "agent_id", "") if workspace else ""
                 )
-                active = (
-                    getattr(agent_cfg, "active_model", None)
-                    if agent_cfg
-                    else None
-                )
-                provider = (
-                    getattr(active, "provider_id", "") or ""
-                ).lower()
-                buffer_preamble = (provider == "codex-oauth")
+                if agent_id:
+                    agent_cfg = load_agent_config(agent_id)
+                    active = getattr(agent_cfg, "active_model", None)
+                    provider = (
+                        getattr(active, "provider_id", "") or ""
+                    ).lower()
+                    buffer_preamble = (provider == "codex-oauth")
             except Exception:
                 buffer_preamble = False
+            logger.debug(
+                "channel _stream_with_tracker: buffer_preamble=%s "
+                "(workspace_agent=%s)",
+                buffer_preamble,
+                getattr(getattr(self, "_workspace", None), "agent_id", None),
+            )
 
             pending_message_send: Optional[tuple] = None  # (event, meta)
 
