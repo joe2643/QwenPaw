@@ -1748,7 +1748,16 @@ class WhatsAppChannel(BaseChannel):
         if not media_parts:
             return False
 
-        buf.gathered_parts.extend(media_parts)
+        # Gather ALL parts the child carried (image + caption text),
+        # not just the media — otherwise the caption TextContent
+        # ``_extract_message_content`` appended for an
+        # ``imageMessage.caption`` is dropped and the merged
+        # dispatch ends up with content_parts == [images...].
+        # Downstream ``_apply_no_text_debounce`` then sees no text
+        # block and buffers the request indefinitely waiting for
+        # one — observed 2026-04-25 as "agent never responds to
+        # albums" even though the album header buffered cleanly.
+        buf.gathered_parts.extend(content_parts)
         buf.gathered_paths.extend(media_local_paths)
         if body:
             buf.gathered_body_parts.append(body)

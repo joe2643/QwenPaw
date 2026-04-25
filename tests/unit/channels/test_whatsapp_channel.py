@@ -1991,6 +1991,55 @@ class TestAlbumCollation:
         # Buffer cleared after flush.
         assert ("group@g.us", "alice") not in ch._album_buffers
 
+    async def test_album_caption_text_block_survives_collation(self):
+        """Regression test for the 2026-04-25 production bug:
+        ``_extract_message_content`` appends a TextContent for the
+        ``imageMessage.caption``.  Earlier collation only kept
+        media parts → the caption block was silently dropped →
+        ``_apply_no_text_debounce`` saw a content_parts with no
+        text and BUFFERED the request waiting for text that
+        never arrived → agent never responded to multi-image
+        sends with a caption (the most common case in WhatsApp
+        groups).
+        """
+        ch = _make_channel()
+        ch._dispatch_inbound_message = AsyncMock()
+
+        await _drive_inbound(ch, _make_album_message(2))
+        # First child arrives with caption + image (the actual
+        # shape ``_extract_message_content`` returns).
+        await _drive_inbound(
+            ch, _make_image_child(caption="@bot here you go"),
+            msg_id="c0",
+            parts=[
+                TextContent(
+                    type=ContentType.TEXT, text="@bot here you go",
+                ),
+                ImageContent(type=ContentType.IMAGE, image_url="/t/i0.jpg"),
+            ],
+            paths=["/t/i0.jpg"],
+            body="@bot here you go",
+        )
+        # Second child: image only, no caption.
+        await _drive_inbound(
+            ch, _make_image_child(),
+            msg_id="c1",
+            parts=[ImageContent(type=ContentType.IMAGE, image_url="/t/i1.jpg")],
+            paths=["/t/i1.jpg"],
+        )
+        ch._dispatch_inbound_message.assert_awaited_once()
+        kwargs = ch._dispatch_inbound_message.await_args.kwargs
+        # Merged content keeps the caption text block alongside
+        # both images — downstream debounce now sees text and
+        # forwards immediately instead of stalling.
+        types = [type(p).__name__ for p in kwargs["content_parts"]]
+        assert types == ["TextContent", "ImageContent", "ImageContent"]
+        text_parts = [
+            p for p in kwargs["content_parts"]
+            if isinstance(p, TextContent)
+        ]
+        assert text_parts[0].text == "@bot here you go"
+
     async def test_album_with_reply_preserves_quote_on_flush(self):
         ch = _make_channel()
         ch._dispatch_inbound_message = AsyncMock()
