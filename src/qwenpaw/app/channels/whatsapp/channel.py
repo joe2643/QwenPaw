@@ -2505,11 +2505,64 @@ class WhatsAppChannel(BaseChannel):
     async def _stream_with_tracker(self, payload):
         """Override base to handle QwenPaw event format for WhatsApp."""
         import json as _json
+        from agentscope_runtime.engine.schemas.agent_schemas import (
+            MessageType,
+        )
 
         request = self._payload_to_request(payload)
         send_meta = getattr(request, "channel_meta", None) or {}
         to_handle = self.get_to_handle_from_request(request)
         await self._before_consume_process(request)
+
+        # Codex OAuth (gpt-5.x) intersperses scratch-style preamble
+        # text between tool calls.  Detect via the channel's bound
+        # workspace agent (the get_current_agent_id ContextVar isn't
+        # set yet at this point).  When True we hold MESSAGE.MESSAGE
+        # events until we see what comes next: tool call → drop +
+        # re-yield as REASONING (Console UI sees thinking); next
+        # MESSAGE / response → original dispatch.
+        from ....config.config import load_agent_config
+        buffer_preamble = False
+        try:
+            workspace = getattr(self, "_workspace", None)
+            agent_id = (
+                getattr(workspace, "agent_id", "") if workspace else ""
+            )
+            if agent_id:
+                cfg = load_agent_config(agent_id)
+                active = getattr(cfg, "active_model", None)
+                provider = (
+                    getattr(active, "provider_id", "") or ""
+                ).lower()
+                buffer_preamble = (provider == "codex-oauth")
+        except Exception:
+            buffer_preamble = False
+        logger.info(
+            "whatsapp _stream_with_tracker: buffer_preamble=%s "
+            "(workspace_agent=%s)",
+            buffer_preamble,
+            getattr(getattr(self, "_workspace", None), "agent_id", None),
+        )
+
+        pending_message_send = None  # (event, original_sse_data)
+
+        def _serialize(ev):
+            if hasattr(ev, "model_dump_json"):
+                return ev.model_dump_json()
+            if hasattr(ev, "json"):
+                return ev.json()
+            return _json.dumps({"text": str(ev)})
+
+        def _retype_as_reasoning_sse(ev):
+            try:
+                if hasattr(ev, "model_copy"):
+                    ev2 = ev.model_copy(
+                        update={"type": MessageType.REASONING},
+                    )
+                    return f"data: {_serialize(ev2)}\n\n"
+            except Exception:
+                pass
+            return f"data: {_serialize(ev)}\n\n"
 
         text_parts = []
         message_completed = False
@@ -2545,25 +2598,83 @@ class WhatsAppChannel(BaseChannel):
                 )
             process_iterator = self._process(request)
             async for event in process_iterator:
-                if hasattr(event, "model_dump_json"):
-                    data = event.model_dump_json()
-                elif hasattr(event, "json"):
-                    data = event.json()
-                else:
-                    data = _json.dumps({"text": str(event)})
-                yield f"data: {data}\n\n"
-
                 obj = getattr(event, "object", None)
                 status = getattr(event, "status", None)
+                msg_type = getattr(event, "type", "")
+
+                # ── SSE yield decision ─────────────────────────────
+                # Defer SSE for codex-oauth MESSAGE.MESSAGE so we
+                # can re-tag as REASONING if a tool call follows
+                # (preamble) instead of letting Console UI render
+                # the scratch text as a normal bot reply.
+                deferred_sse = (
+                    buffer_preamble
+                    and obj == "message"
+                    and status == RunStatus.Completed
+                    and msg_type != MessageType.REASONING
+                )
+                if not deferred_sse:
+                    yield f"data: {_serialize(event)}\n\n"
 
                 if obj == "message" and status == RunStatus.Completed:
-                    await self.on_event_message_completed(
-                        request,
-                        to_handle,
-                        event,
-                        send_meta,
-                    )
-                    message_completed = True
+                    if msg_type == MessageType.REASONING:
+                        # Already-flagged reasoning: drop pending +
+                        # don't dispatch (SSE already yielded above).
+                        if pending_message_send is not None:
+                            prior_event, _prior_data = pending_message_send
+                            yield _retype_as_reasoning_sse(prior_event)
+                            logger.info(
+                                "whatsapp: dropped codex preamble before "
+                                "REASONING event (re-yielded as REASONING)",
+                            )
+                            pending_message_send = None
+                        continue
+                    if buffer_preamble:
+                        # Hold this MESSAGE.  Pending SSE not yet
+                        # yielded — decision deferred to next event.
+                        if pending_message_send is not None:
+                            # Two MESSAGEs back-to-back — first one
+                            # was the actual final answer.  Yield
+                            # its SSE + dispatch.
+                            prior_event, _ = pending_message_send
+                            yield f"data: {_serialize(prior_event)}\n\n"
+                            await self.on_event_message_completed(
+                                request, to_handle, prior_event, send_meta,
+                            )
+                            message_completed = True
+                        pending_message_send = (event, _serialize(event))
+                    else:
+                        await self.on_event_message_completed(
+                            request,
+                            to_handle,
+                            event,
+                            send_meta,
+                        )
+                        message_completed = True
+                elif obj == "response":
+                    # End of stream — pending was the final reply.
+                    if pending_message_send is not None:
+                        prior_event, _ = pending_message_send
+                        yield f"data: {_serialize(prior_event)}\n\n"
+                        await self.on_event_message_completed(
+                            request, to_handle, prior_event, send_meta,
+                        )
+                        message_completed = True
+                        pending_message_send = None
+                else:
+                    # Anything else (function_call,
+                    # function_call_output, mcp, plan...) →
+                    # previous MESSAGE was preamble.  Re-yield
+                    # SSE as REASONING so Console UI sees thinking.
+                    if pending_message_send is not None:
+                        prior_event, _ = pending_message_send
+                        yield _retype_as_reasoning_sse(prior_event)
+                        logger.info(
+                            "whatsapp: dropped codex-oauth preamble text "
+                            "before %s/%s (re-yielded as REASONING)",
+                            obj, msg_type,
+                        )
+                        pending_message_send = None
 
                 # Fallback text collection
                 for part in getattr(event, "content", []) or []:
@@ -2571,16 +2682,23 @@ class WhatsAppChannel(BaseChannel):
                     if not txt or txt in text_parts:
                         continue
                     if self._filter_thinking:
-                        from agentscope_runtime.engine.schemas.agent_schemas import (
-                            MessageType,
-                        )
-
                         if (
                             getattr(event, "type", None)
                             == MessageType.REASONING
                         ):
                             continue
                     text_parts.append(txt)
+
+            # Defensive flush: iterator ended without a response
+            # event — anything still pending is the final reply.
+            if pending_message_send is not None:
+                prior_event, _ = pending_message_send
+                yield f"data: {_serialize(prior_event)}\n\n"
+                await self.on_event_message_completed(
+                    request, to_handle, prior_event, send_meta,
+                )
+                message_completed = True
+                pending_message_send = None
 
             if text_parts and not message_completed:
                 reply = chr(10).join(text_parts)

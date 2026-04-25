@@ -1661,10 +1661,62 @@ class SignalChannel(BaseChannel):
     # ── Process-loop override ────────────────────────────────────────
 
     async def _stream_with_tracker(self, payload):
+        from agentscope_runtime.engine.schemas.agent_schemas import (
+            MessageType,
+        )
+
         request = self._payload_to_request(payload)
         send_meta = getattr(request, "channel_meta", None) or {}
         to_handle = self.get_to_handle_from_request(request)
         await self._before_consume_process(request)
+
+        # Codex OAuth (gpt-5.x) preamble suppression — see WhatsApp
+        # channel for the rationale.  Same logic, copied here
+        # because each channel's ``_stream_with_tracker`` overrides
+        # the base.  Detect the current agent's provider via the
+        # bound workspace (ContextVar isn't set yet at this point).
+        from ....config.config import load_agent_config
+        buffer_preamble = False
+        try:
+            workspace = getattr(self, "_workspace", None)
+            agent_id = (
+                getattr(workspace, "agent_id", "") if workspace else ""
+            )
+            if agent_id:
+                cfg = load_agent_config(agent_id)
+                active = getattr(cfg, "active_model", None)
+                provider = (
+                    getattr(active, "provider_id", "") or ""
+                ).lower()
+                buffer_preamble = (provider == "codex-oauth")
+        except Exception:
+            buffer_preamble = False
+        logger.info(
+            "signal _stream_with_tracker: buffer_preamble=%s "
+            "(workspace_agent=%s)",
+            buffer_preamble,
+            getattr(getattr(self, "_workspace", None), "agent_id", None),
+        )
+
+        pending_message_send = None  # (event, original_sse_data)
+
+        def _serialize(ev):
+            if hasattr(ev, "model_dump_json"):
+                return ev.model_dump_json()
+            if hasattr(ev, "json"):
+                return ev.json()
+            return json.dumps({"text": str(ev)})
+
+        def _retype_as_reasoning_sse(ev):
+            try:
+                if hasattr(ev, "model_copy"):
+                    ev2 = ev.model_copy(
+                        update={"type": MessageType.REASONING},
+                    )
+                    return f"data: {_serialize(ev2)}\n\n"
+            except Exception:
+                pass
+            return f"data: {_serialize(ev)}\n\n"
 
         text_parts: List[str] = []
         message_completed = False
@@ -1680,39 +1732,76 @@ class SignalChannel(BaseChannel):
 
             process_iterator = self._process(request)
             async for event in process_iterator:
-                if hasattr(event, "model_dump_json"):
-                    data = event.model_dump_json()
-                elif hasattr(event, "json"):
-                    data = event.json()
-                else:
-                    data = json.dumps({"text": str(event)})
-                yield f"data: {data}\n\n"
-
                 obj = getattr(event, "object", None)
                 status = getattr(event, "status", None)
+                msg_type = getattr(event, "type", "")
+
+                deferred_sse = (
+                    buffer_preamble
+                    and obj == "message"
+                    and status == RunStatus.Completed
+                    and msg_type != MessageType.REASONING
+                )
+                if not deferred_sse:
+                    yield f"data: {_serialize(event)}\n\n"
 
                 if obj == "message" and status == RunStatus.Completed:
-                    logger.info(
-                        "signal: message_completed, sending to %s",
-                        to_handle,
-                    )
-                    await self.on_event_message_completed(
-                        request,
-                        to_handle,
-                        event,
-                        send_meta,
-                    )
-                    message_completed = True
+                    if msg_type == MessageType.REASONING:
+                        if pending_message_send is not None:
+                            prior_event, _ = pending_message_send
+                            yield _retype_as_reasoning_sse(prior_event)
+                            logger.info(
+                                "signal: dropped codex preamble before "
+                                "REASONING (re-yielded as REASONING)",
+                            )
+                            pending_message_send = None
+                        continue
+                    if buffer_preamble:
+                        if pending_message_send is not None:
+                            prior_event, _ = pending_message_send
+                            yield f"data: {_serialize(prior_event)}\n\n"
+                            await self.on_event_message_completed(
+                                request, to_handle, prior_event, send_meta,
+                            )
+                            message_completed = True
+                        pending_message_send = (event, _serialize(event))
+                    else:
+                        logger.info(
+                            "signal: message_completed, sending to %s",
+                            to_handle,
+                        )
+                        await self.on_event_message_completed(
+                            request,
+                            to_handle,
+                            event,
+                            send_meta,
+                        )
+                        message_completed = True
+                elif obj == "response":
+                    if pending_message_send is not None:
+                        prior_event, _ = pending_message_send
+                        yield f"data: {_serialize(prior_event)}\n\n"
+                        await self.on_event_message_completed(
+                            request, to_handle, prior_event, send_meta,
+                        )
+                        message_completed = True
+                        pending_message_send = None
+                else:
+                    if pending_message_send is not None:
+                        prior_event, _ = pending_message_send
+                        yield _retype_as_reasoning_sse(prior_event)
+                        logger.info(
+                            "signal: dropped codex-oauth preamble text "
+                            "before %s/%s (re-yielded as REASONING)",
+                            obj, msg_type,
+                        )
+                        pending_message_send = None
 
                 for part in getattr(event, "content", []) or []:
                     txt = getattr(part, "text", None)
                     if not txt or txt in text_parts:
                         continue
                     if self._filter_thinking:
-                        from agentscope_runtime.engine.schemas.agent_schemas import (
-                            MessageType,
-                        )
-
                         if (
                             getattr(event, "type", None)
                             == MessageType.REASONING
@@ -1722,6 +1811,15 @@ class SignalChannel(BaseChannel):
                         if "thinking" in pt.lower():
                             continue
                     text_parts.append(txt)
+
+            if pending_message_send is not None:
+                prior_event, _ = pending_message_send
+                yield f"data: {_serialize(prior_event)}\n\n"
+                await self.on_event_message_completed(
+                    request, to_handle, prior_event, send_meta,
+                )
+                message_completed = True
+                pending_message_send = None
 
             if text_parts and not message_completed:
                 reply = "\n".join(text_parts)
