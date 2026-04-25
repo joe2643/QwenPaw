@@ -562,6 +562,41 @@ class TestMaxStripRetries:
         assert _MAX_STRIP_RETRIES <= 10
 
 
+class TestTransientRetryConfig:
+    """The 5xx retry budget is a separate knob from the strip-and-
+    retry quota — bounded so a sustained ChatGPT outage fails the
+    user's turn fast instead of holding it open for minutes."""
+
+    def test_retry_status_set_includes_503(self) -> None:
+        from qwenpaw.providers.codex_oauth_model import (
+            _TRANSIENT_RETRY_STATUS,
+        )
+        # The exact upstream the user reported
+        # ("Codex upstream HTTP 503: upstream connect error or
+        # disconnect/reset before headers") needs to be in the
+        # set or the retry never fires.
+        assert 503 in _TRANSIENT_RETRY_STATUS
+        # 502 / 504 round out the typical edge-failure trio.
+        assert 502 in _TRANSIENT_RETRY_STATUS
+        assert 504 in _TRANSIENT_RETRY_STATUS
+
+    def test_max_transient_retries_bounded(self) -> None:
+        from qwenpaw.providers.codex_oauth_model import (
+            _MAX_TRANSIENT_RETRIES,
+        )
+        assert 1 <= _MAX_TRANSIENT_RETRIES <= 5
+
+    def test_4xx_status_not_in_retry_set(self) -> None:
+        """Auth, rate-limit, and bad-request 4xxs must NOT be
+        wrapped by the transient-retry loop — those are
+        handled by the strip-and-retry path or surfaced as-is."""
+        from qwenpaw.providers.codex_oauth_model import (
+            _TRANSIENT_RETRY_STATUS,
+        )
+        for status in (400, 401, 403, 404, 429):
+            assert status not in _TRANSIENT_RETRY_STATUS
+
+
 # ---------------------------------------------------------------- #
 # Reasoning-effort end-to-end                                      #
 # ---------------------------------------------------------------- #

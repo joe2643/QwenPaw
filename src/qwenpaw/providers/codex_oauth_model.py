@@ -22,6 +22,7 @@ Design mirrors :class:`qwenpaw.providers.anthropic_provider.ClaudeOAuthChatModel
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -59,6 +60,18 @@ _UNFETCHABLE_URL_RE = re.compile(
 # revoked, etc.) and we'd rather surface the original error than
 # pile up retries.
 _MAX_STRIP_RETRIES: int = 5
+
+
+# Transient upstream-failure retries: ChatGPT's edge sometimes
+# returns 502/503/504 for "upstream connect error or
+# disconnect/reset before headers" — short-lived backend blips
+# rather than anything wrong with our request.  Retry a small
+# number of times with exponential backoff before surfacing the
+# error to the agent.  Bounded so a sustained outage still
+# fails fast instead of holding the user's turn open for minutes.
+_TRANSIENT_RETRY_STATUS = {502, 503, 504}
+_MAX_TRANSIENT_RETRIES: int = 3
+_TRANSIENT_RETRY_BASE_DELAY_S: float = 0.5  # 0.5, 1.0, 2.0 backoff
 
 
 def _extract_unfetchable_url(error_body: str) -> str | None:
@@ -245,6 +258,8 @@ class CodexOAuthChatModel(OpenAIChatModel):
             # swap in a text placeholder, retry — preserves the
             # rest of the turn.  +1 for the first (un-retried) try.
             attempts_left = _MAX_STRIP_RETRIES + 1
+            transient_attempts_left = _MAX_TRANSIENT_RETRIES
+            transient_attempt_idx = 0
             while True:
                 attempts_left -= 1
                 async with httpx.AsyncClient(
@@ -263,6 +278,36 @@ class CodexOAuthChatModel(OpenAIChatModel):
                                 "utf-8",
                                 errors="replace",
                             )
+                            # Transient 5xx — ChatGPT edge had a
+                            # short-lived problem reaching its
+                            # backend.  Back off and retry without
+                            # mutating the request.
+                            if (
+                                upstream.status_code
+                                in _TRANSIENT_RETRY_STATUS
+                                and transient_attempts_left > 0
+                            ):
+                                transient_attempts_left -= 1
+                                delay = (
+                                    _TRANSIENT_RETRY_BASE_DELAY_S
+                                    * (2 ** transient_attempt_idx)
+                                )
+                                transient_attempt_idx += 1
+                                logger.warning(
+                                    "Codex upstream HTTP %d (%s) — "
+                                    "transient, sleeping %.1fs and retrying "
+                                    "(%d left)",
+                                    upstream.status_code,
+                                    err_body[:120],
+                                    delay,
+                                    transient_attempts_left,
+                                )
+                                import asyncio as _asyncio
+                                await _asyncio.sleep(delay)
+                                state = StreamState(
+                                    model=responses_body["model"],
+                                )
+                                continue
                             bad_url = _extract_unfetchable_url(err_body)
                             if (
                                 attempts_left > 0
@@ -349,6 +394,12 @@ class _CodexOAuthAsyncStream:
         # history), so a single retry isn't enough; the cap guards
         # against retry storms when something else is wrong.
         self._retry_attempts_left: int = _MAX_STRIP_RETRIES
+        # Independent budget for transient 5xx retries — kept
+        # separate from the strip-and-retry quota because they
+        # cover different failure modes (backend blip vs. dead
+        # URL) and one shouldn't deplete the other.
+        self._transient_attempts_left: int = _MAX_TRANSIENT_RETRIES
+        self._transient_attempt_idx: int = 0
 
     def __aiter__(self) -> "_CodexOAuthAsyncStream":
         return self
@@ -386,6 +437,34 @@ class _CodexOAuthAsyncStream:
                 err_bytes = await self._upstream.aread()
                 err_body = err_bytes.decode("utf-8", errors="replace")
                 await self._cleanup()
+
+                # Transient 5xx — ChatGPT edge had a short-lived
+                # problem reaching its backend (e.g. "upstream
+                # connect error or disconnect/reset before
+                # headers").  Back off and re-open the stream
+                # without mutating the request.
+                if (
+                    status in _TRANSIENT_RETRY_STATUS
+                    and self._transient_attempts_left > 0
+                ):
+                    self._transient_attempts_left -= 1
+                    delay = (
+                        _TRANSIENT_RETRY_BASE_DELAY_S
+                        * (2 ** self._transient_attempt_idx)
+                    )
+                    self._transient_attempt_idx += 1
+                    logger.warning(
+                        "Codex stream HTTP %d (%s) — transient, "
+                        "sleeping %.1fs and retrying (%d left)",
+                        status,
+                        err_body[:120],
+                        delay,
+                        self._transient_attempts_left,
+                    )
+                    await asyncio.sleep(delay)
+                    await self._open_stream()
+                    assert self._upstream is not None
+                    continue
 
                 # Strip-and-retry path: ChatGPT bounced because it
                 # couldn't download a URL we sent (most often a

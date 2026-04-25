@@ -504,6 +504,50 @@ class BaseChannel(ABC):
         process_iterator = None
         try:
             process_iterator = self._process(request)
+            # Codex OAuth (gpt-5.x) intersperses scratch-style
+            # preamble text between tool calls.  The agentscope
+            # runtime adapter emits each as a ``MESSAGE`` event
+            # immediately followed by a ``PLUGIN_CALL`` event in
+            # the same agent turn.  We can't tell preamble from
+            # final reply by content alone — but we can tell by
+            # what comes next: if a ``PLUGIN_CALL`` lands before
+            # the next ``MESSAGE`` / ``response``, the buffered
+            # text is preamble and gets dropped.  Otherwise it
+            # gets flushed as a normal channel send.
+            #
+            # Only enabled for codex-oauth agents: Claude / Qwen
+            # preambles ("I'll fetch that") are intentional and
+            # users want them.
+            from ..agent_context import get_current_agent_id
+            from ...config.config import load_agent_config
+            try:
+                agent_id = get_current_agent_id()
+                agent_cfg = (
+                    load_agent_config(agent_id) if agent_id else None
+                )
+                active = (
+                    getattr(agent_cfg, "active_model", None)
+                    if agent_cfg
+                    else None
+                )
+                provider = (
+                    getattr(active, "provider_id", "") or ""
+                ).lower()
+                buffer_preamble = (provider == "codex-oauth")
+            except Exception:
+                buffer_preamble = False
+
+            pending_message_send: Optional[tuple] = None  # (event, meta)
+
+            async def _flush_pending():
+                nonlocal pending_message_send
+                if pending_message_send is not None:
+                    pend_event, pend_meta = pending_message_send
+                    pending_message_send = None
+                    await self.on_event_message_completed(
+                        request, to_handle, pend_event, pend_meta,
+                    )
+
             async for event in process_iterator:
                 if hasattr(event, "model_dump_json"):
                     data = event.model_dump_json()
@@ -516,6 +560,7 @@ class BaseChannel(ABC):
 
                 obj = getattr(event, "object", None)
                 status = getattr(event, "status", None)
+                msg_type = getattr(event, "type", "")
 
                 if obj == "content":
                     if await self.on_event_content(
@@ -526,24 +571,55 @@ class BaseChannel(ABC):
                     ):
                         continue
                 if obj == "message" and status == RunStatus.Completed:
-                    # Suppress preamble text from tool-using turns —
-                    # ``runner.utils`` promotes that text from
-                    # ``MESSAGE`` to ``REASONING`` so we can drop it
-                    # here without losing visibility on the Console
-                    # UI (the SSE ``yield`` above already shipped the
-                    # event upstream).  Final reply messages keep
-                    # ``MESSAGE`` and reach the channel as before.
-                    msg_type = getattr(event, "type", MessageType.MESSAGE)
-                    if msg_type != MessageType.REASONING:
+                    # MESSAGE.REASONING is always suppressed (see
+                    # comment above) — Console UI sees it via SSE.
+                    if msg_type == MessageType.REASONING:
+                        # If we had a pending MESSAGE, the model
+                        # interleaved a reasoning block — flush
+                        # the pending text before continuing.
+                        await _flush_pending()
+                        continue
+                    if buffer_preamble:
+                        # Hold this MESSAGE until we see what
+                        # comes next.  If a tool call follows in
+                        # the same turn, this was preamble and
+                        # gets dropped.  Otherwise it flushes
+                        # below on the next MESSAGE / response.
+                        await _flush_pending()  # flush any prior
+                        pending_message_send = (event, send_meta)
+                    else:
                         await self.on_event_message_completed(
                             request,
                             to_handle,
                             event,
                             send_meta,
                         )
+                elif obj == "message" and status != RunStatus.Completed:
+                    # Non-completed message events don't reach the
+                    # channel — but they DO mean we're still in
+                    # the same turn.  Leave any pending alone.
+                    pass
                 elif obj == "response":
+                    # End of stream — flush whatever's pending as
+                    # the model's final reply text.
+                    await _flush_pending()
                     last_response = event
                     await self.on_event_response(request, event)
+                else:
+                    # Anything else (function_call,
+                    # function_call_output, mcp, plan, etc.) means
+                    # the previous MESSAGE was preamble — drop it.
+                    if pending_message_send is not None:
+                        logger.info(
+                            "channel: dropped codex-oauth preamble text "
+                            "before %s/%s",
+                            obj, msg_type,
+                        )
+                        pending_message_send = None
+
+            # Defensive flush in case the iterator ended without a
+            # response event (shouldn't happen but cheap insurance).
+            await _flush_pending()
 
             err_msg = self._get_response_error_message(last_response)
             if err_msg:
