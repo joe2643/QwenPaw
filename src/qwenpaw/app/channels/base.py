@@ -549,6 +549,39 @@ class BaseChannel(ABC):
 
             pending_message_send: Optional[tuple] = None  # (event, meta)
 
+            def _serialize(ev: Any) -> str:
+                if hasattr(ev, "model_dump_json"):
+                    return ev.model_dump_json()
+                if hasattr(ev, "json"):
+                    return ev.json()
+                return json.dumps({"text": str(ev)})
+
+            def _yield_sse(ev: Any) -> str:
+                return f"data: {_serialize(ev)}\n\n"
+
+            def _yield_sse_as_reasoning(ev: Any) -> str:
+                """Re-serialize ``ev`` as a ``REASONING`` message so
+                Console UI renders it in the thinking pane instead
+                of the bot-reply pane.  Mutates a copy — original
+                event is left untouched in case downstream readers
+                of the iterator (tracing, telemetry) still need its
+                original type.
+                """
+                try:
+                    if hasattr(ev, "model_copy"):
+                        ev2 = ev.model_copy(
+                            update={"type": MessageType.REASONING},
+                        )
+                    else:
+                        ev2 = ev
+                        try:
+                            ev2.type = MessageType.REASONING
+                        except Exception:
+                            pass
+                    return _yield_sse(ev2)
+                except Exception:
+                    return _yield_sse(ev)
+
             async def _flush_pending():
                 nonlocal pending_message_send
                 if pending_message_send is not None:
@@ -559,18 +592,26 @@ class BaseChannel(ABC):
                     )
 
             async for event in process_iterator:
-                if hasattr(event, "model_dump_json"):
-                    data = event.model_dump_json()
-                elif hasattr(event, "json"):
-                    data = event.json()
-                else:
-                    data = json.dumps({"text": str(event)})
-
-                yield f"data: {data}\n\n"
-
                 obj = getattr(event, "object", None)
                 status = getattr(event, "status", None)
                 msg_type = getattr(event, "type", "")
+
+                # ── SSE yield decision ────────────────────────────
+                # For codex-oauth MESSAGE.MESSAGE events we *defer*
+                # the SSE yield: if a tool call follows we re-yield
+                # the buffered event as REASONING (Console UI shows
+                # it in the thinking pane); if a MESSAGE / response
+                # follows we yield it as-is (it was the final reply).
+                # All other events yield immediately so the Console
+                # UI never sees a stall.
+                deferred_sse = (
+                    buffer_preamble
+                    and obj == "message"
+                    and status == RunStatus.Completed
+                    and msg_type != MessageType.REASONING
+                )
+                if not deferred_sse:
+                    yield _yield_sse(event)
 
                 if obj == "content":
                     if await self.on_event_content(
@@ -581,21 +622,26 @@ class BaseChannel(ABC):
                     ):
                         continue
                 if obj == "message" and status == RunStatus.Completed:
-                    # MESSAGE.REASONING is always suppressed (see
-                    # comment above) — Console UI sees it via SSE.
+                    # MESSAGE.REASONING is always suppressed at the
+                    # channel.  Console UI already saw the SSE yield
+                    # above (deferred_sse is False for REASONING).
                     if msg_type == MessageType.REASONING:
-                        # If we had a pending MESSAGE, the model
-                        # interleaved a reasoning block — flush
-                        # the pending text before continuing.
                         await _flush_pending()
                         continue
                     if buffer_preamble:
                         # Hold this MESSAGE until we see what
-                        # comes next.  If a tool call follows in
-                        # the same turn, this was preamble and
-                        # gets dropped.  Otherwise it flushes
-                        # below on the next MESSAGE / response.
-                        await _flush_pending()  # flush any prior
+                        # comes next.  Pending event's SSE has not
+                        # been yielded yet — we yield it below
+                        # either as MESSAGE (final reply) or as
+                        # REASONING (preamble dropped from channel
+                        # but visible in Console UI thinking pane).
+                        if pending_message_send is not None:
+                            # Two MESSAGEs in a row → first one
+                            # was the actual final answer, flush
+                            # its SSE + dispatch.
+                            prior_event, _ = pending_message_send
+                            yield _yield_sse(prior_event)
+                            await _flush_pending()
                         pending_message_send = (event, send_meta)
                     else:
                         await self.on_event_message_completed(
@@ -606,30 +652,41 @@ class BaseChannel(ABC):
                         )
                 elif obj == "message" and status != RunStatus.Completed:
                     # Non-completed message events don't reach the
-                    # channel — but they DO mean we're still in
-                    # the same turn.  Leave any pending alone.
+                    # channel.  Leave any pending alone.
                     pass
                 elif obj == "response":
-                    # End of stream — flush whatever's pending as
-                    # the model's final reply text.
-                    await _flush_pending()
+                    # End of stream — pending was the final reply,
+                    # flush its SSE + dispatch normally.
+                    if pending_message_send is not None:
+                        prior_event, _ = pending_message_send
+                        yield _yield_sse(prior_event)
+                        await _flush_pending()
                     last_response = event
                     await self.on_event_response(request, event)
                 else:
                     # Anything else (function_call,
                     # function_call_output, mcp, plan, etc.) means
-                    # the previous MESSAGE was preamble — drop it.
+                    # the previous MESSAGE was preamble.  Yield its
+                    # SSE re-tagged as REASONING so the Console UI
+                    # can render it in its thinking pane, then drop
+                    # the channel-send.
                     if pending_message_send is not None:
+                        prior_event, _ = pending_message_send
+                        yield _yield_sse_as_reasoning(prior_event)
                         logger.info(
                             "channel: dropped codex-oauth preamble text "
-                            "before %s/%s",
+                            "before %s/%s (re-yielded as REASONING for UI)",
                             obj, msg_type,
                         )
                         pending_message_send = None
 
             # Defensive flush in case the iterator ended without a
-            # response event (shouldn't happen but cheap insurance).
-            await _flush_pending()
+            # response event.  Anything still pending here was the
+            # final reply, so yield + dispatch.
+            if pending_message_send is not None:
+                prior_event, _ = pending_message_send
+                yield _yield_sse(prior_event)
+                await _flush_pending()
 
             err_msg = self._get_response_error_message(last_response)
             if err_msg:
