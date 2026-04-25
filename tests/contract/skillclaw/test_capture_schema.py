@@ -92,23 +92,26 @@ def _validate_schema(rec: dict) -> None:
     assert isinstance(rec["session_id"], str) and rec["session_id"]
     assert isinstance(rec["turn"], int) and rec["turn"] >= 1
     assert isinstance(rec["timestamp"], str) and re.fullmatch(
-        r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", rec["timestamp"],
+        r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}",
+        rec["timestamp"],
     ), f"timestamp shape changed: {rec['timestamp']!r}"
 
     msgs = rec["messages"]
     assert isinstance(msgs, list) and msgs, "messages must be non-empty list"
     for i, m in enumerate(msgs):
         assert isinstance(m, dict), f"messages[{i}] not a dict"
-        assert m.keys() >= {"role", "content"}, (
-            f"messages[{i}] missing role/content: {sorted(m.keys())}"
-        )
-        assert m["role"] in ALLOWED_ROLES, (
-            f"messages[{i}].role={m['role']!r} not in {ALLOWED_ROLES}"
-        )
+        assert m.keys() >= {
+            "role",
+            "content",
+        }, f"messages[{i}] missing role/content: {sorted(m.keys())}"
+        assert (
+            m["role"] in ALLOWED_ROLES
+        ), f"messages[{i}].role={m['role']!r} not in {ALLOWED_ROLES}"
         # Content tolerated as str (proxy default) or list (multimodal)
-        assert isinstance(m["content"], (str, list)), (
-            f"messages[{i}].content type={type(m['content']).__name__}"
-        )
+        assert isinstance(
+            m["content"],
+            (str, list),
+        ), f"messages[{i}].content type={type(m['content']).__name__}"
 
 
 def test_upstream_fixture_satisfies_contract() -> None:

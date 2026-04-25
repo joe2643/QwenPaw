@@ -252,7 +252,8 @@ def test_strip_media_blocks_handles_mixed_content(mixed_content_message):
     _assert_no_media(msgs[0].content)
     # Original text blocks survive unchanged.
     texts = [
-        b["text"] for b in msgs[0].content
+        b["text"]
+        for b in msgs[0].content
         if isinstance(b, dict) and b.get("type") == "text"
     ]
     assert "Look at this:" in texts
@@ -324,9 +325,7 @@ def test_normalize_without_multimodal_support_strips_media(image_message):
 
     # Normalized: no media block, at least one text placeholder.
     _assert_no_media(normalized[0].content)
-    assert any(
-        b.get("type") == "text" for b in normalized[0].content
-    )
+    assert any(b.get("type") == "text" for b in normalized[0].content)
 
 
 def test_normalize_preserves_original_messages(mixed_content_message):
@@ -398,9 +397,7 @@ def test_normalize_conversation_with_multiple_messages():
     # First message: original text + replacement text for the
     # image (image block gone).
     _assert_no_media(normalized[0].content)
-    assert any(
-        b.get("text") == "Hello" for b in normalized[0].content
-    )
+    assert any(b.get("text") == "Hello" for b in normalized[0].content)
 
     # Second message: unchanged.
     assert normalized[1].content == [
@@ -409,9 +406,7 @@ def test_normalize_conversation_with_multiple_messages():
 
     # Third message: video replaced by text placeholder; no media.
     _assert_no_media(normalized[2].content)
-    assert any(
-        b.get("type") == "text" for b in normalized[2].content
-    )
+    assert any(b.get("type") == "text" for b in normalized[2].content)
 
     # Originals unchanged (normalizer clones).
     assert msgs[0].content[1]["type"] == "image"

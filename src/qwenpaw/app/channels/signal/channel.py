@@ -79,7 +79,9 @@ def _resolve_signal_data_dir(
     elif workspace_dir is not None:
         resolved = (
             Path(workspace_dir).expanduser()
-            / "credentials" / "signal" / "default"
+            / "credentials"
+            / "signal"
+            / "default"
         )
     else:
         resolved = _DEFAULT_DATA_DIR
@@ -92,10 +94,12 @@ def _resolve_signal_data_dir(
         logger.warning(
             "signal: legacy data dir found at %s; consider moving its "
             "contents to %s for per-agent isolation",
-            _LEGACY_DATA_DIR, resolved,
+            _LEGACY_DATA_DIR,
+            resolved,
         )
         _LEGACY_WARNED = True
     return resolved
+
 
 _UUID_LIKE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -111,24 +115,24 @@ def _looks_like_uuid(s: str) -> bool:
 # ── File type detection by magic bytes ───────────────────────────────────
 
 _MAGIC_MAP = [
-    (b"\xff\xd8\xff",           "image/jpeg", "jpg"),
-    (b"\x89PNG\r\n\x1a\n",     "image/png",  "png"),
-    (b"GIF87a",                 "image/gif",  "gif"),
-    (b"GIF89a",                 "image/gif",  "gif"),
-    (b"RIFF",                   "image/webp", "webp"),
-    (b"\x1a\x45\xdf\xa3",      "video/webm", "webm"),
-    (b"OggS",                   "audio/ogg",  "ogg"),
-    (b"fLaC",                   "audio/flac", "flac"),
-    (b"ID3",                    "audio/mpeg", "mp3"),
-    (b"\xff\xfb",               "audio/mpeg", "mp3"),
-    (b"%PDF",                   "application/pdf", "pdf"),
+    (b"\xff\xd8\xff", "image/jpeg", "jpg"),
+    (b"\x89PNG\r\n\x1a\n", "image/png", "png"),
+    (b"GIF87a", "image/gif", "gif"),
+    (b"GIF89a", "image/gif", "gif"),
+    (b"RIFF", "image/webp", "webp"),
+    (b"\x1a\x45\xdf\xa3", "video/webm", "webm"),
+    (b"OggS", "audio/ogg", "ogg"),
+    (b"fLaC", "audio/flac", "flac"),
+    (b"ID3", "audio/mpeg", "mp3"),
+    (b"\xff\xfb", "audio/mpeg", "mp3"),
+    (b"%PDF", "application/pdf", "pdf"),
 ]
 
 
 def _detect_mime(data: bytes) -> str:
     """Detect MIME type from the first few bytes."""
     for magic, mime, _ in _MAGIC_MAP:
-        if data[:len(magic)] == magic:
+        if data[: len(magic)] == magic:
             if magic == b"RIFF" and data[8:12] != b"WEBP":
                 continue
             return mime
@@ -138,6 +142,7 @@ def _detect_mime(data: bytes) -> str:
 
 
 # ── Markdown → Signal text-style ─────────────────────────────────────────
+
 
 def _markdown_to_signal(text: str) -> tuple[str, List[Dict[str, Any]]]:
     """Convert a limited markdown subset to plain text + Signal text-style
@@ -191,6 +196,19 @@ class SignalChannel(BaseChannel):
 
     channel = "signal"
     uses_manager_queue = True
+    # Signal protocol is hard one-process-per-account: two signal-cli
+    # daemons on the same account will fight for the SQLite/lock file
+    # under ``~/.local/share/signal-cli/data/``.  The default
+    # zero-downtime ``replace_channel`` path (start NEW first, stop OLD
+    # second) creates a brief overlap during which both daemons are
+    # alive, the new one stuck with ``Config file is in use by another
+    # instance, waiting…`` until the old one exits — and any RPCs
+    # routed to the new client during that window time out (we hit
+    # this concretely with ``uploadStickerPack`` returning empty
+    # ``signal: uploadStickerPack failed:``).  Sequential restart
+    # (stop old → start new) trades a few seconds of downtime for
+    # never having two daemons alive at once.
+    requires_sequential_restart = True
 
     def __init__(
         self,
@@ -239,7 +257,9 @@ class SignalChannel(BaseChannel):
         self._ack_reaction_done = ack_reaction_done or ""
         self._ack_reaction_error = ack_reaction_error or ""
         self._groups: List[str] = kwargs.get("groups") or []
-        self._group_allow_from: List[str] = kwargs.get("group_allow_from") or []
+        self._group_allow_from: List[str] = (
+            kwargs.get("group_allow_from") or []
+        )
         self._reply_to_trigger: bool = kwargs.get("reply_to_trigger", True)
         self._account_uuid: str = kwargs.get("account_uuid") or ""
         self._media_dir = _MEDIA_DIR
@@ -253,7 +273,8 @@ class SignalChannel(BaseChannel):
         self._uuid_prefix_lookup: Dict[str, str] = {}
         self._workspace_dir = workspace_dir
         self._data_dir: Path = _resolve_signal_data_dir(
-            data_dir, workspace_dir,
+            data_dir,
+            workspace_dir,
         )
 
         # Mention detection regression guard: signal-cli emits structured
@@ -266,7 +287,8 @@ class SignalChannel(BaseChannel):
         # usable UUID.
         if not self._account_uuid and account:
             self._account_uuid = self._auto_discover_account_uuid(
-                account, self._data_dir,
+                account,
+                self._data_dir,
             )
 
         self.client = SignalSubprocessClient(
@@ -281,7 +303,9 @@ class SignalChannel(BaseChannel):
                 "signal: initialized (account=%s, uuid=%s, signal_cli=%s, "
                 "data_dir=%s)",
                 account,
-                self._account_uuid[:8] + "…" if self._account_uuid else "<unset>",
+                self._account_uuid[:8] + "…"
+                if self._account_uuid
+                else "<unset>",
                 signal_cli_path,
                 self._data_dir,
             )
@@ -312,12 +336,15 @@ class SignalChannel(BaseChannel):
                     logger.info(
                         "signal: auto-discovered account_uuid=%s… for %s "
                         "(from %s)",
-                        uuid_value[:8], account, accounts_path,
+                        uuid_value[:8],
+                        account,
+                        accounts_path,
                     )
                     return uuid_value
         except Exception as e:  # pragma: no cover - best-effort discovery
             logger.debug(
-                "signal: auto-discover account_uuid failed: %s", e,
+                "signal: auto-discover account_uuid failed: %s",
+                e,
             )
         return ""
 
@@ -368,6 +395,115 @@ class SignalChannel(BaseChannel):
             reply_to_trigger=c.get("reply_to_trigger", True),
         )
 
+    async def update_config(self, config) -> bool:
+        """Patch config in-place without restarting signal-cli.
+
+        Signal config splits into two buckets:
+
+        * **Hard fields** — baked into the signal-cli spawn command
+          (``account``, ``signal_cli_path``, ``data_dir``,
+          ``extra_args``) or determine whether the daemon should
+          even be running (``enabled``).  Changing any of these
+          must trigger a real channel restart; we ``return False``
+          and let ``ChannelManager.replace_channel`` swap us out.
+        * **Soft fields** — read at request time by Python
+          (``send_read_receipts``, ``show_typing``, ``text_chunk_limit``,
+          ack reactions, ``groups`` / ``group_allow_from`` /
+          ``allow_from`` / ``dm_policy`` / ``group_policy`` /
+          ``require_mention`` / ``reply_to_trigger`` /
+          ``account_uuid`` / ``deny_message``).  Patching these
+          on the live channel is safe and avoids any signal-cli
+          subprocess restart, which would otherwise contest the
+          account file lock for several seconds.
+        """
+        if isinstance(config, dict):
+            c = config
+        elif hasattr(config, "model_dump"):
+            c = config.model_dump()
+        else:
+            c = vars(config) if hasattr(config, "__dict__") else dict(config)
+
+        # ── Hard-field guard ────────────────────────────────────────
+        new_enabled = bool(c.get("enabled", False))
+        if new_enabled != self.enabled:
+            logger.info(
+                "signal: update_config: enabled changed (%s → %s), "
+                "needs full restart",
+                self.enabled,
+                new_enabled,
+            )
+            return False
+
+        new_account = (c.get("account") or "").strip()
+        if new_account != (self._account or ""):
+            logger.info(
+                "signal: update_config: account changed, needs restart",
+            )
+            return False
+
+        new_signal_cli_path = c.get("signal_cli_path") or "signal-cli"
+        if new_signal_cli_path != self.client._signal_cli_path:
+            logger.info(
+                "signal: update_config: signal_cli_path changed, needs restart",
+            )
+            return False
+
+        new_data_dir = _resolve_signal_data_dir(
+            c.get("data_dir") or "",
+            self._workspace_dir,
+        )
+        if new_data_dir != self._data_dir:
+            logger.info(
+                "signal: update_config: data_dir changed, needs restart",
+            )
+            return False
+
+        new_extra_args = list(c.get("extra_args") or [])
+        if new_extra_args != list(self.client._extra_args):
+            logger.info(
+                "signal: update_config: extra_args changed, needs restart",
+            )
+            return False
+
+        # If signal-cli isn't actually connected, an in-place patch
+        # would leave a dead subprocess; surface the broken state to
+        # the caller so a full restart re-spawns the daemon.
+        if not self.client.connected:
+            logger.info(
+                "signal: update_config: subprocess not connected — "
+                "triggering full restart so the daemon respawns cleanly",
+            )
+            return False
+
+        # ── Soft-patchable fields ──────────────────────────────────
+        self._send_read_receipts = c.get("send_read_receipts", True)
+        self._show_typing = c.get("show_typing", True)
+        self._text_chunk_limit = c.get(
+            "text_chunk_limit",
+            SIGNAL_MAX_TEXT_LENGTH,
+        )
+        self._ack_reaction_thinking = c.get("ack_reaction_thinking", "🤔") or ""
+        self._ack_reaction_done = c.get("ack_reaction_done", "👀") or ""
+        self._ack_reaction_error = c.get("ack_reaction_error", "⚠️") or ""
+        self._groups = list(c.get("groups") or [])
+        self._group_allow_from = list(c.get("group_allow_from") or [])
+        self._reply_to_trigger = c.get("reply_to_trigger", True)
+        new_uuid = c.get("account_uuid") or c.get("accountUuid") or ""
+        if new_uuid:
+            self._account_uuid = new_uuid
+
+        # BaseChannel access-control fields
+        self.dm_policy = c.get("dm_policy") or "open"
+        self.group_policy = c.get("group_policy") or "open"
+        self.allow_from = list(c.get("allow_from") or [])
+        self.deny_message = c.get("deny_message") or ""
+        self.require_mention = c.get("require_mention", False)
+
+        logger.info(
+            "signal: config patched in-place (signal-cli daemon preserved)",
+        )
+        return True
+
     # ── Lifecycle ────────────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -391,7 +527,9 @@ class SignalChannel(BaseChannel):
         """Handle an inbound `receive` JSON-RPC notification."""
         try:
             envelope = params.get("envelope", params)
-            source = envelope.get("sourceNumber") or envelope.get("source") or ""
+            source = (
+                envelope.get("sourceNumber") or envelope.get("source") or ""
+            )
             source_uuid = envelope.get("sourceUuid") or ""
             source_name = envelope.get("sourceName") or ""
             timestamp = envelope.get("timestamp", 0)
@@ -402,7 +540,10 @@ class SignalChannel(BaseChannel):
             reaction_msg = envelope.get("reactionMessage")
             if reaction_msg:
                 await self._handle_inbound_reaction(
-                    source, source_uuid, reaction_msg, envelope,
+                    source,
+                    source_uuid,
+                    reaction_msg,
+                    envelope,
                 )
                 return
 
@@ -427,7 +568,11 @@ class SignalChannel(BaseChannel):
                     "signal: attachments found: %s",
                     json.dumps(attachments_raw)[:500],
                 )
-            if not body and not attachments_raw and not data_message.get("sticker"):
+            if (
+                not body
+                and not attachments_raw
+                and not data_message.get("sticker")
+            ):
                 return
 
             downloaded_media: List[Dict[str, str]] = []
@@ -436,7 +581,10 @@ class SignalChannel(BaseChannel):
                 if not att_id:
                     continue
                 ct = att.get("contentType") or ""
-                local = await self.client.download_attachment(att_id, self._media_dir)
+                local = await self.client.download_attachment(
+                    att_id,
+                    self._media_dir,
+                )
                 if local:
                     downloaded_media.append({"path": str(local), "type": ct})
 
@@ -453,20 +601,28 @@ class SignalChannel(BaseChannel):
             if sticker_info:
                 sticker_path = await self._download_sticker(sticker_info)
                 if sticker_path:
-                    downloaded_media.append({
-                        "path": str(sticker_path),
-                        "type": "image/webp",
-                        "is_sticker": "1",
-                        "emoji": str(sticker_info.get("emoji") or ""),
-                    })
+                    downloaded_media.append(
+                        {
+                            "path": str(sticker_path),
+                            "type": "image/webp",
+                            "is_sticker": "1",
+                            "emoji": str(sticker_info.get("emoji") or ""),
+                        },
+                    )
 
             # ── Access control ────────────────────────────────────
             if group_id:
                 if self.group_policy == "allowlist":
                     if not self._groups or group_id not in self._groups:
-                        logger.debug(
-                            "signal: blocked group %s (allowlist=%s)",
-                            group_id[:12], self._groups,
+                        # Elevated from DEBUG: at INFO level this is
+                        # how operators diagnose "I messaged the bot
+                        # in a group and nothing happened".  Default
+                        # root log level is INFO so DEBUG was invisible.
+                        logger.info(
+                            "signal: blocked group %s (not in allowlist of "
+                            "%d entries)",
+                            group_id[:20],
+                            len(self._groups or []),
                         )
                         return
                 if self._group_allow_from:
@@ -478,9 +634,11 @@ class SignalChannel(BaseChannel):
                         or source_uuid in self._group_allow_from
                         or f"uuid:{source_uuid}" in self._group_allow_from
                     ):
-                        logger.debug(
-                            "signal: blocked sender %s by group_allow_from",
+                        logger.info(
+                            "signal: blocked sender %s in group %s by "
+                            "group_allow_from",
                             sender_id,
+                            group_id[:20],
                         )
                         return
                 # Compute mention status once so channel_meta can reflect
@@ -488,25 +646,54 @@ class SignalChannel(BaseChannel):
                 # the real check; DMs are always implicitly addressed to
                 # the bot so they fall through to True below.
                 bot_mentioned_actual = self._is_bot_mentioned(
-                    data_message, body,
+                    data_message,
+                    body,
                 )
                 if self.require_mention:
                     if not bot_mentioned_actual:
+                        # Silent-drop until now.  Log what we know so
+                        # the operator can tell whether the structured
+                        # picker-mention reached us at all.
+                        mentions_raw = data_message.get("mentions") or []
+                        mention_summary = [
+                            {
+                                "uuid": (m.get("uuid") or "")[:8],
+                                "number": m.get("number"),
+                            }
+                            for m in mentions_raw
+                        ]
+                        logger.info(
+                            "signal: require_mention drop (group %s, "
+                            "sender %s) — my_uuid=%s my_phone=%s "
+                            "body=%r mentions=%s",
+                            group_id[:20],
+                            (source or source_uuid)[:16],
+                            (self._account_uuid or "")[:8],
+                            self._account,
+                            body[:80],
+                            mention_summary,
+                        )
                         if body or downloaded_media:
                             media_paths = [m["path"] for m in downloaded_media]
                             sender_label = self._format_sender_display(
-                                source, source_uuid,
+                                source,
+                                source_uuid,
                             )
-                            history = self._group_history.setdefault(group_id, [])
-                            history.append({
-                                "sender": sender_label,
-                                "body": body or "[media]",
-                                "ts": timestamp,
-                                "media": media_paths,
-                            })
+                            history = self._group_history.setdefault(
+                                group_id,
+                                [],
+                            )
+                            history.append(
+                                {
+                                    "sender": sender_label,
+                                    "body": body or "[media]",
+                                    "ts": timestamp,
+                                    "media": media_paths,
+                                },
+                            )
                             if len(history) > self._group_history_limit:
                                 self._group_history[group_id] = history[
-                                    -self._group_history_limit:
+                                    -self._group_history_limit :
                                 ]
                         return
             else:
@@ -535,13 +722,17 @@ class SignalChannel(BaseChannel):
                 "signal: from %s%s: %s",
                 source or source_uuid[:12],
                 " (group)" if group_id else "",
-                body[:80] if body else f"[{len(attachments_raw)} attachment(s)]",
+                body[:80]
+                if body
+                else f"[{len(attachments_raw)} attachment(s)]",
             )
 
             # ── Build content parts ───────────────────────────────
             content_parts: List[Any] = []
             if body:
-                content_parts.append(TextContent(type=ContentType.TEXT, text=body))
+                content_parts.append(
+                    TextContent(type=ContentType.TEXT, text=body),
+                )
 
             quote_parts = await self._extract_quote_content(data_message)
             if quote_parts:
@@ -566,29 +757,47 @@ class SignalChannel(BaseChannel):
                         if emoji
                         else f"[Signal sticker at {p}]"
                     )
-                    content_parts.append(TextContent(
-                        type=ContentType.TEXT, text=hint,
-                    ))
-                    content_parts.append(ImageContent(
-                        type=ContentType.IMAGE, image_url=media_url,
-                    ))
+                    content_parts.append(
+                        TextContent(
+                            type=ContentType.TEXT,
+                            text=hint,
+                        ),
+                    )
+                    content_parts.append(
+                        ImageContent(
+                            type=ContentType.IMAGE,
+                            image_url=media_url,
+                        ),
+                    )
                     continue
                 if ct.startswith("image/"):
-                    content_parts.append(ImageContent(
-                        type=ContentType.IMAGE, image_url=media_url,
-                    ))
+                    content_parts.append(
+                        ImageContent(
+                            type=ContentType.IMAGE,
+                            image_url=media_url,
+                        ),
+                    )
                 elif ct.startswith("video/"):
-                    content_parts.append(VideoContent(
-                        type=ContentType.VIDEO, video_url=media_url,
-                    ))
+                    content_parts.append(
+                        VideoContent(
+                            type=ContentType.VIDEO,
+                            video_url=media_url,
+                        ),
+                    )
                 elif ct.startswith("audio/"):
-                    content_parts.append(AudioContent(
-                        type=ContentType.AUDIO, data=media_url,
-                    ))
+                    content_parts.append(
+                        AudioContent(
+                            type=ContentType.AUDIO,
+                            data=media_url,
+                        ),
+                    )
                 else:
-                    content_parts.append(FileContent(
-                        type=ContentType.FILE, file_url=media_url,
-                    ))
+                    content_parts.append(
+                        FileContent(
+                            type=ContentType.FILE,
+                            file_url=media_url,
+                        ),
+                    )
 
             if not content_parts:
                 return
@@ -596,7 +805,11 @@ class SignalChannel(BaseChannel):
             body = self._strip_bot_self_mention(body)
             has_bot_command = bool(body and body.lstrip().startswith("/"))
 
-            if not has_bot_command and group_id and group_id in self._group_history:
+            if (
+                not has_bot_command
+                and group_id
+                and group_id in self._group_history
+            ):
                 history = self._group_history.get(group_id, [])
                 if history:
                     ctx_lines = [
@@ -618,12 +831,16 @@ class SignalChannel(BaseChannel):
                     ctx_lines.append("=== end of group history ===")
                     ctx_text = "\n".join(ctx_lines)
                     content_parts.insert(
-                        0, TextContent(type=ContentType.TEXT, text=ctx_text),
+                        0,
+                        TextContent(type=ContentType.TEXT, text=ctx_text),
                     )
                     for mp in media_to_add[-3:]:
-                        content_parts.append(ImageContent(
-                            type=ContentType.IMAGE, image_url=mp,
-                        ))
+                        content_parts.append(
+                            ImageContent(
+                                type=ContentType.IMAGE,
+                                image_url=mp,
+                            ),
+                        )
                     self._group_history[group_id] = []
 
             sender_label = self._format_sender_display(source, source_uuid)
@@ -641,7 +858,8 @@ class SignalChannel(BaseChannel):
                     txt = self._strip_bot_self_mention(txt)
                     if has_bot_command:
                         content_parts[i] = TextContent(
-                            type=ContentType.TEXT, text=txt,
+                            type=ContentType.TEXT,
+                            text=txt,
                         )
                     else:
                         content_parts[i] = TextContent(
@@ -650,15 +868,21 @@ class SignalChannel(BaseChannel):
                         )
                     break
             else:
-                content_parts.insert(0, TextContent(
-                    type=ContentType.TEXT, text=f"{envelope_prefix}: [media]",
-                ))
+                content_parts.insert(
+                    0,
+                    TextContent(
+                        type=ContentType.TEXT,
+                        text=f"{envelope_prefix}: [media]",
+                    ),
+                )
 
             # Emit in both DMs and groups so the bot always knows how to mention.
             # Skip for slash commands (they bypass the agent entirely).
             if not has_bot_command:
                 bot_id = self._account or (
-                    f"uuid:{self._account_uuid[:8]}" if self._account_uuid else ""
+                    f"uuid:{self._account_uuid[:8]}"
+                    if self._account_uuid
+                    else ""
                 )
                 hint_line = (
                     f"[Signal bot {bot_id}. "
@@ -666,9 +890,13 @@ class SignalChannel(BaseChannel):
                     f"(e.g. @+85251159218 (Joe) or @uuid:82e0393a (Joe)). "
                     f"The (name) part is optional but helpful for readability.]"
                 )
-                content_parts.insert(0, TextContent(
-                    type=ContentType.TEXT, text=hint_line,
-                ))
+                content_parts.insert(
+                    0,
+                    TextContent(
+                        type=ContentType.TEXT,
+                        text=hint_line,
+                    ),
+                )
 
             channel_meta: Dict[str, Any] = {
                 "platform": "signal",
@@ -687,7 +915,8 @@ class SignalChannel(BaseChannel):
                 "bot_mentioned": bot_mentioned_actual,
             }
             session_id = self.resolve_session_id(
-                source or source_uuid, channel_meta,
+                source or source_uuid,
+                channel_meta,
             )
             effective_sender = (
                 f"group:{group_id}" if group_id else (source or source_uuid)
@@ -710,13 +939,15 @@ class SignalChannel(BaseChannel):
             channel_meta["_ack_timestamp"] = timestamp
 
             if self._ack_reaction_thinking:
-                asyncio.create_task(self.client.send_reaction(
-                    typing_target,
-                    self._ack_reaction_thinking,
-                    target_author=source or source_uuid,
-                    target_timestamp=timestamp,
-                    is_group=is_group,
-                ))
+                asyncio.create_task(
+                    self.client.send_reaction(
+                        typing_target,
+                        self._ack_reaction_thinking,
+                        target_author=source or source_uuid,
+                        target_timestamp=timestamp,
+                        is_group=is_group,
+                    ),
+                )
 
             if self._enqueue is not None:
                 self._enqueue(request)
@@ -740,12 +971,15 @@ class SignalChannel(BaseChannel):
         cached yet.
         """
         pack_id = str(sticker.get("packId") or "").strip()
+        raw_sticker_id = sticker.get("stickerId")
+        if raw_sticker_id is None:
+            return None
         try:
-            sticker_id = int(sticker.get("stickerId"))
+            sticker_id = int(raw_sticker_id)
         except (TypeError, ValueError):
             logger.warning(
                 "signal: sticker field has non-int stickerId: %r",
-                sticker.get("stickerId"),
+                raw_sticker_id,
             )
             return None
         if not pack_id:
@@ -761,7 +995,9 @@ class SignalChannel(BaseChannel):
         except Exception as e:
             logger.warning(
                 "signal: sticker fetch failed pack=%s id=%s: %s",
-                pack_id[:12], sticker_id, e,
+                pack_id[:12],
+                sticker_id,
+                e,
             )
             return None
 
@@ -788,7 +1024,11 @@ class SignalChannel(BaseChannel):
 
     # ── Access control / naming helpers ──────────────────────────────
 
-    def _is_bot_mentioned(self, data_message: Dict[str, Any], body: str) -> bool:
+    def _is_bot_mentioned(
+        self,
+        data_message: Dict[str, Any],
+        body: str,
+    ) -> bool:
         # Structured mentions are the reliable signal (set by signal-cli
         # from the wire protocol). Accept both uuid and phone matches.
         mentions = data_message.get("mentions") or []
@@ -807,11 +1047,13 @@ class SignalChannel(BaseChannel):
         # account "+123" doesn't falsely match body "@+12345 hello"
         # (prefix-collision bug; identical to the WhatsApp round-3 fix).
         if self._account and re.search(
-            rf"@\+?{re.escape(self._account.lstrip('+'))}(?!\d)", body,
+            rf"@\+?{re.escape(self._account.lstrip('+'))}(?!\d)",
+            body,
         ):
             return True
         if self._account_uuid and re.search(
-            rf"@{re.escape(self._account_uuid)}(?!\w)", body,
+            rf"@{re.escape(self._account_uuid)}(?!\w)",
+            body,
         ):
             return True
         return False
@@ -828,14 +1070,19 @@ class SignalChannel(BaseChannel):
                 return True
         return False
 
-    def _remember_sender(self, source: str, source_uuid: str, name: str) -> None:
+    def _remember_sender(
+        self,
+        source: str,
+        source_uuid: str,
+        name: str,
+    ) -> None:
         # Name map is populated only when we know a human-friendly name, but
         # UUID prefix → full UUID MUST be recorded unconditionally so that
         # outbound mentions can resolve short-form uuids from older history.
         if source_uuid:
-            self._uuid_prefix_lookup[source_uuid[:8].lower()] = (
-                source_uuid.lower()
-            )
+            self._uuid_prefix_lookup[
+                source_uuid[:8].lower()
+            ] = source_uuid.lower()
         if not name or _looks_like_uuid(name):
             return
         if source:
@@ -884,7 +1131,7 @@ class SignalChannel(BaseChannel):
         for pat in patterns:
             m = pat.match(text)
             if m:
-                return text[m.end():].lstrip()
+                return text[m.end() :].lstrip()
         return text
 
     def _format_sender_display(self, source: str, source_uuid: str) -> str:
@@ -909,7 +1156,8 @@ class SignalChannel(BaseChannel):
         return "unknown"
 
     def _compile_outbound_mentions(
-        self, text: str,
+        self,
+        text: str,
     ) -> tuple[str, List[Dict[str, Any]]]:
         pat = re.compile(
             r"@(?:[^@\s()]+\s*)?"
@@ -928,7 +1176,7 @@ class SignalChannel(BaseChannel):
         mentions: List[Dict[str, Any]] = []
         cursor = 0
         for m in pat.finditer(text):
-            out.append(text[cursor:m.start()])
+            out.append(text[cursor : m.start()])
             phone = m.group(1) or m.group(3) or ""
             uuid_v = m.group(2) or m.group(4) or ""
             if phone or uuid_v:
@@ -951,12 +1199,16 @@ class SignalChannel(BaseChannel):
         return "".join(out), mentions
 
     def _expand_mentions(
-        self, body: str, mentions: List[Dict[str, Any]],
+        self,
+        body: str,
+        mentions: List[Dict[str, Any]],
     ) -> str:
         if not body or not mentions:
             return body
         sorted_mentions = sorted(
-            mentions, key=lambda m: m.get("start", 0), reverse=True,
+            mentions,
+            key=lambda m: m.get("start", 0),
+            reverse=True,
         )
         result = body
         for m in sorted_mentions:
@@ -981,8 +1233,18 @@ class SignalChannel(BaseChannel):
             # into a structured Signal mention: signal-cli needs a complete
             # ACI to look up the contact, and a truncated prefix ended up
             # as raw text in the recipient's view.
-            phone_str = number if number.startswith("+") else f"+{number}" if number else ""
-            id_str = phone_str if phone_str else (f"uuid:{uuid_v}" if uuid_v else "")
+            phone_str = (
+                number
+                if number.startswith("+")
+                else f"+{number}"
+                if number
+                else ""
+            )
+            id_str = (
+                phone_str
+                if phone_str
+                else (f"uuid:{uuid_v}" if uuid_v else "")
+            )
             if id_str and name:
                 token = f"@{id_str} ({name})"
             elif id_str:
@@ -991,13 +1253,14 @@ class SignalChannel(BaseChannel):
                 token = f"@{name}"
             else:
                 token = "@someone"
-            result = result[:start] + token + result[start + length:]
+            result = result[:start] + token + result[start + length :]
         return result
 
     # ── Quote / reply-to extraction ──────────────────────────────────
 
     async def _extract_quote_content(
-        self, data_message: Dict[str, Any],
+        self,
+        data_message: Dict[str, Any],
     ) -> List[Any]:
         quote = data_message.get("quote")
         if not quote:
@@ -1026,7 +1289,8 @@ class SignalChannel(BaseChannel):
             att_id = att.get("id") or ""
             if att_id:
                 local = await self.client.download_attachment(
-                    att_id, self._media_dir,
+                    att_id,
+                    self._media_dir,
                 )
                 if local:
                     if not att_ct or att_ct == "application/octet-stream":
@@ -1048,27 +1312,37 @@ class SignalChannel(BaseChannel):
                     # which attachment is which.
                     local_path_str = str(local)
                     if att_ct.startswith("image/"):
-                        parts.append(ImageContent(
-                            type=ContentType.IMAGE, image_url=att_media_url,
-                        ))
+                        parts.append(
+                            ImageContent(
+                                type=ContentType.IMAGE,
+                                image_url=att_media_url,
+                            ),
+                        )
                         media_labels.append(f"image: {local_path_str}")
                     elif att_ct.startswith("video/"):
-                        parts.append(VideoContent(
-                            type=ContentType.VIDEO, video_url=att_media_url,
-                        ))
+                        parts.append(
+                            VideoContent(
+                                type=ContentType.VIDEO,
+                                video_url=att_media_url,
+                            ),
+                        )
                         media_labels.append(f"video: {local_path_str}")
                     elif att_ct.startswith("audio/"):
-                        parts.append(AudioContent(
-                            type=ContentType.AUDIO, data=att_media_url,
-                        ))
+                        parts.append(
+                            AudioContent(
+                                type=ContentType.AUDIO,
+                                data=att_media_url,
+                            ),
+                        )
                         media_labels.append(f"audio: {local_path_str}")
                     else:
-                        base = (
-                            f"file: {att_fname}" if att_fname else "file"
+                        base = f"file: {att_fname}" if att_fname else "file"
+                        parts.append(
+                            FileContent(
+                                type=ContentType.FILE,
+                                file_url=att_media_url,
+                            ),
                         )
-                        parts.append(FileContent(
-                            type=ContentType.FILE, file_url=att_media_url,
-                        ))
                         media_labels.append(f"{base} ({local_path_str})")
                     continue
             media_labels.append(att_fname or att_ct or "attachment")
@@ -1089,10 +1363,12 @@ class SignalChannel(BaseChannel):
                     else f"sticker ({sticker_path})"
                 )
                 media_labels.append(label)
-                parts.append(ImageContent(
-                    type=ContentType.IMAGE,
-                    image_url=await resolve_media_url(str(sticker_path)),
-                ))
+                parts.append(
+                    ImageContent(
+                        type=ContentType.IMAGE,
+                        image_url=await resolve_media_url(str(sticker_path)),
+                    ),
+                )
             else:
                 emoji = str(quote_sticker.get("emoji") or "").strip()
                 media_labels.append(
@@ -1106,7 +1382,8 @@ class SignalChannel(BaseChannel):
                 "=== UNTRUSTED reply-to (this message quotes an earlier one) ===",
             ]
             author_str = self._format_sender_display(
-                quote_author_number, quote_author_uuid,
+                quote_author_number,
+                quote_author_uuid,
             )
             lines.append(f"From: {author_str}")
             if quote_id:
@@ -1117,7 +1394,8 @@ class SignalChannel(BaseChannel):
                 lines.append(f"Media: {', '.join(media_labels)}")
             lines.append("=== end of reply-to ===")
             parts.insert(
-                0, TextContent(type=ContentType.TEXT, text="\n".join(lines)),
+                0,
+                TextContent(type=ContentType.TEXT, text="\n".join(lines)),
             )
         return parts
 
@@ -1158,10 +1436,9 @@ class SignalChannel(BaseChannel):
             except (ValueError, AttributeError):
                 # Python <3.9 or cross-drive paths: fall back to commonpath.
                 try:
-                    is_contained = (
-                        os.path.commonpath([str(resolved), str(safe_dir)])
-                        == str(safe_dir)
-                    )
+                    is_contained = os.path.commonpath(
+                        [str(resolved), str(safe_dir)],
+                    ) == str(safe_dir)
                 except ValueError:
                     is_contained = False
             if is_contained and resolved.is_file():
@@ -1170,7 +1447,8 @@ class SignalChannel(BaseChannel):
                 logger.info("signal: extracted image attachment: %s", resolved)
             elif os.path.isfile(p):
                 logger.warning(
-                    "signal: blocked send of %s — outside media dir", p,
+                    "signal: blocked send of %s — outside media dir",
+                    p,
                 )
                 text = text.replace(f"[Image: {m}]", "").strip()
 
@@ -1186,11 +1464,15 @@ class SignalChannel(BaseChannel):
         # characters, so U+FFFC positions survive verbatim in the output.
         # Finally, recompute mention start offsets by scanning the final
         # plain_text for U+FFFC positions — one per placeholder, in order.
-        text_with_ffc, tentative_mentions = self._compile_outbound_mentions(text)
+        text_with_ffc, tentative_mentions = self._compile_outbound_mentions(
+            text,
+        )
         plain_text, styles = _markdown_to_signal(text_with_ffc)
-        text_style_params = [
-            f"{s['start']}:{s['length']}:{s['style']}" for s in styles
-        ] if styles else None
+        text_style_params = (
+            [f"{s['start']}:{s['length']}:{s['style']}" for s in styles]
+            if styles
+            else None
+        )
         ffc_positions = [i for i, c in enumerate(plain_text) if c == "\ufffc"]
         mention_dicts: List[Dict[str, Any]] = []
         for pos, entry in zip(ffc_positions, tentative_mentions):
@@ -1212,7 +1494,7 @@ class SignalChannel(BaseChannel):
                     1 for c in "".join(chunks[:i]) if c == "\ufffc"
                 )
                 mentions_in_chunk = mention_dicts[
-                    consumed_before:consumed_before + len(chunk_positions)
+                    consumed_before : consumed_before + len(chunk_positions)
                 ]
                 chunk_mention_strs = []
                 for pos, orig in zip(chunk_positions, mentions_in_chunk):
@@ -1225,7 +1507,9 @@ class SignalChannel(BaseChannel):
             if not (chunk.strip() or atts):
                 continue
 
-            qt = meta.get("quote_timestamp", 0) if self._reply_to_trigger else 0
+            qt = (
+                meta.get("quote_timestamp", 0) if self._reply_to_trigger else 0
+            )
             qa = meta.get("quote_author", "") if self._reply_to_trigger else ""
             # Diagnostic: snapshot outbound text + mention params so we
             # can diff the "what the bot wrote" vs "what signal-cli got"
@@ -1274,9 +1558,10 @@ class SignalChannel(BaseChannel):
         elif t == ContentType.VIDEO:
             raw_path = getattr(part, "video_url", None)
         elif t == ContentType.FILE:
-            raw_path = (
-                getattr(part, "file_url", None)
-                or getattr(part, "file_id", None)
+            raw_path = getattr(part, "file_url", None) or getattr(
+                part,
+                "file_id",
+                None,
             )
         elif t == ContentType.AUDIO:
             raw_path = getattr(part, "data", None)
@@ -1292,7 +1577,10 @@ class SignalChannel(BaseChannel):
             logger.warning("signal: media file not found: %s", file_path)
             return
         await self.client.send_message(
-            to_handle, "", is_group=is_group, attachments=[file_path],
+            to_handle,
+            "",
+            is_group=is_group,
+            attachments=[file_path],
         )
 
     async def send_reaction_to(
@@ -1304,7 +1592,10 @@ class SignalChannel(BaseChannel):
         is_group: bool = False,
     ) -> bool:
         return await self.client.send_reaction(
-            to_handle, emoji, target_author, target_timestamp,
+            to_handle,
+            emoji,
+            target_author,
+            target_timestamp,
             is_group=is_group,
         )
 
@@ -1324,23 +1615,30 @@ class SignalChannel(BaseChannel):
             if last_nl > self._text_chunk_limit // 2:
                 chunk = rest[:last_nl]
             chunks.append(chunk)
-            rest = rest[len(chunk):]
+            rest = rest[len(chunk) :]
         return chunks
 
     # ── Typing indicator loop ────────────────────────────────────────
 
     async def _typing_loop(
-        self, target: str, is_group: bool, interval: float = 4.0,
+        self,
+        target: str,
+        is_group: bool,
+        interval: float = 4.0,
     ) -> None:
         try:
             while True:
                 await self.client.send_typing(
-                    target, start=True, is_group=is_group,
+                    target,
+                    start=True,
+                    is_group=is_group,
                 )
                 await asyncio.sleep(interval)
         except asyncio.CancelledError:
             await self.client.send_typing(
-                target, start=False, is_group=is_group,
+                target,
+                start=False,
+                is_group=is_group,
             )
 
     # ── Process-loop override ────────────────────────────────────────
@@ -1378,10 +1676,14 @@ class SignalChannel(BaseChannel):
 
                 if obj == "message" and status == RunStatus.Completed:
                     logger.info(
-                        "signal: message_completed, sending to %s", to_handle,
+                        "signal: message_completed, sending to %s",
+                        to_handle,
                     )
                     await self.on_event_message_completed(
-                        request, to_handle, event, send_meta,
+                        request,
+                        to_handle,
+                        event,
+                        send_meta,
                     )
                     message_completed = True
 
@@ -1393,7 +1695,11 @@ class SignalChannel(BaseChannel):
                         from agentscope_runtime.engine.schemas.agent_schemas import (
                             MessageType,
                         )
-                        if getattr(event, "type", None) == MessageType.REASONING:
+
+                        if (
+                            getattr(event, "type", None)
+                            == MessageType.REASONING
+                        ):
                             continue
                         pt = str(getattr(part, "type", ""))
                         if "thinking" in pt.lower():
@@ -1404,7 +1710,8 @@ class SignalChannel(BaseChannel):
                 reply = "\n".join(text_parts)
                 logger.info(
                     "signal: fallback sending reply (%d chars) to %s",
-                    len(reply), to_handle,
+                    len(reply),
+                    to_handle,
                 )
                 await self.send(to_handle, reply.strip(), send_meta)
 
@@ -1414,7 +1721,8 @@ class SignalChannel(BaseChannel):
 
             produced_reply = message_completed or bool(text_parts)
             ack_emoji = (
-                self._ack_reaction_done if produced_reply
+                self._ack_reaction_done
+                if produced_reply
                 else self._ack_reaction_error
             )
             if ack_emoji:
@@ -1428,7 +1736,8 @@ class SignalChannel(BaseChannel):
             logger.exception("signal: _stream_with_tracker failed")
             if self._ack_reaction_error:
                 await self._send_ack_reaction(
-                    send_meta, self._ack_reaction_error,
+                    send_meta,
+                    self._ack_reaction_error,
                 )
             raise
         finally:
@@ -1436,7 +1745,9 @@ class SignalChannel(BaseChannel):
                 typing_task.cancel()
 
     async def _send_ack_reaction(
-        self, send_meta: Dict[str, Any], emoji: str,
+        self,
+        send_meta: Dict[str, Any],
+        emoji: str,
     ) -> None:
         ack_target = send_meta.get("_ack_target")
         ack_author = send_meta.get("_ack_author")

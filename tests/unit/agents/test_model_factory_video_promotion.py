@@ -28,12 +28,14 @@ def _view_video_history(pairs: list[tuple[str, str]]) -> list[Msg]:
             Msg(
                 name="assistant",
                 role="assistant",
-                content=[{
-                    "type": "tool_use",
-                    "id": call_id,
-                    "name": "view_video",
-                    "input": {"video_path": f"/tmp/{call_id}.mp4"},
-                }],
+                content=[
+                    {
+                        "type": "tool_use",
+                        "id": call_id,
+                        "name": "view_video",
+                        "input": {"video_path": f"/tmp/{call_id}.mp4"},
+                    },
+                ],
             ),
         )
         msgs.append(
@@ -45,10 +47,12 @@ def _view_video_history(pairs: list[tuple[str, str]]) -> list[Msg]:
                         type="tool_result",
                         id=call_id,
                         name="view_video",
-                        output=[{
-                            "type": "video",
-                            "source": {"type": "url", "url": url},
-                        }],
+                        output=[
+                            {
+                                "type": "video",
+                                "source": {"type": "url", "url": url},
+                            },
+                        ],
                     ),
                 ],
             ),
@@ -99,15 +103,21 @@ def test_video_url_expired_accepts_future_exp() -> None:
 
 def test_video_url_expired_no_exp_treated_valid() -> None:
     """URLs without exp= (e.g. public CDN) should not be flagged expired."""
-    assert model_factory._video_url_expired(
-        "https://example.com/video.mp4",
-    ) is False
+    assert (
+        model_factory._video_url_expired(
+            "https://example.com/video.mp4",
+        )
+        is False
+    )
 
 
 def test_video_url_expired_malformed_does_not_raise() -> None:
-    assert model_factory._video_url_expired(
-        "https://x/?exp=not-a-number",
-    ) is False
+    assert (
+        model_factory._video_url_expired(
+            "https://x/?exp=not-a-number",
+        )
+        is False
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -155,8 +165,10 @@ def test_promote_replaces_expired_video_with_placeholder() -> None:
     result = model_factory._promote_tool_result_videos(msgs, formatted)
 
     promoted = result[1]
-    assert not _promoted_has_video_url(promoted, url), \
-        "expired video_url must not leak into the API request"
+    assert not _promoted_has_video_url(
+        promoted,
+        url,
+    ), "expired video_url must not leak into the API request"
     assert any("expired" in t for t in _promoted_texts(promoted))
 
 

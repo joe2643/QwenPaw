@@ -28,8 +28,7 @@ export const CHANNEL_ICON_URLS: Record<string, string> = {
   weixin:
     "https://gw.alicdn.com/imgextra/i4/O1CN01GsAob11fkfDWVIb3R_!!6000000004045-2-tps-400-400.png",
   signal: "https://upload.wikimedia.org/wikipedia/commons/8/8d/Signal-Logo.svg",
-  whatsapp:
-    "https://upload.wikimedia.org/wikipedia/commons/6/6b/WhatsApp.svg",
+  whatsapp: "https://upload.wikimedia.org/wikipedia/commons/6/6b/WhatsApp.svg",
   onebot:
     "https://gw.alicdn.com/imgextra/i3/O1CN01xqM0EN1oKrRiAFX3K_!!6000000005207-2-tps-400-400.png",
 };

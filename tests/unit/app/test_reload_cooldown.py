@@ -97,13 +97,17 @@ async def test_cooldown_skip_count_accumulates(caplog):
     _attach_module_logger(caplog)
 
     for _ in range(11):
-        assert await mgr.reload_agent(agent_id) is ReloadResult.SKIPPED_COOLDOWN
+        assert (
+            await mgr.reload_agent(agent_id) is ReloadResult.SKIPPED_COOLDOWN
+        )
 
     assert mgr._reload_skip_count[agent_id] == 11
-    levels = {r.levelno for r in caplog.records if "skip_count" in r.getMessage()}
-    assert logging.ERROR in levels, (
-        "storm escalation (≥10 skips) should emit at least one ERROR record"
-    )
+    levels = {
+        r.levelno for r in caplog.records if "skip_count" in r.getMessage()
+    }
+    assert (
+        logging.ERROR in levels
+    ), "storm escalation (≥10 skips) should emit at least one ERROR record"
 
 
 @pytest.mark.asyncio
@@ -154,8 +158,10 @@ async def test_cooldown_is_per_agent(caplog):
     assert await mgr.reload_agent("A") is ReloadResult.SKIPPED_COOLDOWN
 
     a_skip_warnings = [
-        r for r in caplog.records
-        if "reload_agent skipped" in r.getMessage() and "for A" in r.getMessage()
+        r
+        for r in caplog.records
+        if "reload_agent skipped" in r.getMessage()
+        and "for A" in r.getMessage()
     ]
     assert len(a_skip_warnings) == 1
 
@@ -169,8 +175,10 @@ async def test_cooldown_is_per_agent(caplog):
         pass
 
     b_skip_warnings = [
-        r for r in caplog.records
-        if "reload_agent skipped" in r.getMessage() and "for B" in r.getMessage()
+        r
+        for r in caplog.records
+        if "reload_agent skipped" in r.getMessage()
+        and "for B" in r.getMessage()
     ]
     assert not b_skip_warnings, (
         "B should have passed the cooldown guard; "
@@ -207,9 +215,9 @@ async def test_cooldown_zero_disables_guard(caplog):
     skip_records = [
         r for r in caplog.records if "reload_agent skipped" in r.getMessage()
     ]
-    assert not skip_records, (
-        "cooldown=0 must never short-circuit the reload path"
-    )
+    assert (
+        not skip_records
+    ), "cooldown=0 must never short-circuit the reload path"
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +264,6 @@ async def test_concurrent_reloads_respect_cooldown(caplog):
     # before reaching the atomic-swap timestamp update, later callers may
     # not see a fresh timestamp — so we accept either ≥9 or 10 skipped as
     # long as no fewer than 9 were guarded.
-    assert skipped >= 9, (
-        f"cooldown must serialize concurrent reloads (got {skipped}/10 skipped)"
-    )
+    assert (
+        skipped >= 9
+    ), f"cooldown must serialize concurrent reloads (got {skipped}/10 skipped)"

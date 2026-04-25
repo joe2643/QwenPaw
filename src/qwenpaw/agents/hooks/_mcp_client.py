@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """HTTP MCP client for calling mempalace MCP server from hooks."""
 import json
 import requests
@@ -19,11 +20,24 @@ def mcp_call(tool_name, params=None):
     # Init session if needed
     if not _session_id:
         try:
-            resp = requests.post(MCP_URL, headers=headers, json={
-                "jsonrpc": "2.0", "id": "init", "method": "initialize",
-                "params": {"protocolVersion": "2024-11-05", "capabilities": {},
-                           "clientInfo": {"name": "qwenpaw-bgsave", "version": "1.0"}},
-            }, timeout=10)
+            resp = requests.post(
+                MCP_URL,
+                headers=headers,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": "init",
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {
+                            "name": "qwenpaw-bgsave",
+                            "version": "1.0",
+                        },
+                    },
+                },
+                timeout=10,
+            )
             sid = resp.headers.get("Mcp-Session-Id", "")
             if sid:
                 _session_id = sid
@@ -33,10 +47,17 @@ def mcp_call(tool_name, params=None):
 
     # Call tool
     try:
-        resp = requests.post(MCP_URL, headers=headers, json={
-            "jsonrpc": "2.0", "id": "call", "method": "tools/call",
-            "params": {"name": tool_name, "arguments": params or {}},
-        }, timeout=30)
+        resp = requests.post(
+            MCP_URL,
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": "call",
+                "method": "tools/call",
+                "params": {"name": tool_name, "arguments": params or {}},
+            },
+            timeout=30,
+        )
         for line in resp.content.decode("utf-8").split("\n"):
             if line.startswith("data: "):
                 data = json.loads(line[6:])

@@ -61,7 +61,8 @@ REFRESH_SAFETY_MARGIN_S = 5 * 60
 # (the backend only cares that it's >= the gate), so erring high is
 # safe.
 CODEX_CLIENT_VERSION: str = os.environ.get(
-    "QWENPAW_CODEX_CLIENT_VERSION", "0.200.0",
+    "QWENPAW_CODEX_CLIENT_VERSION",
+    "0.200.0",
 )
 
 
@@ -97,8 +98,11 @@ class CodexAccountInfo:
     """ChatGPT-account metadata extracted from the id_token claims.
     All fields optional — tokens issued to API-key mode carry no
     ChatGPT account info."""
+
     email: str | None = None
-    plan_type: str | None = None  # "pro" / "plus" / "team" / "business" / "enterprise"
+    plan_type: str | None = (
+        None  # "pro" / "plus" / "team" / "business" / "enterprise"
+    )
     org_title: str | None = None
     subscription_active_until: str | None = None  # ISO8601 from OpenAI
 
@@ -123,12 +127,12 @@ def _extract_account_info(id_token: str | None) -> CodexAccountInfo:
         orgs[0] if orgs else None,
     )
     return CodexAccountInfo(
-        email=claims.get("email") if isinstance(claims.get("email"), str) else None,
+        email=claims.get("email")
+        if isinstance(claims.get("email"), str)
+        else None,
         plan_type=openai_auth.get("chatgpt_plan_type"),
         org_title=(
-            default_org.get("title")
-            if isinstance(default_org, dict)
-            else None
+            default_org.get("title") if isinstance(default_org, dict) else None
         ),
         subscription_active_until=openai_auth.get(
             "chatgpt_subscription_active_until",
@@ -230,7 +234,8 @@ class CodexAuth:
         raw.setdefault("tokens", {})
         raw["tokens"].update(tokens)
         raw["last_refresh"] = time.strftime(
-            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(),
+            "%Y-%m-%dT%H:%M:%SZ",
+            time.gmtime(),
         )
         tmp = self._auth_path.with_suffix(self._auth_path.suffix + ".tmp")
         tmp.write_text(json.dumps(raw, indent=2))
@@ -275,7 +280,9 @@ class CodexAuth:
                 "Codex token refresh succeeded but no access_token in response",
             )
 
-        exp_ms = _decode_jwt_exp_ms(new_access) or (int(time.time() * 1000) + 3600 * 1000)
+        exp_ms = _decode_jwt_exp_ms(new_access) or (
+            int(time.time() * 1000) + 3600 * 1000
+        )
         tokens_to_save: dict[str, Any] = {
             "access_token": new_access,
             "refresh_token": new_refresh,
@@ -399,13 +406,18 @@ class CodexAuth:
 # CLI smoke test — `python -m qwenpaw.providers.codex_auth`
 # -------------------------------------------------------------------------
 
+
 async def _smoke() -> None:
     """Refresh if needed + print header sketch (no secrets revealed)."""
     auth = CodexAuth()
     creds = await auth.ensure_fresh()
     headers = await auth.auth_headers()
     masked = {
-        k: (v[:12] + "..." + v[-6:] if k == "Authorization" and len(v) > 30 else v)
+        k: (
+            v[:12] + "..." + v[-6:]
+            if k == "Authorization" and len(v) > 30
+            else v
+        )
         for k, v in headers.items()
     }
     print(f"auth_path: {creds.auth_path}")
@@ -418,5 +430,6 @@ async def _smoke() -> None:
 
 if __name__ == "__main__":
     import asyncio
+
     logging.basicConfig(level=logging.INFO)
     asyncio.run(_smoke())

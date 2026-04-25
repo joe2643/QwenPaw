@@ -768,14 +768,14 @@ WhatsApp 频道使用 [neonize-qwenpaw](https://github.com/joe2643/neonize-qwenp
 
 **WhatsApp 特有字段：**
 
-| 字段                  | 类型    | 默认值            | 说明                                                    |
-| -------------------- | ------- | ---------------- | ------------------------------------------------------ |
-| `auth_dir`           | string  | `""`             | neonize 会话数据目录。默认 `$WORKING_DIR/credentials/whatsapp/default`（跟随 `QWENPAW_WORKING_DIR` / 旧目录 `~/.copaw` / `~/.qwenpaw`） |
-| `send_read_receipts` | bool    | `true`           | 发送已读回执（蓝色双勾）                                    |
-| `self_chat_mode`     | bool    | `false`          | 处理自己号码发出的消息（用于自我命令）                         |
-| `text_chunk_limit`   | int     | `4096`           | 单条消息最大字符数（超出时自动分段）                          |
-| `groups`             | list    | `[]`             | 群组 JID 白名单（例如 `"120363421135228220@g.us"`）         |
-| `group_allow_from`   | list    | `[]`             | 谁可以在群内触发机器人。`["*"]` = 所有人                     |
+| 字段                 | 类型   | 默认值  | 说明                                                                                                                                    |
+| -------------------- | ------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `auth_dir`           | string | `""`    | neonize 会话数据目录。默认 `$WORKING_DIR/credentials/whatsapp/default`（跟随 `QWENPAW_WORKING_DIR` / 旧目录 `~/.copaw` / `~/.qwenpaw`） |
+| `send_read_receipts` | bool   | `true`  | 发送已读回执（蓝色双勾）                                                                                                                |
+| `self_chat_mode`     | bool   | `false` | 处理自己号码发出的消息（用于自我命令）                                                                                                  |
+| `text_chunk_limit`   | int    | `4096`  | 单条消息最大字符数（超出时自动分段）                                                                                                    |
+| `groups`             | list   | `[]`    | 群组 JID 白名单（例如 `"120363421135228220@g.us"`）                                                                                     |
+| `group_allow_from`   | list   | `[]`    | 谁可以在群内触发机器人。`["*"]` = 所有人                                                                                                |
 
 ### 功能
 
@@ -801,20 +801,47 @@ Signal 频道通过 **stdin/stdout 子进程** 方式直接调用官方 [`signal
 
 ### 安装 signal-cli
 
-按平台选对应的分发包即可，两者都提供同名 `signal-cli` 命令：
+按平台选对应的分发包。命令名都是 `signal-cli`，但**功能覆盖有差异**：
 
-| 平台                             | 分发包                                                                                                    | 安装方式                                                                                                                 |
-| ------------------------------- | -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| **Linux x86_64**                | Native-image（GraalVM 编译，约 97 MB，自包含 ELF，无需 Java 运行时）                                         | 从 [Releases](https://github.com/AsamK/signal-cli/releases) 下载 `signal-cli-X.Y.Z-Linux-native.tar.gz`，解压到 `/opt/signal-cli/` 并建立 `/usr/local/bin/` 软链接 |
-| **Linux ARM64 / macOS / Windows** | JAR 包（约 98 MB，需 Java 21+）                                                                            | 从 Releases 下载 `signal-cli-X.Y.Z.tar.gz`，另装 Java 21（macOS `brew install openjdk@21`、Debian/Ubuntu `apt install openjdk-21-jre`、Windows 走 MSI 安装包） |
+| 分发包                                | 运行环境        | 群聊 @picker mention           | Sticker pack 上传                                        | 何时选用                                                  |
+| ------------------------------------- | --------------- | ------------------------------ | -------------------------------------------------------- | --------------------------------------------------------- |
+| **JAR 最新版（≥ v0.14.x）**           | **需 Java 25+** | ✅ 正常识别（结构化 mentions） | ✅ 正常                                                  | **推荐。** 功能完整。                                     |
+| JAR v0.13.24                          | Java 21+        | ❌ 静默丢弃 mention            | ✅ 正常                                                  | 装不到 Java 25 且不需要群内 picker mention。              |
+| Native-image（GraalVM），Linux x86_64 | 无需 Java       | ❌ 丢弃 mention（≤ 0.14.1）    | ❌ 报 `Unable to parse entity`（GraalVM 反射元数据缺失） | 只有私聊、不用 sticker pack 创建，且无法装 JDK 的情况下。 |
 
-> JAR 包内带有 `bin/signal-cli` shell 封装脚本，会自动引导 JVM，因此无论哪种架构，你的 `signal_cli_path` 都指向同一个命令名。
+> **Native-image 已知 bug：** GraalVM 原生镜像（截至 `0.14.1`）缺少 `StickerUploadAttributesResponse` 的反射元数据，`uploadStickerPack` 会报 `Upload error (maybe image size too large): Unable to parse entity`。JAR 分发**不**受影响。
+
+**推荐配置（Linux，功能齐全）：**
+
+```bash
+# 1. 装 Java 25 运行时（Ubuntu 24.10+ apt 已有）：
+sudo apt install -y openjdk-25-jre
+# 旧发行版从 Eclipse Temurin 25 拉包：https://adoptium.net/
+
+# 2. 下载 signal-cli JAR 包（v0.14.3 已测试）：
+mkdir -p ~/opt && cd ~/opt
+curl -L https://github.com/AsamK/signal-cli/releases/download/v0.14.3/signal-cli-0.14.3.tar.gz \
+    | tar xz
+
+# 3. 用 wrapper 脚本固定 signal-cli 用 JDK 25，系统默认 java 不变：
+mkdir -p ~/opt/bin
+cat > ~/opt/bin/signal-cli <<'SH'
+#!/bin/sh
+export JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64
+exec "$JAVA_HOME/bin/java" --enable-native-access=ALL-UNNAMED \
+    -classpath "/home/$(whoami)/opt/signal-cli-0.14.3/lib/*" \
+    org.asamk.signal.Main "$@"
+SH
+chmod +x ~/opt/bin/signal-cli
+```
+
+之后 `signal_cli_path` 指向这个 wrapper —— 系统默认 `java` 可以继续留在 JDK 21 给别的工具用。
 
 验证安装：
 
 ```bash
-signal-cli --version
-# signal-cli 0.14.1
+~/opt/bin/signal-cli --version
+# signal-cli 0.14.3
 ```
 
 ### 注册或链接账号
@@ -838,12 +865,14 @@ signal-cli -a +85212345678 register
 signal-cli -a +85212345678 verify 123456
 ```
 
-两种方式均将账号数据存入 `~/.local/share/signal-cli/`。从中取出账号 UUID，下面的 `account_uuid` 字段要用：
+两种方式均将账号数据存入 `~/.local/share/signal-cli/`。QwenPaw 会在频道启动时**自动从这里读取** UUID，无需在 `agent.json` 手动填 `account_uuid`：
 
 ```bash
 cat ~/.local/share/signal-cli/data/accounts.json
 # { "accounts": [ { "number": "+85212345678", "uuid": "447e962a-...", "path": "..." } ] }
 ```
+
+UUID 仅用于识别群内 @机器人自己（匹配 Signal 结构化 `mentions` 的 ACI）。如果你想固定写入，`account_uuid` 仍然可以显式设置，优先级高于自动发现。
 
 ### 配置
 
@@ -851,8 +880,7 @@ cat ~/.local/share/signal-cli/data/accounts.json
 "signal": {
     "enabled": true,
     "account": "+85212345678",
-    "account_uuid": "447e962a-1f09-4a21-aef6-79617d8e8ad0",
-    "signal_cli_path": "signal-cli",
+    "signal_cli_path": "/home/<user>/opt/bin/signal-cli",
     "dm_policy": "allowlist",
     "group_policy": "allowlist",
     "allow_from": ["+85298765432", "uuid:5720b72c-1051-47bd-962b-8c0c9db5aff1"],
@@ -865,35 +893,64 @@ cat ~/.local/share/signal-cli/data/accounts.json
 
 **Signal 特有字段：**
 
-| 字段                  | 类型         | 默认值               | 说明                                                                                                            |
-| -------------------- | ------------ | -------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `account`            | string       | `""`（必填）         | 在 signal-cli 注册的电话号码，E.164 格式                                                                          |
-| `account_uuid`       | string       | `""`                 | Bot 账号的 UUID（取自 `accounts.json`），用于检测群内 @机器人自己                                                 |
-| `signal_cli_path`    | string       | `"signal-cli"`       | signal-cli 二进制的路径或 `$PATH` 中的名称。若未在 `$PATH`，请填绝对路径                                          |
-| `extra_args`         | list[str]    | `[]`                 | 追加到 spawn 命令尾部的额外参数，如 `["--trust-new-identities", "always"]`                                        |
-| `show_typing`        | bool         | `true`               | 生成响应期间持续刷新 "输入中" 状态                                                                                 |
-| `send_read_receipts` | bool         | `true`               | 发送已读回执                                                                                                     |
-| `text_chunk_limit`   | int          | `4000`               | 单条消息最大字符数                                                                                               |
-| `groups`             | list         | `[]`                 | 群组 internal-id 白名单（来自 `signal-cli listGroups`，类似 `sBlO8LhzR42X...=` 的 base64 字符串）                  |
-| `group_allow_from`   | list         | `[]`                 | 谁可以在群内触发机器人。`["*"]` = 所有人；支持 `+电话` 或 `uuid:...`                                               |
+| 字段                 | 类型      | 默认值         | 说明                                                                                              |
+| -------------------- | --------- | -------------- | ------------------------------------------------------------------------------------------------- |
+| `account`            | string    | `""`（必填）   | 在 signal-cli 注册的电话号码，E.164 格式                                                          |
+| `account_uuid`       | string    | `""`           | Bot 账号的 UUID（取自 `accounts.json`），用于检测群内 @机器人自己                                 |
+| `signal_cli_path`    | string    | `"signal-cli"` | signal-cli 二进制的路径或 `$PATH` 中的名称。若未在 `$PATH`，请填绝对路径                          |
+| `extra_args`         | list[str] | `[]`           | 追加到 spawn 命令尾部的额外参数，如 `["--trust-new-identities", "always"]`                        |
+| `show_typing`        | bool      | `true`         | 生成响应期间持续刷新 "输入中" 状态                                                                |
+| `send_read_receipts` | bool      | `true`         | 发送已读回执                                                                                      |
+| `text_chunk_limit`   | int       | `4000`         | 单条消息最大字符数                                                                                |
+| `groups`             | list      | `[]`           | 群组 internal-id 白名单（来自 `signal-cli listGroups`，类似 `sBlO8LhzR42X...=` 的 base64 字符串） |
+| `group_allow_from`   | list      | `[]`           | 谁可以在群内触发机器人。`["*"]` = 所有人；支持 `+电话` 或 `uuid:...`                              |
 
 ### 功能
 
 - **文本**（私聊 + 群聊）通过 `text_mode: "styled"` 原生解析 markdown（`**粗体**`、`*斜体*`、`` `代码` ``、`~~删除线~~`）
 - **图片**、**音频**、**视频**、**文件**（收 + 发，base64 附件）
 - **表情回应**：收 + 发 emoji reactions
-- **引用回复**：提取被引用消息的文本 + 附件作为上下文
+- **引用回复**：提取被引用消息的文本 + 附件作为上下文，包括引用的 sticker
 - **群聊历史**：未被 @的消息会缓冲（含媒体），机器人被 @时注入上下文
 - **输入中**指示器：在生成回复期间持续刷新
-- **子进程守护**：JSON-RPC over stdin/stdout，实时接收，若子进程退出自动重生（5–60 秒退避）
+- **子进程守护**：JSON-RPC over stdin/stdout，实时接收，若子进程退出自动重生（5–60 秒退避）；按 PPid 原地 reap 孤儿 signal-cli，并行 agent 不会互相杀掉对方 child
+- **Sticker**：收到的 sticker 自动落盘并附 emoji 提示；上行 sticker pack 管理见下文
+
+### Sticker
+
+**收到的 sticker 自动处理：** `dataMessage.sticker` 到达时，频道会调用 `getSticker` 拉 webp 存到 channel 的 media 目录下，给 agent 注入 `[Signal sticker 🦀 at <path>]` 文本提示加 ImageContent 一起推入上下文，引用/回复里的 sticker 同样处理。拉取结果会按 `(pack_id, sticker_id)` 做 cache — Signal sticker pack 协议层不可变，缓存命中永远有效，后续 preview 直接跳过 RPC。
+
+> **上行 sticker 默认输出 PNG。** Signal Android 会把非 Signal Desktop creator 上传的 WebP sticker 渲染成**语音消息** blob（VP8L、VP8X 都复现），实践中能正常显示的第三方 pack（如 LIHKG Dog）一律走 PNG。CoPaw 的 `signal_prepare_sticker_webp` 因此默认输出 PNG，`signal_create_sticker_pack` / `signal_add_stickers_to_pack` 每张 sticker 都接受 PNG **或** WebP（按 magic byte 自动识别，并把正确的 `contentType` 写进 manifest）。只有同一份文件还要走 WhatsApp 的 `.sticker.webp` 文件名约定时才传 `--format webp`。
+
+**上行 sticker pack** 以 agent tool 暴露：
+
+| Tool                          | 作用                                                                                                                                                                                                                 |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `signal_prepare_sticker_webp` | 将任意图片（PNG / JPG / WebP）转成 Signal 规范 sticker 文件：512×512、≤ 300 KB、保留 alpha、透明 letterbox。**默认输出 PNG**（Signal 友好），需要 WhatsApp 时传 `output_format="webp"`。                             |
+| `signal_list_sticker_packs`   | 合并 `listStickerPacks` RPC 输出 + CoPaw 本地 registry — 返 title / author / pack_id / 每张 sticker 的 emoji 与来源路径，并标记已被新上传取代的旧 pack。                                                             |
+| `signal_preview_sticker`      | 获取某张 sticker 的 webp 字节，落盘缓存，返 `ImageBlock` 让 agent 观察。                                                                                                                                             |
+| `signal_install_sticker_pack` | 封装 `addStickerPack`（安装 `signal.art` 分享链接指向的 pack）。                                                                                                                                                     |
+| `signal_create_sticker_pack`  | 在 `{media_dir}/sticker_pack_staging/<uuid>/` 生成 manifest.json + 按文件 magic byte 选好后缀名（PNG / WebP）和 `contentType` 的编号副本，调 `uploadStickerPack`，返新 `pack_id` + `pack_key` + 每张 sticker 的 id。 |
+| `signal_add_stickers_to_pack` | 扩充现有 pack（Signal pack 不可变，实际做法：下载原 pack 所有 sticker + 追加新 sticker + 重新上传成新 pack）。Registry 记录 lineage。                                                                                |
+| `signal_send_sticker`         | 按 `pack_id:sticker_id` 发送 sticker。`to` 可省略，自动取当前会话上下文。                                                                                                                                            |
+
+`{media_dir}/sticker_packs.json` 是持久化 registry，记录所有 CoPaw 上传过/安装过的 pack 的 `pack_id` / `pack_key` / `label` / `previous_pack_id` / `superseded_by` / 每张 sticker 的源文件路径。`signal_list_sticker_packs` 把它和 signal-cli 自身视图合并，agent 即便跨多次重 upload 也能看到完整历史。
+
+配套的 **`sticker_format` skill** 把转换 CLI 独立打包出来（`prepare_sticker_webp.py`），给跑在 CoPaw venv 外的工具用（比如通过 `execute_shell_command` 调 Pillow）。
+
+> **流水线提示：** 生成 → 转换 → 入 pack → 发送。如果把图片生成器（codex image gen、dalle 等）接进 sticker pack，**务必**先走 `signal_prepare_sticker_webp`；pack 上传 preflight 会拒绝任何不是 512×512 / PNG-或-WebP / ≤ 300 KB 的输入。Signal 端默认用 PNG —— WebP 能走 WhatsApp 的 `.sticker.webp` 文件名路由，但在 Signal Android 会被错渲成语音消息。
 
 ### 注意事项
 
 - Signal 没有公开 API，`signal-cli` 是唯一可靠的桥接。本频道的旧版本曾使用 `bbernhard/signal-cli-rest-api` Docker 容器，子进程方式已彻底去除这一依赖。
-- signal-cli 账号的 SQLite 存储**同一时间只能被一个进程持有**。启动 QwenPaw 之前，请停掉任何旧的 REST API 容器或 daemon。
+- signal-cli 账号的 SQLite 存储**同一时间只能被一个进程持有**。**同一个手机号只能配置到一个 agent**；两个 agent 同时启用同号 Signal 频道会抢锁并互相重启。启动 QwenPaw 之前也请停掉任何旧的 REST API 容器或 daemon。
 - `groups` 中的 ID 是 `signal-cli listGroups` 输出的 **internal-id**（类似 `sBlO8LhzR42X...=` 的 base64 字符串），**不是** `group.xxx` 格式。
 - `group_allow_from` 接受电话号码（`+85212345678`）、UUID（`uuid:xxx-xxx-...`）或 `"*"`（所有人）。
-- 如果子进程反复重启，可以手动执行 `signal-cli -a +<号码> --output=json jsonRpc` 看真实错误。最常见原因：`~/.local/share/signal-cli/` 下没有对应账号、`signal_cli_path` 找不到二进制，或 JAR 分发下 `$PATH` 中没有 Java 21。
+- 如果子进程反复重启，可以手动执行 `signal-cli -a +<号码> --output=json jsonRpc` 看真实错误。最常见原因：`~/.local/share/signal-cli/` 下没有对应账号、`signal_cli_path` 找不到二进制，或 JAR 分发下 `$PATH` 中没有匹配版本的 JDK（看上面表格）。
+- 群聊消息被静默丢弃时，频道现在会 INFO 级别打印原因：
+  - `signal: blocked group <gid> (not in allowlist ...)` — 把 group id 加进 `groups`。
+  - `signal: blocked sender <uid> in group <gid> by group_allow_from` — 放宽 `group_allow_from`。
+  - `signal: require_mention drop ... mentions=[]` — 结构化 mention 没送达，通常意味着你跑的是不带 mention 输出的 v0.13.24 JAR 或 native-image；换 v0.14.x JAR + JDK 25 可解决。
 
 ---
 

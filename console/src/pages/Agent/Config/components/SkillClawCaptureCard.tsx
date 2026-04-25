@@ -90,12 +90,9 @@ export function SkillClawCaptureCard() {
             checked={config?.enabled ?? false}
             onChange={(v) => update({ enabled: v })}
           />
-          <Text
-            type="secondary"
-            style={{ marginLeft: 8, fontSize: 12 }}
-          >
-            Append every turn to{" "}
-            <code>conversations.jsonl</code> for SkillClaw evolve_server
+          <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+            Append every turn to <code>conversations.jsonl</code> for SkillClaw
+            evolve_server
           </Text>
         </Descriptions.Item>
       </Descriptions>
@@ -113,10 +110,7 @@ export function SkillClawCaptureCard() {
                 { value: "http", label: "http" },
               ]}
             />
-            <Text
-              type="secondary"
-              style={{ marginLeft: 8, fontSize: 12 }}
-            >
+            <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
               {config?.mode === "http"
                 ? "POST to SkillClaw ingest API (decouples from internal storage)"
                 : "Append to local jsonl (no SkillClaw server needed)"}
@@ -139,9 +133,7 @@ export function SkillClawCaptureCard() {
                   size="small"
                   placeholder="(optional bearer token)"
                   value={config?.ingest_api_key ?? ""}
-                  onChange={(e) =>
-                    update({ ingest_api_key: e.target.value })
-                  }
+                  onChange={(e) => update({ ingest_api_key: e.target.value })}
                   style={{ maxWidth: 360 }}
                 />
               </Descriptions.Item>
@@ -149,9 +141,7 @@ export function SkillClawCaptureCard() {
           )}
 
           <Descriptions.Item
-            label={
-              config?.mode === "http" ? "Fallback dir" : "Records dir"
-            }
+            label={config?.mode === "http" ? "Fallback dir" : "Records dir"}
           >
             <Input
               size="small"
@@ -161,10 +151,7 @@ export function SkillClawCaptureCard() {
               style={{ maxWidth: 360 }}
             />
             {config?.mode === "http" && (
-              <Text
-                type="secondary"
-                style={{ marginLeft: 8, fontSize: 12 }}
-              >
+              <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
                 used if HTTP POST fails
               </Text>
             )}
@@ -175,9 +162,7 @@ export function SkillClawCaptureCard() {
               size="small"
               placeholder="(optional, e.g. copaw-default--)"
               value={config?.session_id_prefix ?? ""}
-              onChange={(e) =>
-                update({ session_id_prefix: e.target.value })
-              }
+              onChange={(e) => update({ session_id_prefix: e.target.value })}
               style={{ maxWidth: 360 }}
             />
           </Descriptions.Item>

@@ -799,7 +799,8 @@ class AgentRunner(Runner):
         self.session = SafeJSONSession(save_dir=session_dir)
 
     async def shutdown_handler(
-        self, timeout: float = 30.0,
+        self,
+        timeout: float = 30.0,
     ) -> bool:
         """Drain in-flight ``query_handler`` tasks so their
         ``finally`` blocks (which save session state) run before the

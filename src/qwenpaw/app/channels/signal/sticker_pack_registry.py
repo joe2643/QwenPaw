@@ -68,14 +68,19 @@ def _load_unlocked(path: Path) -> Dict[str, Any]:
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError as e:
-        logger.warning("sticker-pack-registry: read failed for %s: %s", path, e)
+        logger.warning(
+            "sticker-pack-registry: read failed for %s: %s",
+            path,
+            e,
+        )
         return {"schema_version": _SCHEMA_VERSION, "packs": {}}
     try:
         data = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError as e:
         logger.warning(
             "sticker-pack-registry: %s is malformed (%s) — treating as empty",
-            path, e,
+            path,
+            e,
         )
         return {"schema_version": _SCHEMA_VERSION, "packs": {}}
     if not isinstance(data, dict):

@@ -8,7 +8,7 @@ import os
 import unicodedata
 import urllib.parse
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from agentscope.message import ImageBlock, TextBlock, VideoBlock
 from agentscope.tool import ToolResponse
@@ -31,6 +31,7 @@ class _MimoUnsupportedFormatError(Exception):
     can decide whether the retry is worth it; other 400s fall
     through to the existing ``return None`` placeholder path.
     """
+
 
 _IMAGE_EXTENSIONS = {
     ".png",
@@ -418,8 +419,8 @@ def _is_qwen_family(provider_id: str) -> bool:
 # situations a transcode-to-H264-in-MP4 pass can resolve, so we
 # treat them as the same "try transcoding once" signal.
 _MIMO_FORMAT_REJECTION_MARKERS = (
-    "Multimodal data is corrupted",   # AV1 etc. — late decode failure
-    "only mp4/wmv/mov/avi",           # webm container — early reject
+    "Multimodal data is corrupted",  # AV1 etc. — late decode failure
+    "only mp4/wmv/mov/avi",  # webm container — early reject
     "invalid video format",
 )
 
@@ -456,15 +457,29 @@ async def _transcode_to_h264_mp4(src_path: str) -> str | None:
     out = p.with_name(p.stem + ".h264.mp4")
     if out.exists() and out.stat().st_size > 0:
         logger.debug(
-            "view_video: reusing existing transcode %s", out,
+            "view_video: reusing existing transcode %s",
+            out,
         )
         return str(out)
     cmd = [
-        "ffmpeg", "-y", "-loglevel", "error",
-        "-i", str(p),
-        "-vf", "scale=640:-2",
-        "-c:v", "libx264", "-crf", "23", "-preset", "veryfast",
-        "-c:a", "aac", "-b:a", "64k",
+        "ffmpeg",
+        "-y",
+        "-loglevel",
+        "error",
+        "-i",
+        str(p),
+        "-vf",
+        "scale=640:-2",
+        "-c:v",
+        "libx264",
+        "-crf",
+        "23",
+        "-preset",
+        "veryfast",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "64k",
         str(out),
     ]
     try:
@@ -482,7 +497,8 @@ async def _transcode_to_h264_mp4(src_path: str) -> str | None:
     if proc.returncode != 0:
         logger.warning(
             "view_video: ffmpeg transcode failed (rc=%s): %s",
-            proc.returncode, (err or b"").decode("utf-8", errors="replace")[:300],
+            proc.returncode,
+            (err or b"").decode("utf-8", errors="replace")[:300],
         )
         # Clean the half-written output so a future call can retry.
         try:
@@ -582,9 +598,7 @@ async def _build_fallback_video_messages(
     ]
 
 
-def _resolve_fallback_video_model() -> (
-    "tuple[object, str, str] | None"
-):
+def _resolve_fallback_video_model() -> "tuple[Any, str, str] | None":
     """Return a ready-to-call chat model instance for the agent's
     configured ``fallback_video_model``, or ``None`` when none is set.
 
@@ -622,7 +636,8 @@ def _resolve_fallback_video_model() -> (
         return chat_model, fallback.provider_id, fallback.model
     except Exception as e:
         logger.warning(
-            "view_video: fallback model resolution failed: %s", e,
+            "view_video: fallback model resolution failed: %s",
+            e,
         )
         return None
 
@@ -669,7 +684,8 @@ async def _describe_video_via_qwen_family_httpx(
         headers["Authorization"] = f"Bearer {api_key}"
     logger.info(
         "view_video: Qwen httpx POST → %s (model=%s, video_url=%s)",
-        url, model_id,
+        url,
+        model_id,
         # Extract the URL the server will actually fetch, for debug.
         next(
             (
@@ -681,19 +697,23 @@ async def _describe_video_via_qwen_family_httpx(
         )[:120],
     )
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=30)) as hc:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(300, connect=30),
+        ) as hc:
             resp = await hc.post(url, json=body, headers=headers)
     except Exception as e:
         # Network-level failures aren't recoverable here.
         logger.warning(
-            "view_video: Qwen fallback httpx call failed: %s", e,
+            "view_video: Qwen fallback httpx call failed: %s",
+            e,
         )
         return None
 
     if resp.status_code != 200:
         logger.warning(
             "view_video: Qwen fallback HTTP %d: %s",
-            resp.status_code, resp.text[:400],
+            resp.status_code,
+            resp.text[:400],
         )
         # Codec / container rejections are recoverable by
         # transcoding; raise a typed exception so the orchestrator
@@ -707,7 +727,8 @@ async def _describe_video_via_qwen_family_httpx(
         j = resp.json()
     except Exception as e:
         logger.warning(
-            "view_video: Qwen fallback returned non-JSON body: %s", e,
+            "view_video: Qwen fallback returned non-JSON body: %s",
+            e,
         )
         return None
 
@@ -723,7 +744,8 @@ async def _describe_video_via_qwen_family_httpx(
     result = str(text).strip() or None
     logger.info(
         "view_video: Qwen fallback returned %d chars (usage=%s)",
-        len(result or ""), j.get("usage"),
+        len(result or ""),
+        j.get("usage"),
     )
     return result
 
@@ -731,7 +753,7 @@ async def _describe_video_via_qwen_family_httpx(
 async def _describe_video_via_fallback(
     video_block: VideoBlock,
     prompt: str,
-    fallback: "tuple[object, str, str]",
+    fallback: "tuple[Any, str, str]",
 ) -> str | None:
     """One-shot call to the fallback video model.  Returns the text
     description, or ``None`` on failure (the caller substitutes the
@@ -740,19 +762,24 @@ async def _describe_video_via_fallback(
     chat_model, provider_id, model_id = fallback
     try:
         messages = await _build_fallback_video_messages(
-            video_block, prompt, provider_id,
+            video_block,
+            prompt,
+            provider_id,
         )
         if messages is None:
             logger.warning(
                 "view_video: cannot format video call for %s/%s "
                 "(unknown shape or media-server signing failed); "
                 "falling back to generic hint",
-                provider_id, model_id,
+                provider_id,
+                model_id,
             )
             return None
         logger.info(
             "view_video: delegating to fallback %s/%s (prompt len=%d)",
-            provider_id, model_id, len(prompt),
+            provider_id,
+            model_id,
+            len(prompt),
         )
         # Qwen-family providers need ``video_url`` content blocks
         # that agentscope's OpenAIChatFormatter doesn't understand.
@@ -762,7 +789,9 @@ async def _describe_video_via_fallback(
         if _is_qwen_family(provider_id):
             try:
                 return await _describe_video_via_qwen_family_httpx(
-                    messages, chat_model, model_id,
+                    messages,
+                    chat_model,
+                    model_id,
                 )
             except _MimoUnsupportedFormatError as fmt_err:
                 # Mimo rejected the codec/container.  Transcode the
@@ -779,13 +808,17 @@ async def _describe_video_via_fallback(
                     logger.warning(
                         "view_video: %s rejected format (%s) and source "
                         "is remote (%s) — cannot transcode; giving up",
-                        model_id, str(fmt_err)[:120], local_src[:80],
+                        model_id,
+                        str(fmt_err)[:120],
+                        local_src[:80],
                     )
                     return None
                 logger.info(
                     "view_video: %s rejected format (%s); transcoding "
                     "%s → H.264-in-MP4 and retrying once",
-                    model_id, str(fmt_err)[:120], local_src,
+                    model_id,
+                    str(fmt_err)[:120],
+                    local_src,
                 )
                 transcoded = await _transcode_to_h264_mp4(local_src)
                 if not transcoded:
@@ -798,19 +831,24 @@ async def _describe_video_via_fallback(
                     },
                 }
                 retry_messages = await _build_fallback_video_messages(
-                    retry_block, prompt, provider_id,
+                    retry_block,
+                    prompt,
+                    provider_id,
                 )
                 if retry_messages is None:
                     return None
                 try:
                     return await _describe_video_via_qwen_family_httpx(
-                        retry_messages, chat_model, model_id,
+                        retry_messages,
+                        chat_model,
+                        model_id,
                     )
                 except _MimoUnsupportedFormatError as second_err:
                     logger.warning(
                         "view_video: transcode retry also rejected by "
                         "%s (%s); giving up",
-                        model_id, str(second_err)[:120],
+                        model_id,
+                        str(second_err)[:120],
                     )
                     return None
         response = await chat_model(messages)
@@ -849,14 +887,18 @@ async def _describe_video_via_fallback(
                 "view_video: fallback %s/%s returned empty "
                 "(chunks=%d, block_types=%s) — model may not "
                 "actually support video despite supports_video=True",
-                provider_id, model_id, chunk_count,
+                provider_id,
+                model_id,
+                chunk_count,
                 sorted(seen_block_types),
             )
         return result
     except Exception as e:
         logger.warning(
             "view_video: fallback %s/%s failed: %s",
-            provider_id, model_id, e,
+            provider_id,
+            model_id,
+            e,
         )
         return None
 
@@ -945,11 +987,14 @@ async def view_video(
     fallback = _resolve_fallback_video_model()
     if fallback is not None:
         effective_prompt = (
-            prompt.strip() if isinstance(prompt, str) and prompt.strip()
+            prompt.strip()
+            if isinstance(prompt, str) and prompt.strip()
             else _DEFAULT_VIDEO_FALLBACK_PROMPT
         )
         description = await _describe_video_via_fallback(
-            video_block, effective_prompt, fallback,
+            video_block,
+            effective_prompt,
+            fallback,
         )
         if description:
             _, provider_id, model_id = fallback

@@ -10,6 +10,7 @@ from qwenpaw.config.config import (
     AgentProfileConfig,
     AgentProfileRef,
     Config,
+    ModelSlotConfig,
 )
 from qwenpaw.app.routers import agents as agents_router
 
@@ -198,3 +199,69 @@ async def test_delete_agent_removes_id_from_order(monkeypatch):
     )
 
     assert config.agents.agent_order == ["alpha", "default"]
+
+
+@pytest.mark.asyncio
+async def test_update_agent_preserves_nested_pydantic_types(
+    monkeypatch,
+) -> None:
+    """``update_agent`` must hand ``save_agent_config`` a config whose
+    nested ``active_model`` is still a ``ModelSlotConfig`` — not a
+    plain dict.  The old implementation used
+    ``agent_config.model_dump()`` which flattens nested models, and
+    then ``save_agent_config`` crashed with
+    ``AttributeError: 'dict' object has no attribute 'provider_id'``
+    on the first diagnostic access (saw this in prod when users hit
+    Save in the Console Agents page)."""
+    config = _build_config(["default"], agent_order=["default"])
+    monkeypatch.setattr(agents_router, "load_config", lambda: config)
+
+    existing = _agent_config("default")
+    existing.active_model = ModelSlotConfig(
+        provider_id="bailian",
+        model="qwen3.5-plus",
+    )
+    monkeypatch.setattr(
+        agents_router,
+        "load_agent_config",
+        lambda _agent_id: existing,
+    )
+    monkeypatch.setattr(
+        agents_router,
+        "schedule_agent_reload",
+        lambda _req, _aid: None,
+    )
+
+    captured: list[AgentProfileConfig] = []
+
+    def _capture_save(agent_id, cfg):
+        captured.append(cfg)
+
+    monkeypatch.setattr(agents_router, "save_agent_config", _capture_save)
+
+    # Caller sends a new active_model — the payload value must round-
+    # trip through update_agent without losing its pydantic type.
+    incoming = AgentProfileConfig(
+        id="default",
+        name="DEFAULT",
+        workspace_dir="/tmp/default",
+        active_model=ModelSlotConfig(
+            provider_id="codex-oauth",
+            model="gpt-5.5",
+        ),
+    )
+
+    await agents_router.update_agent(
+        agentId="default",
+        agent_config=incoming,
+        request=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())),
+    )
+
+    assert captured, "save_agent_config was not called"
+    saved = captured[0]
+    assert isinstance(
+        saved.active_model,
+        ModelSlotConfig,
+    ), f"active_model lost pydantic type: {type(saved.active_model).__name__}"
+    assert saved.active_model.provider_id == "codex-oauth"
+    assert saved.active_model.model == "gpt-5.5"

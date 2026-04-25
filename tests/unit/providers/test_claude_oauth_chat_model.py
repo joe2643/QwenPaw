@@ -85,7 +85,9 @@ class TestToolNamePrefix:
         ],
     )
     def test_prefix_rule_matches_opencode_convention(
-        self, original: str, expected_prefixed: str,
+        self,
+        original: str,
+        expected_prefixed: str,
     ):
         assert _prefix_tool_name(original) == expected_prefixed
 
@@ -113,9 +115,24 @@ class TestToolNamePrefix:
             # Simulate a ChatResponse with prefixed names on the way back.
             resp = SimpleNamespace(
                 content=[
-                    {"type": "tool_use", "id": "1", "name": "mcp_Bash", "input": {}},
-                    {"type": "tool_use", "id": "2", "name": "mcp_Edit", "input": {}},
-                    {"type": "tool_use", "id": "3", "name": "mcp_FooBar", "input": {}},
+                    {
+                        "type": "tool_use",
+                        "id": "1",
+                        "name": "mcp_Bash",
+                        "input": {},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "2",
+                        "name": "mcp_Edit",
+                        "input": {},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "3",
+                        "name": "mcp_FooBar",
+                        "input": {},
+                    },
                     {"type": "text", "text": "ok"},
                 ],
             )
@@ -227,8 +244,11 @@ class TestStripHaikuIncompatibleKwargs:
             "thinking": {"type": "adaptive"},
             "output_config": {"effort": "max"},
         }
-        snapshot = {**kwargs, "thinking": dict(kwargs["thinking"]),
-                    "output_config": dict(kwargs["output_config"])}
+        snapshot = {
+            **kwargs,
+            "thinking": dict(kwargs["thinking"]),
+            "output_config": dict(kwargs["output_config"]),
+        }
         _strip_haiku_incompatible_kwargs(kwargs)
         assert kwargs == snapshot
 
@@ -275,7 +295,11 @@ class TestStripHaikuIncompatibleKwargs:
         # thinking block; strip it so haiku doesn't 400.
         kwargs: dict[str, Any] = {
             "model": "claude-haiku-4-5",
-            "thinking": {"type": "enabled", "budget_tokens": 1000, "effort": "low"},
+            "thinking": {
+                "type": "enabled",
+                "budget_tokens": 1000,
+                "effort": "low",
+            },
         }
         _strip_haiku_incompatible_kwargs(kwargs)
         assert kwargs["thinking"] == {

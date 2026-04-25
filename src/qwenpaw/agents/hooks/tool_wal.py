@@ -36,10 +36,17 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 _DANGEROUS_PATTERNS = [
-    "restart", "reboot", "kill -", "pkill",
-    "systemctl stop", "systemctl restart",
-    "qwenpaw", "shutdown",
-    "supervisorctl", "docker restart", "docker stop",
+    "restart",
+    "reboot",
+    "kill -",
+    "pkill",
+    "systemctl stop",
+    "systemctl restart",
+    "qwenpaw",
+    "shutdown",
+    "supervisorctl",
+    "docker restart",
+    "docker stop",
 ]
 
 _WAL_MAX_LINES = 200  # rotate after 200 entries
@@ -133,7 +140,7 @@ class SessionWAL:
             lines = self.wal_path.read_text().strip().split("\n")
             if len(lines) > _WAL_MAX_LINES:
                 # Keep last half
-                keep = lines[len(lines)//2:]
+                keep = lines[len(lines) // 2 :]
                 self.wal_path.write_text("\n".join(keep) + "\n")
         except Exception:
             pass
@@ -144,7 +151,10 @@ class SessionWAL:
             lines = self.wal_path.read_text().strip().split("\n")
             for i in range(len(lines) - 1, -1, -1):
                 entry = json.loads(lines[i])
-                if entry.get("type") == match_type and entry.get("status") == "pending":
+                if (
+                    entry.get("type") == match_type
+                    and entry.get("status") == "pending"
+                ):
                     entry.update(updates)
                     lines[i] = json.dumps(entry, ensure_ascii=False)
                     self.wal_path.write_text("\n".join(lines) + "\n")
@@ -154,42 +164,56 @@ class SessionWAL:
 
     def log_reasoning(self, content: str):
         """Log AI reasoning output (post_reasoning)."""
-        self._append({
-            "ts": datetime.now().isoformat(),
-            "type": "reasoning",
-            "content": _truncate(content, 300),
-        })
+        self._append(
+            {
+                "ts": datetime.now().isoformat(),
+                "type": "reasoning",
+                "content": _truncate(content, 300),
+            },
+        )
 
     def log_sent_message(self, channel: str, to: str, content: str):
         """Log outbound message to user."""
-        self._append({
-            "ts": datetime.now().isoformat(),
-            "type": "sent",
-            "channel": channel,
-            "to": _truncate(to, 50),
-            "content": _truncate(content, 300),
-        })
+        self._append(
+            {
+                "ts": datetime.now().isoformat(),
+                "type": "sent",
+                "channel": channel,
+                "to": _truncate(to, 50),
+                "content": _truncate(content, 300),
+            },
+        )
 
     def log_tool_start(self, tool_name: str, args_summary: str):
         """Log tool call about to execute (pre_acting)."""
-        dangerous = any(p in f"{tool_name} {args_summary}".lower() for p in _DANGEROUS_PATTERNS)
-        self._append({
-            "ts": datetime.now().isoformat(),
-            "type": "tool_start",
-            "tool": tool_name,
-            "args": _truncate(args_summary, 200),
-            "dangerous": dangerous,
-            "status": "pending",
-        })
+        dangerous = any(
+            p in f"{tool_name} {args_summary}".lower()
+            for p in _DANGEROUS_PATTERNS
+        )
+        self._append(
+            {
+                "ts": datetime.now().isoformat(),
+                "type": "tool_start",
+                "tool": tool_name,
+                "args": _truncate(args_summary, 200),
+                "dangerous": dangerous,
+                "status": "pending",
+            },
+        )
         if dangerous:
-            logger.warning(f"WAL: DANGEROUS tool: {tool_name}({_truncate(args_summary, 80)})")
+            logger.warning(
+                f"WAL: DANGEROUS tool: {tool_name}({_truncate(args_summary, 80)})",
+            )
 
     def log_tool_done(self, tool_name: str = ""):
         """Mark last pending tool as completed (post_acting)."""
-        self._update_last_matching("tool_start", {
-            "status": "done",
-            "completed_at": datetime.now().isoformat(),
-        })
+        self._update_last_matching(
+            "tool_start",
+            {
+                "status": "done",
+                "completed_at": datetime.now().isoformat(),
+            },
+        )
 
     @staticmethod
     def get_crash_report(
@@ -221,7 +245,10 @@ class SessionWAL:
             for line in reversed(lines):
                 try:
                     entry = json.loads(line)
-                    if entry.get("type") == "tool_start" and entry.get("status") == "pending":
+                    if (
+                        entry.get("type") == "tool_start"
+                        and entry.get("status") == "pending"
+                    ):
                         crashed_tool = entry
                         break
                 except json.JSONDecodeError:
@@ -234,7 +261,10 @@ class SessionWAL:
             for i in range(len(lines) - 1, -1, -1):
                 try:
                     entry = json.loads(lines[i])
-                    if entry.get("type") == "tool_start" and entry.get("status") == "pending":
+                    if (
+                        entry.get("type") == "tool_start"
+                        and entry.get("status") == "pending"
+                    ):
                         entry["status"] = "crashed"
                         entry["crash_detected_at"] = datetime.now().isoformat()
                         lines[i] = json.dumps(entry, ensure_ascii=False)
@@ -251,28 +281,40 @@ class SessionWAL:
                 except json.JSONDecodeError:
                     continue
 
-            parts = ["⚠️ CRASH RECOVERY — your last session crashed mid-action.\n"]
+            parts = [
+                "⚠️ CRASH RECOVERY — your last session crashed mid-action.\n",
+            ]
             parts.append("Recent session events before crash:")
 
             for entry in recent:
                 etype = entry.get("type", "?")
                 ts = entry.get("ts", "?")[:19]
                 if etype == "reasoning":
-                    parts.append(f"  [{ts}] 🧠 Thought: {entry.get('content', '')[:150]}")
+                    parts.append(
+                        f"  [{ts}] 🧠 Thought: {entry.get('content', '')[:150]}",
+                    )
                 elif etype == "sent":
-                    parts.append(f"  [{ts}] 📤 Sent to {entry.get('to','?')}: {entry.get('content','')[:100]}")
+                    parts.append(
+                        f"  [{ts}] 📤 Sent to {entry.get('to','?')}: {entry.get('content','')[:100]}",
+                    )
                 elif etype == "tool_start":
                     status = entry.get("status", "?")
                     marker = "💀" if status == "crashed" else "🔧"
-                    parts.append(f"  [{ts}] {marker} Tool: {entry.get('tool','')}({entry.get('args','')[:80]}) [{status}]")
+                    parts.append(
+                        f"  [{ts}] {marker} Tool: {entry.get('tool','')}({entry.get('args','')[:80]}) [{status}]",
+                    )
 
             tool = crashed_tool.get("tool", "unknown")
             args = crashed_tool.get("args", "")[:150]
             dangerous = crashed_tool.get("dangerous", False)
 
             if dangerous:
-                parts.append(f"\n🚨 DANGEROUS: '{tool}({args})' likely killed your own process.")
-                parts.append("DO NOT repeat without explicit user confirmation.")
+                parts.append(
+                    f"\n🚨 DANGEROUS: '{tool}({args})' likely killed your own process.",
+                )
+                parts.append(
+                    "DO NOT repeat without explicit user confirmation.",
+                )
 
             # Count total crashes
             crash_count = sum(1 for l in lines if '"crashed"' in l)
@@ -308,13 +350,23 @@ class ToolWALPreActingHook:
     def __init__(self, wal: SessionWAL):
         self.wal = wal
 
-    async def __call__(self, agent, kwargs: dict[str, Any]) -> dict[str, Any] | None:
+    async def __call__(
+        self,
+        agent,
+        kwargs: dict[str, Any],
+    ) -> dict[str, Any] | None:
         try:
             tool_call = kwargs.get("tool_call", {})
             tool_name = tool_call.get("name", "unknown")
             args = tool_call.get("input", {})
             if isinstance(args, dict):
-                args_summary = args.get("command", args.get("cmd", json.dumps(args, ensure_ascii=False)[:200]))
+                args_summary = args.get(
+                    "command",
+                    args.get(
+                        "cmd",
+                        json.dumps(args, ensure_ascii=False)[:200],
+                    ),
+                )
             else:
                 args_summary = str(args)[:200]
             self.wal.log_tool_start(tool_name, str(args_summary))
@@ -329,7 +381,12 @@ class ToolWALPostActingHook:
     def __init__(self, wal: SessionWAL):
         self.wal = wal
 
-    async def __call__(self, agent, kwargs: dict[str, Any], output: Any = None) -> Any:
+    async def __call__(
+        self,
+        agent,
+        kwargs: dict[str, Any],
+        output: Any = None,
+    ) -> Any:
         try:
             tool_call = kwargs.get("tool_call", {})
             tool_name = tool_call.get("name", "")
@@ -337,10 +394,12 @@ class ToolWALPostActingHook:
 
             # If tool is generate_response / finish, log the sent message
             if tool_name in ("generate_response", "finish", "reply_user"):
-                content = _get_text(getattr(output, 'content', '') if output else '')
+                content = _get_text(
+                    getattr(output, "content", "") if output else "",
+                )
                 if content:
-                    channel = getattr(agent, '_last_channel', 'unknown')
-                    to = getattr(agent, '_last_user', 'unknown')
+                    channel = getattr(agent, "_last_channel", "unknown")
+                    to = getattr(agent, "_last_user", "unknown")
                     self.wal.log_sent_message(channel, to, content)
         except Exception as e:
             logger.debug(f"WAL post_acting error: {e}")
@@ -353,10 +412,15 @@ class ReasoningWALHook:
     def __init__(self, wal: SessionWAL):
         self.wal = wal
 
-    async def __call__(self, agent, kwargs: dict[str, Any], output: Any = None) -> Any:
+    async def __call__(
+        self,
+        agent,
+        kwargs: dict[str, Any],
+        output: Any = None,
+    ) -> Any:
         try:
             if output is not None:
-                content = _get_text(getattr(output, 'content', ''))
+                content = _get_text(getattr(output, "content", ""))
                 if content:
                     self.wal.log_reasoning(content)
         except Exception as e:

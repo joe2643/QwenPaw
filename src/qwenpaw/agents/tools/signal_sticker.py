@@ -66,7 +66,7 @@ async def _get_signal_channel() -> Any:
     ``ToolResponse`` error.
     """
     from ...app.agent_context import get_current_agent_id
-    from ...app.multi_agent_manager import MultiAgentManager
+    from ...app.multi_agent_manager import get_registered_multi_agent_manager
 
     agent_id = get_current_agent_id()
     if not agent_id:
@@ -74,7 +74,18 @@ async def _get_signal_channel() -> Any:
             "No active agent context — this tool must run inside a "
             "live agent session (not standalone / not via a worker).",
         )
-    workspace = await MultiAgentManager().get_agent(agent_id)
+    # Resolve via the process-scoped manager registered at app startup.
+    # ``MultiAgentManager()`` would build a fresh instance with empty
+    # ``self.agents`` dict, then ``get_agent`` would fall through to
+    # "create new Workspace" — spawning a duplicate signal-cli daemon
+    # on every Sticker tool call.
+    mgr = get_registered_multi_agent_manager()
+    if mgr is None:
+        raise LookupError(
+            "MultiAgentManager not registered yet — Signal tools can "
+            "only run after the app has finished startup.",
+        )
+    workspace = await mgr.get_agent(agent_id)
     cm = getattr(workspace, "channel_manager", None)
     if cm is None:
         raise LookupError(
@@ -178,8 +189,34 @@ def _read_webp_dimensions(data: bytes) -> tuple[int, int] | None:
     return None
 
 
-def _validate_sticker_webp(path: Path) -> str | None:
-    """Preflight a would-be sticker file.
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+def _detect_sticker_format(head: bytes) -> str | None:
+    """Return ``"png"`` / ``"webp"`` / ``None`` based on file magic."""
+    if len(head) >= 8 and head[0:8] == _PNG_MAGIC:
+        return "png"
+    if len(head) >= 12 and head[0:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+def _read_png_dimensions(data: bytes) -> tuple[int, int] | None:
+    """Parse width/height from a PNG IHDR chunk (offset 16-23)."""
+    if len(data) < 24 or data[0:8] != _PNG_MAGIC:
+        return None
+    if data[12:16] != b"IHDR":
+        return None
+    try:
+        w = int.from_bytes(data[16:20], "big")
+        h = int.from_bytes(data[20:24], "big")
+        return w, h
+    except Exception:
+        return None
+
+
+def _validate_sticker_image(path: Path) -> str | None:
+    """Preflight a would-be sticker file (PNG or WebP).
 
     Returns ``None`` when the file passes; an error string
     otherwise.  Checks applied (strict — better to fail here than
@@ -187,11 +224,16 @@ def _validate_sticker_webp(path: Path) -> str | None:
 
     * File exists and is a regular file.
     * Size ≤ 300 KB.
-    * Starts with the ``RIFF....WEBP`` magic signature.
+    * Starts with PNG (``\\x89PNG…``) or WebP (``RIFF…WEBP``) magic.
     * Dimensions are exactly 512×512 when we can decode them; when
       we can't (unusual VP8 variant), the check is skipped with a
       warning rather than blocking — Signal's uploader will be the
       final arbiter.
+
+    Renamed from ``_validate_sticker_webp``: PNG is now the default
+    sticker format because Signal Android renders user-uploaded
+    WebP as voice-message blobs (see ``sticker_convert``'s module
+    docstring).  WebP is still accepted for WhatsApp compatibility.
     """
     if not path.is_file():
         return f"sticker file not found: {path}"
@@ -205,16 +247,22 @@ def _validate_sticker_webp(path: Path) -> str | None:
         )
     with open(path, "rb") as f:
         head = f.read(128)
-    if len(head) < 12 or head[0:4] != b"RIFF" or head[8:12] != b"WEBP":
+    fmt = _detect_sticker_format(head)
+    if fmt is None:
         return (
-            f"sticker file is not a WebP image (expected RIFF/WEBP "
-            f"magic): {path}"
+            f"sticker file is not PNG or WebP (expected "
+            f"\\x89PNG… or RIFF…WEBP magic): {path}"
         )
-    dims = _read_webp_dimensions(head)
+    if fmt == "png":
+        dims = _read_png_dimensions(head)
+    else:
+        dims = _read_webp_dimensions(head)
     if dims is None:
         logger.warning(
-            "signal sticker: could not decode webp dimensions for %s — "
-            "letting the upload server be the final arbiter", path,
+            "signal sticker: could not decode %s dimensions for %s — "
+            "letting the upload server be the final arbiter",
+            fmt,
+            path,
         )
         return None
     w, h = dims
@@ -226,20 +274,111 @@ def _validate_sticker_webp(path: Path) -> str | None:
     return None
 
 
+# Backwards-compat alias — older callers/tests reference the original
+# webp-only name.  New code should call ``_validate_sticker_image``.
+_validate_sticker_webp = _validate_sticker_image
+
+
+# Staging dir retention: keep uploads from the last ~30 days for
+# debugging / retry, cap total entries at 100 so the dir doesn't
+# grow unbounded for heavy agent use.  Pruning runs inline after
+# every successful upload — cheap (handful of ``rmtree`` calls on
+# small dirs) and guarantees cleanup happens without a background
+# task.
+_STAGING_MAX_AGE_SEC = 30 * 24 * 3600
+_STAGING_MAX_ENTRIES = 100
+
+
+def _prune_staging_dir(staging_root: Path, keep: Path) -> None:
+    """Remove old ``sticker_pack_staging/<uuid>`` subdirs.
+
+    ``keep`` is the entry we just created this call — always
+    preserved even if it ends up being the oldest on disk
+    (pathological clock-skew cases).  Prune rule: drop entries
+    older than ``_STAGING_MAX_AGE_SEC`` AND, after that, keep the
+    newest ``_STAGING_MAX_ENTRIES`` by mtime so a frequent-use
+    agent can't balloon disk even within the age window.
+
+    Only touches directories whose name looks like a 32-char hex
+    uuid — anything else the operator placed manually stays put.
+    """
+    import time
+
+    if not staging_root.is_dir():
+        return
+    now = time.time()
+    try:
+        entries = list(staging_root.iterdir())
+    except OSError:
+        return
+    # Filter to uuid-shaped dirs so we never rm something the
+    # operator dropped by hand.
+    candidates: list[tuple[float, Path]] = []
+    for p in entries:
+        if not p.is_dir():
+            continue
+        name = p.name
+        if len(name) != 32 or not all(c in "0123456789abcdef" for c in name):
+            continue
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        candidates.append((mtime, p))
+
+    # Sort newest-first so the "keep top N" slice is natural.
+    candidates.sort(key=lambda t: t[0], reverse=True)
+
+    to_remove: set[Path] = set()
+    # Age-based pruning.
+    for mtime, p in candidates:
+        if (
+            now - mtime > _STAGING_MAX_AGE_SEC
+            and p.resolve() != keep.resolve()
+        ):
+            to_remove.add(p)
+    # Count-based pruning: anything past the keep slice, except the
+    # dir we just wrote.
+    for _, p in candidates[_STAGING_MAX_ENTRIES:]:
+        if p.resolve() != keep.resolve():
+            to_remove.add(p)
+
+    for p in to_remove:
+        try:
+            shutil.rmtree(p)
+        except OSError as e:
+            logger.debug(
+                "sticker-pack-staging: failed to prune %s: %s",
+                p,
+                e,
+            )
+
+
 # ── Public tool functions ────────────────────────────────────────────
+
 
 async def signal_prepare_sticker_webp(
     input_path: str,
     output_path: str | None = None,
+    output_format: str = "png",
 ) -> ToolResponse:
-    """Convert any image into a Signal/WhatsApp sticker-format WebP.
+    """Convert any image into a Signal/WhatsApp sticker-format file.
 
     Bridges the gap between image generators (codex image gen /
     dalle / etc.) and the sticker pipeline — every sticker tool
-    downstream requires exactly 512×512 WebP ≤300 KB, which image
+    downstream requires exactly 512×512 ≤ 300 KB, which image
     generators don't produce by default.  Delegates to the shared
     :func:`~qwenpaw.agents.tools.sticker_convert.prepare_sticker_webp`
     core (same logic as the ``sticker_format`` skill's CLI).
+
+    **Default output is PNG.**  Despite the legacy function name,
+    PNG is what works on every Signal client — Signal Android
+    renders user-uploaded WebP stickers as voice-message blobs
+    when the WebP isn't produced by Signal Desktop's own creator.
+    PNG (the format proven-working third-party packs like LIHKG
+    Dog use) renders cleanly everywhere.  Pass
+    ``output_format="webp"`` only when targeting WhatsApp, which
+    requires the ``.sticker.webp`` filename convention.
 
     Args:
         input_path (`str`):
@@ -247,15 +386,18 @@ async def signal_prepare_sticker_webp(
             (PNG, JPG, WEBP, GIF — first frame only — BMP).
         output_path (`str`, optional):
             Destination file. Defaults to a sibling of the input
-            named ``<stem>.sticker.webp`` (which WhatsApp's send
-            path recognises as "send as sticker").
+            named ``<stem>.sticker.png`` (or ``<stem>.sticker.webp``
+            when ``output_format="webp"``).
+        output_format (`str`):
+            ``"png"`` (default, Signal-friendly) or ``"webp"``
+            (required for WhatsApp's send-as-sticker filename
+            convention).
 
     Returns:
         `ToolResponse`:
             TextBlock with the absolute output path on success, or
             a specific error on failure (file missing, unreadable
-            image, or sticker still ≥300 KB after the full quality
-            ladder).
+            image, or sticker exceeds 300 KB).
     """
     from .sticker_convert import (
         StickerConversionError,
@@ -265,8 +407,18 @@ async def signal_prepare_sticker_webp(
     src = (input_path or "").strip()
     if not src:
         return _err("Error: input_path is required.")
+    fmt = (output_format or "png").strip().lower()
+    if fmt not in ("png", "webp"):
+        return _err(
+            f"Error: output_format must be 'png' or 'webp', got {fmt!r}.",
+        )
     try:
-        out = _core(src, output_path or None)
+        # Branch instead of cast so mypy narrows fmt to the literal
+        # type that ``prepare_sticker_webp`` requires.
+        if fmt == "png":
+            out = _core(src, output_path or None, output_format="png")
+        else:
+            out = _core(src, output_path or None, output_format="webp")
     except FileNotFoundError as e:
         return _err(f"Error: {e}")
     except StickerConversionError as e:
@@ -344,18 +496,20 @@ async def signal_list_sticker_packs() -> ToolResponse:
                 if rs.get("staged_path"):
                     base["staged_path"] = rs["staged_path"]
             merged_stickers.append(base)
-        summary.append({
-            "pack_id": pid,
-            "title": p.get("title") or reg.get("title") or "",
-            "author": p.get("author") or reg.get("author") or "",
-            "installed": bool(p.get("installed", False)),
-            "source": reg.get("source") or "external",
-            "label": reg.get("label") or "",
-            "sticker_count": len(cli_stickers),
-            "superseded_by": reg.get("superseded_by") or "",
-            "previous_pack_id": reg.get("previous_pack_id") or "",
-            "stickers": merged_stickers,
-        })
+        summary.append(
+            {
+                "pack_id": pid,
+                "title": p.get("title") or reg.get("title") or "",
+                "author": p.get("author") or reg.get("author") or "",
+                "installed": bool(p.get("installed", False)),
+                "source": reg.get("source") or "external",
+                "label": reg.get("label") or "",
+                "sticker_count": len(cli_stickers),
+                "superseded_by": reg.get("superseded_by") or "",
+                "previous_pack_id": reg.get("previous_pack_id") or "",
+                "stickers": merged_stickers,
+            },
+        )
         seen_ids.add(pid)
 
     # Registry-only entries (pack exists in CoPaw history but
@@ -369,26 +523,34 @@ async def signal_list_sticker_packs() -> ToolResponse:
             {
                 "id": int(s.get("id", 0)),
                 "emoji": s.get("emoji") or "",
-                **({"source_path": s["source_path"]}
-                   if s.get("source_path") else {}),
-                **({"staged_path": s["staged_path"]}
-                   if s.get("staged_path") else {}),
+                **(
+                    {"source_path": s["source_path"]}
+                    if s.get("source_path")
+                    else {}
+                ),
+                **(
+                    {"staged_path": s["staged_path"]}
+                    if s.get("staged_path")
+                    else {}
+                ),
             }
             for s in (reg.get("stickers") or [])
             if isinstance(s, dict)
         ]
-        summary.append({
-            "pack_id": pid,
-            "title": reg.get("title") or "",
-            "author": reg.get("author") or "",
-            "installed": False,
-            "source": reg.get("source") or "registry-only",
-            "label": reg.get("label") or "",
-            "sticker_count": len(reg_stickers),
-            "superseded_by": reg.get("superseded_by") or "",
-            "previous_pack_id": reg.get("previous_pack_id") or "",
-            "stickers": reg_stickers,
-        })
+        summary.append(
+            {
+                "pack_id": pid,
+                "title": reg.get("title") or "",
+                "author": reg.get("author") or "",
+                "installed": False,
+                "source": reg.get("source") or "registry-only",
+                "label": reg.get("label") or "",
+                "sticker_count": len(reg_stickers),
+                "superseded_by": reg.get("superseded_by") or "",
+                "previous_pack_id": reg.get("previous_pack_id") or "",
+                "stickers": reg_stickers,
+            },
+        )
 
     return _ok_text(json.dumps(summary, ensure_ascii=False, indent=2))
 
@@ -421,14 +583,18 @@ async def signal_preview_sticker(
     try:
         sid = int(sticker_id)
     except (TypeError, ValueError):
-        return _err(f"Error: sticker_id must be an integer, got {sticker_id!r}")
+        return _err(
+            f"Error: sticker_id must be an integer, got {sticker_id!r}",
+        )
 
     pack_id = (pack_id or "").strip()
     if not pack_id:
         return _err("Error: pack_id is required.")
 
     path = await channel.client.get_sticker(
-        pack_id, sid, channel._media_dir,
+        pack_id,
+        sid,
+        channel._media_dir,
     )
     if path is None:
         return _err(
@@ -444,9 +610,7 @@ async def signal_preview_sticker(
             ),
             TextBlock(
                 type="text",
-                text=(
-                    f"Sticker {pack_id[:12]}:{sid} at {path}"
-                ),
+                text=(f"Sticker {pack_id[:12]}:{sid} at {path}"),
             ),
         ],
     )
@@ -500,17 +664,21 @@ async def signal_install_sticker_pack(
         )
 
     from ...app.channels.signal.sticker_pack_registry import upsert_pack
+
     try:
-        await upsert_pack(channel._media_dir, {
-            "pack_id": pack_id,
-            "pack_key": pack_key,
-            "source": "installed",
-            "label": (label or "").strip() or None,
-            "install_url": (
-                f"https://signal.art/addstickers/"
-                f"#pack_id={pack_id}&pack_key={pack_key}"
-            ),
-        })
+        await upsert_pack(
+            channel._media_dir,
+            {
+                "pack_id": pack_id,
+                "pack_key": pack_key,
+                "source": "installed",
+                "label": (label or "").strip() or None,
+                "install_url": (
+                    f"https://signal.art/addstickers/"
+                    f"#pack_id={pack_id}&pack_key={pack_key}"
+                ),
+            },
+        )
     except Exception as e:
         # Install succeeded upstream — registry persistence failing
         # is a soft error.  Log + surface so the agent knows but
@@ -519,7 +687,7 @@ async def signal_install_sticker_pack(
 
     return _ok_text(
         f"Installed sticker pack {pack_id[:12]}... "
-        "(visible in signal_list_sticker_packs now)."
+        "(visible in signal_list_sticker_packs now).",
     )
 
 
@@ -581,7 +749,9 @@ async def signal_create_sticker_pack(
     resolved: list[tuple[Path, str]] = []
     for idx, item in enumerate(stickers):
         if not isinstance(item, dict):
-            errors.append(f"[{idx}] entry must be a dict, got {type(item).__name__}")
+            errors.append(
+                f"[{idx}] entry must be a dict, got {type(item).__name__}",
+            )
             continue
         raw_path = item.get("path") or ""
         emoji = (item.get("emoji") or "").strip()
@@ -599,8 +769,7 @@ async def signal_create_sticker_pack(
         resolved.append((p, emoji))
     if errors:
         return _err(
-            "Error: sticker validation failed:\n  "
-            + "\n  ".join(errors),
+            "Error: sticker validation failed:\n  " + "\n  ".join(errors),
         )
 
     # Stage the pack contents.  Keep the dir after upload — signal-cli
@@ -611,8 +780,21 @@ async def signal_create_sticker_pack(
     staging_dir.mkdir(parents=True, exist_ok=True)
 
     try:
+        # Detect each sticker's actual format from magic bytes so the
+        # manifest's ``contentType`` matches reality.  Mismatched
+        # contentType (Signal pack stored ``null``) is what triggered
+        # the "voice message instead of sticker" bug we hit in prod —
+        # don't rely on file extensions alone.
+        staged_entries: list[tuple[str, str, str]] = []
         for i, (src, emoji) in enumerate(resolved):
-            shutil.copy2(src, staging_dir / f"{i}.webp")
+            with open(src, "rb") as f:
+                magic = f.read(16)
+            fmt = _detect_sticker_format(magic) or "webp"
+            ext = "png" if fmt == "png" else "webp"
+            mime = "image/png" if fmt == "png" else "image/webp"
+            dest_name = f"{i}.{ext}"
+            shutil.copy2(src, staging_dir / dest_name)
+            staged_entries.append((dest_name, mime, emoji))
 
         manifest = {
             "title": title,
@@ -624,11 +806,11 @@ async def signal_create_sticker_pack(
             # cover lets signal-cli use the first sticker automatically.
             "stickers": [
                 {
-                    "file": f"{i}.webp",
-                    "contentType": "image/webp",
+                    "file": dest_name,
+                    "contentType": mime,
                     "emoji": emoji,
                 }
-                for i, (_, emoji) in enumerate(resolved)
+                for (dest_name, mime, emoji) in staged_entries
             ],
         }
         manifest_path = staging_dir / "manifest.json"
@@ -649,7 +831,7 @@ async def signal_create_sticker_pack(
     if parsed is None:
         return _err(
             f"Error: upload succeeded but returned URL has no "
-            f"pack_id/pack_key fragment: {url}"
+            f"pack_id/pack_key fragment: {url}",
         )
     pack_id, pack_key = parsed
     # Structured return so the agent can round-trip any sticker
@@ -671,19 +853,33 @@ async def signal_create_sticker_pack(
                 "id": i,
                 "emoji": emoji,
                 "source_path": str(src),
-                "staged_path": str(staging_dir / f"{i}.webp"),
+                # ``staged_entries`` carries the real on-disk filename
+                # (``.png`` or ``.webp``) chosen from magic-byte
+                # detection — not all stickers in a pack have to be
+                # the same format.
+                "staged_path": str(staging_dir / dest_name),
             }
-            for i, (src, emoji) in enumerate(resolved)
+            for i, ((src, emoji), (dest_name, _mime, _emoji)) in enumerate(
+                zip(resolved, staged_entries),
+            )
         ],
     }
     from ...app.channels.signal.sticker_pack_registry import upsert_pack
+
     try:
-        await upsert_pack(channel._media_dir, {
-            **payload,
-            "source": "uploaded",
-        })
+        await upsert_pack(
+            channel._media_dir,
+            {
+                **payload,
+                "source": "uploaded",
+            },
+        )
     except Exception as e:
         logger.warning("sticker-pack-registry upsert failed: %s", e)
+
+    # Sweep old staging dirs so the channel media dir doesn't grow
+    # without bound.  Keeps today's upload always.
+    _prune_staging_dir(staging_root, keep=staging_dir)
 
     preamble = (
         f"Uploaded sticker pack '{title}' by '{author}' "
@@ -761,8 +957,7 @@ async def signal_add_stickers_to_pack(
         )
 
     existing = [
-        s for s in (base_pack.get("stickers") or [])
-        if isinstance(s, dict)
+        s for s in (base_pack.get("stickers") or []) if isinstance(s, dict)
     ]
     total_count = len(existing) + len(new_stickers)
     if total_count > 200:
@@ -798,8 +993,7 @@ async def signal_add_stickers_to_pack(
         resolved_new.append((p, emoji))
     if errors:
         return _err(
-            "Error: new sticker validation failed:\n  "
-            + "\n  ".join(errors),
+            "Error: new sticker validation failed:\n  " + "\n  ".join(errors),
         )
 
     staging_root = channel._media_dir / "sticker_pack_staging"
@@ -834,22 +1028,42 @@ async def signal_add_stickers_to_pack(
                 )
             # ``get_sticker`` names the file after the *old* sticker
             # id; rename to the new consecutive id for the manifest.
-            target = staging_dir / f"{len(combined)}.webp"
+            # Detect the actual format from magic bytes — the existing
+            # pack might have been uploaded as PNG, WebP, or a mix.
+            with open(fetched, "rb") as f:
+                old_magic = f.read(16)
+            old_fmt = _detect_sticker_format(old_magic) or "webp"
+            old_ext = "png" if old_fmt == "png" else "webp"
+            old_mime = "image/png" if old_fmt == "png" else "image/webp"
+            target = staging_dir / f"{len(combined)}.{old_ext}"
             fetched.rename(target)
-            combined.append({
-                "emoji": old_emoji,
-                "staged_path": str(target),
-                "source_path": f"pack:{base_pack_id}:{old_sid}",
-            })
+            combined.append(
+                {
+                    "emoji": old_emoji,
+                    "staged_path": str(target),
+                    "source_path": f"pack:{base_pack_id}:{old_sid}",
+                    "file": target.name,
+                    "contentType": old_mime,
+                },
+            )
 
         for src, emoji in resolved_new:
-            target = staging_dir / f"{len(combined)}.webp"
+            with open(src, "rb") as f:
+                new_magic = f.read(16)
+            new_fmt = _detect_sticker_format(new_magic) or "webp"
+            new_ext = "png" if new_fmt == "png" else "webp"
+            new_mime = "image/png" if new_fmt == "png" else "image/webp"
+            target = staging_dir / f"{len(combined)}.{new_ext}"
             shutil.copy2(src, target)
-            combined.append({
-                "emoji": emoji,
-                "staged_path": str(target),
-                "source_path": str(src),
-            })
+            combined.append(
+                {
+                    "emoji": emoji,
+                    "staged_path": str(target),
+                    "source_path": str(src),
+                    "file": target.name,
+                    "contentType": new_mime,
+                },
+            )
 
         # Same manifest shape as ``signal_create_sticker_pack`` —
         # ``file``/``contentType``/``emoji`` per entry.  The ``id``
@@ -863,11 +1077,11 @@ async def signal_add_stickers_to_pack(
             "author": str(base_pack.get("author") or ""),
             "stickers": [
                 {
-                    "file": f"{i}.webp",
-                    "contentType": "image/webp",
+                    "file": entry["file"],
+                    "contentType": entry["contentType"],
                     "emoji": entry["emoji"],
                 }
-                for i, entry in enumerate(combined)
+                for entry in combined
             ],
         }
         manifest_path = staging_dir / "manifest.json"
@@ -888,7 +1102,7 @@ async def signal_add_stickers_to_pack(
     if parsed is None:
         return _err(
             f"Error: upload succeeded but returned URL has no "
-            f"pack_id/pack_key fragment: {url}"
+            f"pack_id/pack_key fragment: {url}",
         )
     pack_id, pack_key = parsed
 
@@ -901,6 +1115,7 @@ async def signal_add_stickers_to_pack(
         mark_superseded,
         upsert_pack,
     )
+
     resolved_label = (label or "").strip() or None
     if resolved_label is None:
         base_entry = await get_pack(channel._media_dir, base_pack_id)
@@ -928,19 +1143,28 @@ async def signal_add_stickers_to_pack(
     }
 
     try:
-        await upsert_pack(channel._media_dir, {
-            **payload,
-            "source": "uploaded",
-        })
+        await upsert_pack(
+            channel._media_dir,
+            {
+                **payload,
+                "source": "uploaded",
+            },
+        )
         # Mark the base as superseded so future ``signal_list_sticker_packs``
         # output flags it for the agent.  No-op if the base was never
         # in the registry (e.g. installed outside CoPaw before this
         # feature shipped).
         await mark_superseded(
-            channel._media_dir, base_pack_id, pack_id,
+            channel._media_dir,
+            base_pack_id,
+            pack_id,
         )
     except Exception as e:
         logger.warning("sticker-pack-registry upsert failed: %s", e)
+
+    # Same staging sweep as create — prevents unbounded growth
+    # when agent grows a pack many times over a session.
+    _prune_staging_dir(staging_root, keep=staging_dir)
 
     preamble = (
         f"Uploaded new pack superseding {base_pack_id[:12]}... with "
@@ -1023,7 +1247,9 @@ async def signal_send_sticker(
     try:
         sid = int(sticker_id)
     except (TypeError, ValueError):
-        return _err(f"Error: sticker_id must be an integer, got {sticker_id!r}")
+        return _err(
+            f"Error: sticker_id must be an integer, got {sticker_id!r}",
+        )
 
     target = (to or "").strip()
     if not target:
@@ -1037,7 +1263,10 @@ async def signal_send_sticker(
         target, is_group = resolved
 
     ts = await channel.client.send_sticker_message(
-        target, pack_id, sid, is_group=is_group,
+        target,
+        pack_id,
+        sid,
+        is_group=is_group,
     )
     if ts is None:
         return _err(
@@ -1048,5 +1277,5 @@ async def signal_send_sticker(
         )
     return _ok_text(
         f"Sent sticker {pack_id[:12]}:{sid} to {target[:24]}"
-        f"{' (group)' if is_group else ''} at ts={ts}."
+        f"{' (group)' if is_group else ''} at ts={ts}.",
     )

@@ -13,11 +13,16 @@ export const mempalaceApi = {
     if (offset != null) params.set("offset", String(offset));
     if (limit != null) params.set("limit", String(limit));
     const qs = params.toString();
-    return request<any>(`/mempalace/wings/${encodeURIComponent(wing)}/rooms/${encodeURIComponent(room)}${qs ? `?${qs}` : ""}`);
+    return request<any>(
+      `/mempalace/wings/${encodeURIComponent(wing)}/rooms/${encodeURIComponent(
+        room,
+      )}${qs ? `?${qs}` : ""}`,
+    );
   },
 
   /** Get a single drawer by ID */
-  getDrawer: (id: string) => request<any>(`/mempalace/drawer/${encodeURIComponent(id)}`),
+  getDrawer: (id: string) =>
+    request<any>(`/mempalace/drawer/${encodeURIComponent(id)}`),
 
   /** Update a drawer */
   updateDrawer: (id: string, data: any) =>

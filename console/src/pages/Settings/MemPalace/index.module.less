@@ -55,17 +55,28 @@
   border: 1px solid #e8e8e8;
 }
 
-.logLineDefault { color: rgba(0, 0, 0, 0.65); }
-.logLineError { color: #ff4d4f; }
-.logLineSave { color: #389e0d; }
-.logLineInterval { color: #096dd9; }
-.logLinePreReply { color: #d48806; }
+.logLineDefault {
+  color: rgba(0, 0, 0, 0.65);
+}
+.logLineError {
+  color: #ff4d4f;
+}
+.logLineSave {
+  color: #389e0d;
+}
+.logLineInterval {
+  color: #096dd9;
+}
+.logLinePreReply {
+  color: #d48806;
+}
 
 /* ─── Dark mode ─────────────────────────────────────────────────────────────── */
 :global(.dark-mode) {
   .treePanel {
     :global {
-      .qwenpaw-spark-card, .qwenpaw-card {
+      .qwenpaw-spark-card,
+      .qwenpaw-card {
         background: #1f1f1f !important;
       }
     }
@@ -77,10 +88,18 @@
     border-color: #303030;
   }
 
-  .logLineDefault { color: rgba(255, 255, 255, 0.65); }
-  .logLineSave { color: #52c41a; }
-  .logLineInterval { color: #1890ff; }
-  .logLinePreReply { color: #faad14; }
+  .logLineDefault {
+    color: rgba(255, 255, 255, 0.65);
+  }
+  .logLineSave {
+    color: #52c41a;
+  }
+  .logLineInterval {
+    color: #1890ff;
+  }
+  .logLinePreReply {
+    color: #faad14;
+  }
 
   /* Fix all text colors in dark mode */
   :global {
@@ -100,7 +119,11 @@
       color: rgba(255, 255, 255, 0.95) !important;
     }
 
-    .qwenpaw-table-wrapper .qwenpaw-table-container .qwenpaw-table-thead > tr > th {
+    .qwenpaw-table-wrapper
+      .qwenpaw-table-container
+      .qwenpaw-table-thead
+      > tr
+      > th {
       background: rgba(255, 255, 255, 0.04) !important;
       color: rgba(255, 255, 255, 0.65) !important;
     }

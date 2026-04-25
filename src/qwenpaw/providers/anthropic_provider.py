@@ -59,7 +59,7 @@ def _unprefix_tool_name_heuristic(name: str) -> str:
     """
     if not isinstance(name, str) or not name.startswith(MCP_TOOL_PREFIX):
         return name
-    tail = name[len(MCP_TOOL_PREFIX):]
+    tail = name[len(MCP_TOOL_PREFIX) :]
     return f"{tail[:1].lower()}{tail[1:]}"
 
 
@@ -68,9 +68,9 @@ def _unprefix_tool_name_heuristic(name: str) -> str:
 # strip pass gets a lossless round-trip even for originally
 # PascalCase-first names.  Kept as a ContextVar so concurrent agent
 # calls get independent maps.
-_TOOL_NAME_REVERSE_MAP: contextvars.ContextVar[dict[str, str] | None] = (
-    contextvars.ContextVar("claude_oauth_tool_name_reverse_map", default=None)
-)
+_TOOL_NAME_REVERSE_MAP: contextvars.ContextVar[
+    dict[str, str] | None
+] = contextvars.ContextVar("claude_oauth_tool_name_reverse_map", default=None)
 
 
 def _record_tool_name_mapping(original: str, prefixed: str) -> None:
@@ -222,7 +222,7 @@ class ClaudeOAuthChatModel(AnthropicChatModel):
     def __init__(
         self,
         *,
-        auth: "object",   # ClaudeAuth — avoid hard import cycle at module load
+        auth: "object",  # ClaudeAuth — avoid hard import cycle at module load
         identity: str,
         **kwargs: Any,
     ) -> None:
@@ -362,7 +362,10 @@ class AnthropicProvider(Provider):
             timeout=timeout,
         )
 
-    async def _async_client(self, timeout: float = 5) -> anthropic.AsyncAnthropic:
+    async def _async_client(
+        self,
+        timeout: float = 5,
+    ) -> anthropic.AsyncAnthropic:
         """Build an async client, refreshing the OAuth token first
         when in OAuth mode."""
         if not self._is_oauth:
@@ -478,7 +481,10 @@ class AnthropicProvider(Provider):
         if self._is_oauth:
             from qwenpaw.providers.claude_auth import CLAUDE_CODE_IDENTITY
 
-            body["system"] = _inject_identity_system(None, CLAUDE_CODE_IDENTITY)
+            body["system"] = _inject_identity_system(
+                None,
+                CLAUDE_CODE_IDENTITY,
+            )
         try:
             client = await self._async_client(timeout=timeout)
             resp = await client.messages.create(**body)

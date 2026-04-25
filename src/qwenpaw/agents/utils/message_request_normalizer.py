@@ -183,7 +183,8 @@ _STRIP_ALL = None  # sentinel — see default below
 
 
 def _strip_media_blocks_in_place(
-    msgs: list[Msg], support: "_MediaSupport | None" = None,
+    msgs: list[Msg],
+    support: "_MediaSupport | None" = None,
 ) -> int:
     """Strip only the media types the model can't process; replace
     each stripped block with a path-preserving text placeholder so

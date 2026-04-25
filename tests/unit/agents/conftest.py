@@ -28,6 +28,7 @@ def _ensure_skills_manager_importable() -> None:
         sys.modules[key] = stub
         try:
             import qwenpaw.agents
+
             qwenpaw.agents.skills_manager = stub  # type: ignore[attr-defined]
         except Exception:
             pass

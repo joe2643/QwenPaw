@@ -135,8 +135,12 @@ def _normalize_messages_for_formatter(
         # probed as False, or ``_qwenpaw_force_strip_media`` forced
         # it).  Strip every media type — do not let per-type probes
         # sneak anything through.
-        media = {"image": False, "video": False, "audio": False,
-                 "multimodal": False}
+        media = {
+            "image": False,
+            "video": False,
+            "audio": False,
+            "multimodal": False,
+        }
     else:
         media = get_active_model_media_support()
         # Hard per-target-family cap: Anthropic's /v1/messages API
@@ -576,7 +580,11 @@ def _video_dedup_key(url: str) -> str:
         p = urllib.parse.urlparse(url)
         qs = urllib.parse.parse_qs(p.query)
         t = qs.get("t", [""])[0]
-        return f"{p.scheme}://{p.netloc}{p.path}?t={t}" if t else url.split("?")[0]
+        return (
+            f"{p.scheme}://{p.netloc}{p.path}?t={t}"
+            if t
+            else url.split("?")[0]
+        )
     except Exception:
         return url
 
@@ -638,18 +646,22 @@ def _promote_tool_result_videos(
         for url, vid_block in videos:
             key = _video_dedup_key(url)
             if _video_url_expired(url):
-                promoted.append({
-                    "type": "text",
-                    "text": f"\n- [Video from '{url}' expired — "
-                    "signed URL is no longer downloadable]",
-                })
+                promoted.append(
+                    {
+                        "type": "text",
+                        "text": f"\n- [Video from '{url}' expired — "
+                        "signed URL is no longer downloadable]",
+                    },
+                )
                 continue
             if key in seen_keys:
-                promoted.append({
-                    "type": "text",
-                    "text": f"\n- [Video from '{url}' omitted — "
-                    "same video already visible above]",
-                })
+                promoted.append(
+                    {
+                        "type": "text",
+                        "text": f"\n- [Video from '{url}' omitted — "
+                        "same video already visible above]",
+                    },
+                )
                 continue
             seen_keys.add(key)
             promoted.append(

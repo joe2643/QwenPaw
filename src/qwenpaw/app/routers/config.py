@@ -1027,7 +1027,7 @@ async def start_whatsapp_pair(request: Request, phone: str = "") -> dict:
         raise HTTPException(
             status_code=502,
             detail=f"WhatsApp pairing failed: {e}",
-        )
+        ) from e
 
 
 @router.get(
@@ -1416,11 +1416,15 @@ async def get_skillclaw_capture_config(request: Request):
     try:
         cfg = load_agent_config(agent_id)
         sc = getattr(cfg, "skillclaw_capture", None)
-        return sc.model_dump() if sc else {
-            "enabled": False,
-            "records_dir": "",
-            "session_id_prefix": "",
-        }
+        return (
+            sc.model_dump()
+            if sc
+            else {
+                "enabled": False,
+                "records_dir": "",
+                "session_id_prefix": "",
+            }
+        )
     except Exception:
         return {
             "enabled": False,
@@ -1431,7 +1435,8 @@ async def get_skillclaw_capture_config(request: Request):
 
 @router.put("/skillclaw-capture", tags=["config"])
 async def update_skillclaw_capture_config(
-    request: Request, body: dict = Body(...),
+    request: Request,
+    body: dict = Body(...),
 ):
     """Update SkillClaw capture-hook configuration for the active agent.
     Triggers an async hot-reload so the running agent registers (or
@@ -2017,7 +2022,7 @@ async def get_signal_status(request: Request) -> dict:
         raise HTTPException(
             status_code=500,
             detail=f"Failed to read Signal account store: {e}",
-        )
+        ) from e
     entries = accounts.get("accounts") or []
     if not entries:
         return {"linked": False, "phone": None, "uuid": None}
@@ -2157,6 +2162,8 @@ async def list_signal_groups(request: Request) -> dict:
         gid_b64 = base64.b64encode(gid_blob).decode("ascii")
         groups.append({"id": gid_b64, "blocked": bool(blocked)})
     return {"groups": groups}
+
+
 # ── Security / Allow No Auth Hosts ────────────────────────────────────
 
 

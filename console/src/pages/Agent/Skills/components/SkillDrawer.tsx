@@ -34,18 +34,32 @@ export function parseFrontmatter(
   }
 }
 
+// Keep alphabetised after "all" so additions are obvious in diffs.
+// Source of truth on the backend is
+// ``qwenpaw.app.channels.registry._BUILTIN_SPECS`` — the API
+// ``GET /api/config/channels/types`` exposes the same list.  When
+// adding a new channel kind, update both this list and the
+// backend registry; otherwise the new kind exists at runtime but
+// users can't scope a skill to it from the Skills UI.
 const CHANNEL_OPTIONS = [
   { label: "all", value: "all" },
   { label: "console", value: "console" },
-  { label: "discord", value: "discord" },
-  { label: "telegram", value: "telegram" },
   { label: "dingtalk", value: "dingtalk" },
+  { label: "discord", value: "discord" },
   { label: "feishu", value: "feishu" },
   { label: "imessage", value: "imessage" },
-  { label: "qq", value: "qq" },
+  { label: "matrix", value: "matrix" },
   { label: "mattermost", value: "mattermost" },
-  { label: "wecom", value: "wecom" },
   { label: "mqtt", value: "mqtt" },
+  { label: "onebot", value: "onebot" },
+  { label: "qq", value: "qq" },
+  { label: "signal", value: "signal" },
+  { label: "telegram", value: "telegram" },
+  { label: "voice", value: "voice" },
+  { label: "wecom", value: "wecom" },
+  { label: "weixin", value: "weixin" },
+  { label: "whatsapp", value: "whatsapp" },
+  { label: "xiaoyi", value: "xiaoyi" },
 ];
 
 export const MAX_TAGS = 8;

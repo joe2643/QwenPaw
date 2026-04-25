@@ -738,6 +738,8 @@ class MediaServerConfig(BaseModel):
         if self.use_cloudflare_tunnel and self.tunnel_mode == "manual":
             self.tunnel_mode = "quick"
         return self
+
+
 class ContextCompactConfig(BaseModel):
     """Context compaction configuration."""
 

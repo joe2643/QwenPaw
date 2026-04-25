@@ -22,10 +22,7 @@ interface VideoModelOption {
 function videoCapableOptions(providers: ProviderInfo[]): VideoModelOption[] {
   const out: VideoModelOption[] = [];
   for (const p of providers) {
-    const all: ModelInfo[] = [
-      ...(p.models || []),
-      ...(p.extra_models || []),
-    ];
+    const all: ModelInfo[] = [...(p.models || []), ...(p.extra_models || [])];
     for (const m of all) {
       if (m.supports_video === true) {
         out.push({
@@ -156,10 +153,7 @@ export function FallbackVideoModelCard() {
   return (
     <Card
       className={styles.formCard}
-      title={t(
-        "agentConfig.fallbackVideoModelTitle",
-        "Fallback video model",
-      )}
+      title={t("agentConfig.fallbackVideoModelTitle", "Fallback video model")}
     >
       <Alert
         type="info"
@@ -186,9 +180,7 @@ export function FallbackVideoModelCard() {
               : "(none — keep default placeholder hint)"
           }
           value={selectValue}
-          onChange={(v) =>
-            handleChange(typeof v === "string" ? v : undefined)
-          }
+          onChange={(v) => handleChange(typeof v === "string" ? v : undefined)}
           options={selectOptions}
         />
         {current.provider_id && current.model && (

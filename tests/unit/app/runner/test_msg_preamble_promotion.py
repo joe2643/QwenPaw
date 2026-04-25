@@ -50,9 +50,13 @@ def as_other_provider():
 
 
 def test_text_only_turn_stays_message_codex(as_codex_oauth):
-    msg = Msg(role="assistant", name="Friday", content=[
-        {"type": "text", "text": "Hello, how can I help?"},
-    ])
+    msg = Msg(
+        role="assistant",
+        name="Friday",
+        content=[
+            {"type": "text", "text": "Hello, how can I help?"},
+        ],
+    )
     out = agentscope_msg_to_message(msg)
     assert _types(out) == [MessageType.MESSAGE]
 
@@ -63,32 +67,45 @@ def test_text_then_tool_use_promotes_text_to_reasoning(as_codex_oauth):
     immediately followed by the tool call.  The text must surface
     as REASONING so channels drop it, while Console UI still
     receives the SSE event upstream."""
-    msg = Msg(role="assistant", name="Friday", content=[
-        {"type": "text", "text": "Need view_video maybe returns note?"},
-        {"type": "tool_use", "id": "call_1", "name": "view_video",
-         "input": {"video_path": "/tmp/v.mp4"}},
-    ])
+    msg = Msg(
+        role="assistant",
+        name="Friday",
+        content=[
+            {"type": "text", "text": "Need view_video maybe returns note?"},
+            {
+                "type": "tool_use",
+                "id": "call_1",
+                "name": "view_video",
+                "input": {"video_path": "/tmp/v.mp4"},
+            },
+        ],
+    )
     out = agentscope_msg_to_message(msg)
     # Two events: REASONING (the preamble) and PLUGIN_CALL (the tool).
     assert _types(out) == [MessageType.REASONING, MessageType.PLUGIN_CALL]
     # Preamble content is preserved verbatim — Console UI needs the
     # original text for its rendering.
-    assert (
-        out[0].content[0].text
-        == "Need view_video maybe returns note?"
-    )
+    assert out[0].content[0].text == "Need view_video maybe returns note?"
 
 
 def test_text_after_tool_use_stays_message(as_codex_oauth):
     """Text *after* a tool_use in the same Msg is final-reply text
     (the model wrapping up after the tool result), so it keeps
     MESSAGE and reaches the channel."""
-    msg = Msg(role="assistant", name="Friday", content=[
-        {"type": "text", "text": "Calling the tool..."},
-        {"type": "tool_use", "id": "call_1", "name": "view_video",
-         "input": {}},
-        {"type": "text", "text": "Here is the answer."},
-    ])
+    msg = Msg(
+        role="assistant",
+        name="Friday",
+        content=[
+            {"type": "text", "text": "Calling the tool..."},
+            {
+                "type": "tool_use",
+                "id": "call_1",
+                "name": "view_video",
+                "input": {},
+            },
+            {"type": "text", "text": "Here is the answer."},
+        ],
+    )
     out = agentscope_msg_to_message(msg)
     # Three events: REASONING (preamble), PLUGIN_CALL, MESSAGE (final).
     assert _types(out) == [
@@ -113,9 +130,13 @@ def test_thinking_block_still_reasoning(as_codex_oauth):
     """``thinking`` blocks (Claude's ``<think>``) keep their existing
     REASONING classification — the tool-use heuristic doesn't
     touch this branch."""
-    msg = Msg(role="assistant", name="Friday", content=[
-        {"type": "thinking", "thinking": "Let me think..."},
-    ])
+    msg = Msg(
+        role="assistant",
+        name="Friday",
+        content=[
+            {"type": "thinking", "thinking": "Let me think..."},
+        ],
+    )
     out = agentscope_msg_to_message(msg)
     assert _types(out) == [MessageType.REASONING]
 
@@ -129,11 +150,19 @@ def test_claude_preamble_kept_as_message(as_other_provider):
     """Claude's polite "I'll check that" before a tool_use is the
     intentional UX users want.  Promotion must be off for non-
     codex-oauth providers."""
-    msg = Msg(role="assistant", name="Friday", content=[
-        {"type": "text", "text": "I'll fetch the video for you."},
-        {"type": "tool_use", "id": "call_1", "name": "view_video",
-         "input": {}},
-    ])
+    msg = Msg(
+        role="assistant",
+        name="Friday",
+        content=[
+            {"type": "text", "text": "I'll fetch the video for you."},
+            {
+                "type": "tool_use",
+                "id": "call_1",
+                "name": "view_video",
+                "input": {},
+            },
+        ],
+    )
     out = agentscope_msg_to_message(msg)
     # Preamble stays as MESSAGE — channels send it through.
     assert _types(out) == [MessageType.MESSAGE, MessageType.PLUGIN_CALL]
@@ -142,10 +171,18 @@ def test_claude_preamble_kept_as_message(as_other_provider):
 
 def test_qwen_preamble_kept_as_message(as_other_provider):
     """Same for Qwen-family providers — preamble reaches the channel."""
-    msg = Msg(role="assistant", name="Friday", content=[
-        {"type": "text", "text": "好，我搵下條 video。"},
-        {"type": "tool_use", "id": "call_1", "name": "view_video",
-         "input": {}},
-    ])
+    msg = Msg(
+        role="assistant",
+        name="Friday",
+        content=[
+            {"type": "text", "text": "好，我搵下條 video。"},
+            {
+                "type": "tool_use",
+                "id": "call_1",
+                "name": "view_video",
+                "input": {},
+            },
+        ],
+    )
     out = agentscope_msg_to_message(msg)
     assert out[0].type == MessageType.MESSAGE

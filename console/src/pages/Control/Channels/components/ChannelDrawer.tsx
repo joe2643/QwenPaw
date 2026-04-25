@@ -53,8 +53,7 @@ const CHANNEL_DOC_EN_URLS: Partial<Record<ChannelKey, string>> = {
     "https://qwenpaw.agentscope.io/docs/channels/?lang=en#WeCom-WeChat-Work",
   weixin:
     "https://qwenpaw.agentscope.io/docs/channels/?lang=en#WeChat-Personal-iLink",
-  whatsapp:
-    "https://qwenpaw.agentscope.io/docs/channels/?lang=en#WhatsApp",
+  whatsapp: "https://qwenpaw.agentscope.io/docs/channels/?lang=en#WhatsApp",
   signal: "https://qwenpaw.agentscope.io/docs/channels/?lang=en#Signal",
   xiaoyi:
     "https://developer.huawei.com/consumer/cn/doc/service/openclaw-0000002518410344",
@@ -193,7 +192,10 @@ export function ChannelDrawer({
     pollInterval: 2000,
     onSuccess: useCallback(
       (credentials: Record<string, string>) => {
-        form.setFieldsValue({ bot_id: credentials.bot_id, secret: credentials.secret });
+        form.setFieldsValue({
+          bot_id: credentials.bot_id,
+          secret: credentials.secret,
+        });
         message.success(t("channels.wecomAuthSuccess"));
       },
       [form, message, t],
@@ -245,7 +247,6 @@ export function ChannelDrawer({
     };
   }, [activeKey, stopWaPoll]);
 
-
   const handleWhatsappPair = useCallback(async () => {
     stopWaPoll();
     setWaPairLoading(true);
@@ -272,9 +273,12 @@ export function ChannelDrawer({
             setWaQrImage("");
             setWaPairStatus("connected");
             setWaPairLoading(false);
-            t("channels.whatsappLinkedSuccess") && message.success(t("channels.whatsappLinkedSuccess"));
+            t("channels.whatsappLinkedSuccess") &&
+              message.success(t("channels.whatsappLinkedSuccess"));
           }
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
       }, 3000);
     } catch (err) {
       message.error(t("channels.whatsappPairFailed"));
@@ -290,13 +294,12 @@ export function ChannelDrawer({
       setWaPairCode("");
       setWaQrImage("");
       setWaPairStatus("idle");
-      setWaLinked(false);  // keep /status-derived flag in sync so UI flips back immediately
+      setWaLinked(false); // keep /status-derived flag in sync so UI flips back immediately
       message.success(t("channels.whatsappUnlinked"));
     } catch (err) {
       message.error(t("channels.whatsappUnbindFailed"));
     }
   }, [message, t]);
-
 
   // ── Signal link flow state ──────────────────────────────────────────
   // Parallels WhatsApp's waPhone / waQrImage / waPairStatus pattern but
@@ -530,7 +533,11 @@ export function ChannelDrawer({
             activeKey === "signal" && sigContacts.length
               ? sigContacts.map((c) => {
                   const value = c.number || (c.uuid ? `uuid:${c.uuid}` : "");
-                  const label = [c.name, c.number, c.uuid && `uuid:${c.uuid.slice(0, 8)}…`]
+                  const label = [
+                    c.name,
+                    c.number,
+                    c.uuid && `uuid:${c.uuid.slice(0, 8)}…`,
+                  ]
                     .filter(Boolean)
                     .join(" · ");
                   return { value, label: label || value };
@@ -1400,7 +1407,7 @@ export function ChannelDrawer({
         return (
           <>
             <Form.Item label={t("channels.whatsappConnection")}>
-              {(waPairStatus === "connected" || waLinked) ? (
+              {waPairStatus === "connected" || waLinked ? (
                 <>
                   <Alert
                     type="success"
@@ -1447,15 +1454,33 @@ export function ChannelDrawer({
                           setWaQrImage(data.qr_image);
                           setWaPairStatus("waiting_qr");
                         }
-                      } catch { /* ignore */ }
+                      } catch {
+                        /* ignore */
+                      }
                       setWaPairLoading(false);
                     }}
                   >
                     {t("channels.whatsappShowQR")}
                   </Button>
                   {waPairCode && (
-                    <div style={{ textAlign: "center", marginTop: 12, padding: "16px", background: "rgba(0,0,0,0.05)", borderRadius: 8 }}>
-                      <div style={{ fontSize: 24, fontWeight: "bold", letterSpacing: 4 }}>{waPairCode}</div>
+                    <div
+                      style={{
+                        textAlign: "center",
+                        marginTop: 12,
+                        padding: "16px",
+                        background: "rgba(0,0,0,0.05)",
+                        borderRadius: 8,
+                      }}
+                    >
+                      <div
+                        style={{
+                          fontSize: 24,
+                          fontWeight: "bold",
+                          letterSpacing: 4,
+                        }}
+                      >
+                        {waPairCode}
+                      </div>
                       <div style={{ marginTop: 8, fontSize: 12, opacity: 0.6 }}>
                         {t("channels.whatsappPairInstructions")}
                       </div>
@@ -1527,24 +1552,55 @@ export function ChannelDrawer({
               tooltip={t("channels.whatsappTextChunkLimitTooltip")}
               initialValue={4096}
             >
-              <InputNumber min={256} max={8192} step={256} style={{ width: "100%" }} />
+              <InputNumber
+                min={256}
+                max={8192}
+                step={256}
+                style={{ width: "100%" }}
+              />
             </Form.Item>
-            <Form.Item name="self_chat_mode" label={t("channels.whatsappSelfChatMode")} valuePropName="checked" tooltip={t("channels.whatsappSelfChatModeTooltip")}>
+            <Form.Item
+              name="self_chat_mode"
+              label={t("channels.whatsappSelfChatMode")}
+              valuePropName="checked"
+              tooltip={t("channels.whatsappSelfChatModeTooltip")}
+            >
               <Switch />
             </Form.Item>
-            <Form.Item name="groups" label={t("channels.whatsappGroupAllowlist")} tooltip={t("channels.whatsappGroupAllowlistTooltip")}>
-              <Select mode="tags" placeholder="120363421135228220@g.us" tokenSeparators={[","," ","\n"]} />
+            <Form.Item
+              name="groups"
+              label={t("channels.whatsappGroupAllowlist")}
+              tooltip={t("channels.whatsappGroupAllowlistTooltip")}
+            >
+              <Select
+                mode="tags"
+                placeholder="120363421135228220@g.us"
+                tokenSeparators={[",", " ", "\n"]}
+              />
             </Form.Item>
-            <Form.Item name="group_allow_from" label={t("channels.whatsappGroupAllowFrom")} tooltip={t("channels.whatsappGroupAllowFromTooltip")}>
-              <Select mode="tags" placeholder="* (everyone)" tokenSeparators={[","," "]} />
+            <Form.Item
+              name="group_allow_from"
+              label={t("channels.whatsappGroupAllowFrom")}
+              tooltip={t("channels.whatsappGroupAllowFromTooltip")}
+            >
+              <Select
+                mode="tags"
+                placeholder="* (everyone)"
+                tokenSeparators={[",", " "]}
+              />
             </Form.Item>
-            <Form.Item name="reply_to_trigger" label={t("channels.replyToTrigger")} valuePropName="checked" tooltip={t("channels.replyToTriggerTooltip")} initialValue={true}>
+            <Form.Item
+              name="reply_to_trigger"
+              label={t("channels.replyToTrigger")}
+              valuePropName="checked"
+              tooltip={t("channels.replyToTriggerTooltip")}
+              initialValue={true}
+            >
               <Switch defaultChecked />
             </Form.Item>
             {/* filter_thinking is rendered by the shared global section below — don't duplicate it here */}
           </>
         );
-
 
       case "signal":
         return (
@@ -1718,7 +1774,9 @@ export function ChannelDrawer({
                   sigGroups.length
                     ? sigGroups.map((g) => ({
                         value: g.id,
-                        label: `${g.id.slice(0, 20)}…${g.blocked ? " (blocked)" : ""}`,
+                        label: `${g.id.slice(0, 20)}…${
+                          g.blocked ? " (blocked)" : ""
+                        }`,
                       }))
                     : undefined
                 }
@@ -1739,8 +1797,13 @@ export function ChannelDrawer({
                     ? [
                         { value: "*", label: "* (everyone)" },
                         ...sigContacts.map((c) => {
-                          const value = c.number || (c.uuid ? `uuid:${c.uuid}` : "");
-                          const label = [c.name, c.number, c.uuid && `uuid:${c.uuid.slice(0, 8)}…`]
+                          const value =
+                            c.number || (c.uuid ? `uuid:${c.uuid}` : "");
+                          const label = [
+                            c.name,
+                            c.number,
+                            c.uuid && `uuid:${c.uuid.slice(0, 8)}…`,
+                          ]
                             .filter(Boolean)
                             .join(" · ");
                           return { value, label: label || value };
@@ -1760,7 +1823,6 @@ export function ChannelDrawer({
             </Form.Item>
           </>
         );
-
 
       case "onebot":
         return (

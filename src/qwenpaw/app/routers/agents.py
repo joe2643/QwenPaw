@@ -375,10 +375,17 @@ async def update_agent(
 
     existing_config = load_agent_config(agentId)
 
-    update_data = agent_config.model_dump(exclude_unset=True)
-    for key, value in update_data.items():
-        if key != "id":
-            setattr(existing_config, key, value)
+    # Copy only the fields the client sent (partial-update semantics),
+    # but preserve pydantic types — ``model_dump()`` flattens nested
+    # models into plain dicts, and setting ``existing_config.active_model``
+    # to a dict makes the next ``save_agent_config`` crash with
+    # ``AttributeError: 'dict' object has no attribute 'provider_id'``.
+    # Pulling directly from ``agent_config`` keeps ``ModelSlotConfig``
+    # (and any other nested pydantic model) intact.
+    for field_name in agent_config.model_fields_set:
+        if field_name == "id":
+            continue
+        setattr(existing_config, field_name, getattr(agent_config, field_name))
 
     existing_config.id = agentId
     save_agent_config(agentId, existing_config)

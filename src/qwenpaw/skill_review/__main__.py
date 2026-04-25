@@ -76,7 +76,11 @@ def main() -> None:
         total_proposals.extend(proposals)
 
     if total_proposals:
-        status = "DRY-RUN (not created)" if args.dry_run else "created (disabled, pending review)"
+        status = (
+            "DRY-RUN (not created)"
+            if args.dry_run
+            else "created (disabled, pending review)"
+        )
         print(f"\nProposed {len(total_proposals)} skill(s) [{status}]:")
         for p in total_proposals:
             print(f"  - {p.name}: {p.description}")

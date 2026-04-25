@@ -28,7 +28,9 @@ async def test_http_url_passthrough() -> None:
     # An HTTP URL needs no signing — hand it back unchanged without
     # bothering the media server at all.
     with patch.object(
-        media_utils, "sign_media_path", AsyncMock(return_value="NO"),
+        media_utils,
+        "sign_media_path",
+        AsyncMock(return_value="NO"),
     ) as signer:
         result = await media_utils.resolve_media_url(
             "https://example.com/a.mp4",
@@ -42,7 +44,9 @@ async def test_data_url_passthrough() -> None:
     # Inline data URLs are fine as-is.
     inp = "data:video/mp4;base64,AAAA"
     with patch.object(
-        media_utils, "sign_media_path", AsyncMock(return_value="NO"),
+        media_utils,
+        "sign_media_path",
+        AsyncMock(return_value="NO"),
     ) as signer:
         result = await media_utils.resolve_media_url(inp)
     assert result == inp
@@ -67,7 +71,8 @@ async def test_local_path_returns_signed_url_on_success(
     src.write_bytes(b"x" * 16)
     signed = "https://media.example.com/media?sig=abc"
     with patch.object(
-        media_utils, "sign_media_path",
+        media_utils,
+        "sign_media_path",
         AsyncMock(return_value=signed),
     ) as signer:
         result = await media_utils.resolve_media_url(str(src))
@@ -85,7 +90,9 @@ async def test_local_path_returns_raw_path_when_sign_fails(
     src = tmp_path / "clip.mp4"
     src.write_bytes(b"x" * 16)
     with patch.object(
-        media_utils, "sign_media_path", AsyncMock(return_value=None),
+        media_utils,
+        "sign_media_path",
+        AsyncMock(return_value=None),
     ):
         result = await media_utils.resolve_media_url(str(src))
     assert result == str(src)
@@ -141,7 +148,9 @@ async def test_sign_media_path_happy_path() -> None:
         _FakeResponse(200, {"url": signed, "expires": 1}),
     )
     with patch.object(
-        httpx, "AsyncClient", lambda *a, **kw: client,
+        httpx,
+        "AsyncClient",
+        lambda *a, **kw: client,
     ):
         result = await media_utils.sign_media_path("/tmp/x.mp4")
     assert result == signed
@@ -152,7 +161,9 @@ async def test_sign_media_path_happy_path() -> None:
 async def test_sign_media_path_non_200_returns_none() -> None:
     client = _FakeAsyncClient(_FakeResponse(403, {"error": "denied"}))
     with patch.object(
-        httpx, "AsyncClient", lambda *a, **kw: client,
+        httpx,
+        "AsyncClient",
+        lambda *a, **kw: client,
     ):
         result = await media_utils.sign_media_path("/tmp/x.mp4")
     assert result is None
@@ -163,10 +174,14 @@ async def test_sign_media_path_network_error_returns_none() -> None:
     class _Exploding:
         async def __aenter__(self):
             raise httpx.ConnectError("server down")
+
         async def __aexit__(self, *_exc):
             return None
+
     with patch.object(
-        httpx, "AsyncClient", lambda *a, **kw: _Exploding(),
+        httpx,
+        "AsyncClient",
+        lambda *a, **kw: _Exploding(),
     ):
         result = await media_utils.sign_media_path("/tmp/x.mp4")
     assert result is None
@@ -178,7 +193,9 @@ async def test_sign_media_path_forwards_auth_when_given() -> None:
         _FakeResponse(200, {"url": "https://x/y", "expires": 1}),
     )
     with patch.object(
-        httpx, "AsyncClient", lambda *a, **kw: client,
+        httpx,
+        "AsyncClient",
+        lambda *a, **kw: client,
     ):
         await media_utils.sign_media_path("/tmp/x.mp4", auth="sekret")
     assert client.last_call["params"]["auth"] == "sekret"

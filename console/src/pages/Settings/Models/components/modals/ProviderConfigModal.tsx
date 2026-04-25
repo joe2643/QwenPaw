@@ -547,8 +547,7 @@ function ReasoningSection({
             opacity: 0.7,
           }}
         >
-          Note: Haiku models silently strip <code>thinking.adaptive</code> and
-          {" "}
+          Note: Haiku models silently strip <code>thinking.adaptive</code> and{" "}
           <code>output_config.effort</code> server-side — these fields apply
           only to Opus / Sonnet 4.6+ in this provider.
         </div>
@@ -747,10 +746,7 @@ export function ProviderConfigModal({
   const isAnthropicFamily =
     (provider.is_custom ? selectedChatModel : provider.chat_model) ===
     "AnthropicChatModel";
-  const watchedGenerateKwargsText = Form.useWatch(
-    "generate_kwargs_text",
-    form,
-  );
+  const watchedGenerateKwargsText = Form.useWatch("generate_kwargs_text", form);
   const parsedGenerateKwargs: Record<string, unknown> = useMemo(() => {
     const text = watchedGenerateKwargsText?.trim();
     if (!text) return {};

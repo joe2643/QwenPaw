@@ -181,40 +181,64 @@ class ClaudeOAuthStatus(BaseModel):
     local ``claude`` CLI.  A zero-arg endpoint because the credentials
     file is per-user, not per-provider-config."""
 
-    logged_in: bool = Field(..., description="Whether a usable OAuth "
-                            "token is present on disk")
-    credentials_path: str = Field(..., description="Expected path of "
-                                  "the credentials file")
-    expires_in_s: Optional[int] = Field(None, description="Seconds "
-                                        "until access_token expiry")
+    logged_in: bool = Field(
+        ...,
+        description="Whether a usable OAuth " "token is present on disk",
+    )
+    credentials_path: str = Field(
+        ...,
+        description="Expected path of " "the credentials file",
+    )
+    expires_in_s: Optional[int] = Field(
+        None,
+        description="Seconds " "until access_token expiry",
+    )
     scopes: List[str] = Field(default_factory=list)
     subscription: Optional[str] = Field(None)
-    error: Optional[str] = Field(None, description="Reason credentials "
-                                 "could not be loaded, if any")
+    error: Optional[str] = Field(
+        None,
+        description="Reason credentials " "could not be loaded, if any",
+    )
 
 
 class CodexOAuthStatus(BaseModel):
     """Status of the Codex/ChatGPT OAuth credentials managed by the
     local ``codex`` CLI.  Read-only; does not trigger a refresh."""
 
-    logged_in: bool = Field(..., description="Whether a usable OAuth "
-                            "token is present on disk")
-    credentials_path: str = Field(..., description="Expected path of "
-                                  "the credentials file")
-    expires_in_s: Optional[int] = Field(None, description="Seconds "
-                                        "until access_token expiry")
-    auth_mode: Optional[str] = Field(None, description="'chatgpt' for "
-                                     "Plus/Pro OAuth, 'apikey' otherwise")
+    logged_in: bool = Field(
+        ...,
+        description="Whether a usable OAuth " "token is present on disk",
+    )
+    credentials_path: str = Field(
+        ...,
+        description="Expected path of " "the credentials file",
+    )
+    expires_in_s: Optional[int] = Field(
+        None,
+        description="Seconds " "until access_token expiry",
+    )
+    auth_mode: Optional[str] = Field(
+        None,
+        description="'chatgpt' for " "Plus/Pro OAuth, 'apikey' otherwise",
+    )
     account_id: Optional[str] = Field(None)
-    email: Optional[str] = Field(None, description="Signed-in email "
-                                 "from id_token claims")
-    plan_type: Optional[str] = Field(None, description="ChatGPT plan "
-                                     "(pro/plus/team/business/enterprise)")
-    org_title: Optional[str] = Field(None, description="Default org "
-                                     "title from id_token claims")
+    email: Optional[str] = Field(
+        None,
+        description="Signed-in email " "from id_token claims",
+    )
+    plan_type: Optional[str] = Field(
+        None,
+        description="ChatGPT plan " "(pro/plus/team/business/enterprise)",
+    )
+    org_title: Optional[str] = Field(
+        None,
+        description="Default org " "title from id_token claims",
+    )
     subscription_active_until: Optional[str] = Field(None)
-    error: Optional[str] = Field(None, description="Reason credentials "
-                                 "could not be loaded, if any")
+    error: Optional[str] = Field(
+        None,
+        description="Reason credentials " "could not be loaded, if any",
+    )
 
 
 def _codex_status_from_creds(creds) -> "CodexOAuthStatus":

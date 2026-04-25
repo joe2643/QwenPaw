@@ -38,6 +38,7 @@ _utils_mod.build_jid = lambda user, server: MagicMock(User=user, Server=server)
 
 # Ensure NEONIZE_AVAILABLE is True so WhatsAppChannel can be instantiated
 from qwenpaw.app.channels.whatsapp import channel as _wa_mod
+
 _wa_mod.NEONIZE_AVAILABLE = True
 _wa_mod.NewAClient = MagicMock
 
@@ -63,6 +64,7 @@ from qwenpaw.app.channels.whatsapp.channel import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_channel(**overrides: Any) -> WhatsAppChannel:
     """Create a WhatsAppChannel with dummy process handler."""
@@ -108,11 +110,16 @@ def _make_proto_message(**fields):
 # TestExtractMessageContent
 # ===================================================================
 
+
 class TestExtractMessageContent:
     async def test_text_conversation(self):
         ch = _make_channel()
         msg = _make_proto_message(conversation="hello world")
-        body, parts = await ch._extract_message_content(MagicMock(), msg, "id1")
+        body, parts = await ch._extract_message_content(
+            MagicMock(),
+            msg,
+            "id1",
+        )
         assert body == "hello world"
         assert len(parts) == 1
         assert parts[0].type == ContentType.TEXT
@@ -124,9 +131,15 @@ class TestExtractMessageContent:
         etm.text = "extended hello"
         msg = _make_proto_message(extendedTextMessage=etm)
         msg.conversation = ""
-        body, parts = await ch._extract_message_content(MagicMock(), msg, "id2")
+        body, parts = await ch._extract_message_content(
+            MagicMock(),
+            msg,
+            "id2",
+        )
         assert body == "extended hello"
-        assert any(p.text == "extended hello" for p in parts if hasattr(p, "text"))
+        assert any(
+            p.text == "extended hello" for p in parts if hasattr(p, "text")
+        )
 
     async def test_image_with_caption(self):
         ch = _make_channel()
@@ -200,6 +213,7 @@ class TestExtractMessageContent:
 # TestExtractQuoteContent
 # ===================================================================
 
+
 class TestExtractQuoteContent:
     async def test_quote_with_text_only(self):
         ch = _make_channel()
@@ -209,7 +223,11 @@ class TestExtractQuoteContent:
         quoted = _make_proto_message(conversation="original text")
         # Ensure text extraction works
         quoted.extendedTextMessage = MagicMock()
-        quoted.HasField = lambda name: name == "extendedTextMessage" if name == "extendedTextMessage" else False
+        quoted.HasField = (
+            lambda name: name == "extendedTextMessage"
+            if name == "extendedTextMessage"
+            else False
+        )
         quoted.extendedTextMessage.text = ""
         # Use conversation path
         quoted.conversation = "original text"
@@ -290,6 +308,7 @@ class TestExtractQuoteContent:
         async def _fake_download(_proto, *, path):
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             Path(path).write_bytes(b"\xff\xd8\xff" + b"x" * 100)
+
         client = MagicMock()
         client.download_any = AsyncMock(side_effect=_fake_download)
 
@@ -323,6 +342,7 @@ class TestExtractQuoteContent:
         async def _fake_download(_proto, *, path):
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             Path(path).write_bytes(b"x" * 1024)
+
         client = MagicMock()
         client.download_any = AsyncMock(side_effect=_fake_download)
 
@@ -588,52 +608,83 @@ class TestExtractQuoteContent:
 # TestCheckAccess
 # ===================================================================
 
+
 class TestCheckAccess:
     def test_group_policy_open_allows(self):
         ch = _make_channel(group_policy="open")
-        assert ch._check_access(
-            is_group=True, chat_str="groupA@g.us",
-            sender_str="user@s.whatsapp.net",
-            sender_jid=MagicMock(), client=MagicMock(),
-            msg=MagicMock(), body="hi",
-        ) is True
+        assert (
+            ch._check_access(
+                is_group=True,
+                chat_str="groupA@g.us",
+                sender_str="user@s.whatsapp.net",
+                sender_jid=MagicMock(),
+                client=MagicMock(),
+                msg=MagicMock(),
+                body="hi",
+            )
+            is True
+        )
 
     def test_group_policy_allowlist_group_in_list(self):
         ch = _make_channel(group_policy="allowlist", groups=["groupA@g.us"])
-        assert ch._check_access(
-            is_group=True, chat_str="groupA@g.us",
-            sender_str="user@s.whatsapp.net",
-            sender_jid=MagicMock(), client=MagicMock(),
-            msg=MagicMock(), body="hi",
-        ) is True
+        assert (
+            ch._check_access(
+                is_group=True,
+                chat_str="groupA@g.us",
+                sender_str="user@s.whatsapp.net",
+                sender_jid=MagicMock(),
+                client=MagicMock(),
+                msg=MagicMock(),
+                body="hi",
+            )
+            is True
+        )
 
     def test_group_policy_allowlist_group_not_in_list(self):
         ch = _make_channel(group_policy="allowlist", groups=["groupA@g.us"])
-        assert ch._check_access(
-            is_group=True, chat_str="groupB@g.us",
-            sender_str="user@s.whatsapp.net",
-            sender_jid=MagicMock(), client=MagicMock(),
-            msg=MagicMock(), body="hi",
-        ) is False
+        assert (
+            ch._check_access(
+                is_group=True,
+                chat_str="groupB@g.us",
+                sender_str="user@s.whatsapp.net",
+                sender_jid=MagicMock(),
+                client=MagicMock(),
+                msg=MagicMock(),
+                body="hi",
+            )
+            is False
+        )
 
     def test_group_policy_allowlist_empty_groups_blocks_all(self):
         ch = _make_channel(group_policy="allowlist", groups=[])
-        assert ch._check_access(
-            is_group=True, chat_str="anygroup@g.us",
-            sender_str="user@s.whatsapp.net",
-            sender_jid=MagicMock(), client=MagicMock(),
-            msg=MagicMock(), body="hi",
-        ) is False
+        assert (
+            ch._check_access(
+                is_group=True,
+                chat_str="anygroup@g.us",
+                sender_str="user@s.whatsapp.net",
+                sender_jid=MagicMock(),
+                client=MagicMock(),
+                msg=MagicMock(),
+                body="hi",
+            )
+            is False
+        )
 
     def test_dm_policy_open_allows(self):
         """DM access is not blocked in _check_access (async check in _on_message)."""
         ch = _make_channel(dm_policy="open")
-        assert ch._check_access(
-            is_group=False, chat_str="user@s.whatsapp.net",
-            sender_str="user@s.whatsapp.net",
-            sender_jid=MagicMock(), client=MagicMock(),
-            msg=MagicMock(), body="hi",
-        ) is True
+        assert (
+            ch._check_access(
+                is_group=False,
+                chat_str="user@s.whatsapp.net",
+                sender_str="user@s.whatsapp.net",
+                sender_jid=MagicMock(),
+                client=MagicMock(),
+                msg=MagicMock(),
+                body="hi",
+            )
+            is True
+        )
 
     def test_group_allow_from_stored(self):
         """group_allow_from is stored on the channel for use in _on_message."""
@@ -644,6 +695,7 @@ class TestCheckAccess:
 # ===================================================================
 # TestGroupHistory
 # ===================================================================
+
 
 class TestGroupHistory:
     def test_non_mentioned_message_recorded(self):
@@ -656,7 +708,9 @@ class TestGroupHistory:
         chat_str = "group123@g.us"
         history = ch._group_history.setdefault(chat_str, [])
         # Simulate recording (as done in _on_message)
-        history.append({"sender": "+85251159218", "body": "hello", "ts": "12345"})
+        history.append(
+            {"sender": "+85251159218", "body": "hello", "ts": "12345"},
+        )
         assert len(ch._group_history[chat_str]) == 1
 
     def test_history_limit_enforced(self):
@@ -665,10 +719,12 @@ class TestGroupHistory:
         chat_str = "group123@g.us"
         history = ch._group_history.setdefault(chat_str, [])
         for i in range(10):
-            history.append({"sender": f"user{i}", "body": f"msg{i}", "ts": str(i)})
+            history.append(
+                {"sender": f"user{i}", "body": f"msg{i}", "ts": str(i)},
+            )
         # Trim like the channel does
         if len(history) > ch._group_history_limit:
-            ch._group_history[chat_str] = history[-ch._group_history_limit:]
+            ch._group_history[chat_str] = history[-ch._group_history_limit :]
         assert len(ch._group_history[chat_str]) == 5
         assert ch._group_history[chat_str][0]["body"] == "msg5"
 
@@ -685,7 +741,10 @@ class TestGroupHistory:
         ctx_lines = []
         for h in history[-10:]:
             ctx_lines.append(f"  {h['sender']}: {h['body']}")
-        ctx_text = "--- Recent group messages (context only, not directed at you) ---\n" + "\n".join(ctx_lines)
+        ctx_text = (
+            "--- Recent group messages (context only, not directed at you) ---\n"
+            + "\n".join(ctx_lines)
+        )
         content_parts = [TextContent(type=ContentType.TEXT, text=ctx_text)]
         ch._group_history[chat_str] = []
 
@@ -722,12 +781,14 @@ class TestGroupHistory:
                 if v and os.path.isfile(str(v)):
                     media_paths.append(str(v))
                     break
-        history.append({
-            "sender": "+852111",
-            "body": "look at this",
-            "ts": "1",
-            "media": media_paths,
-        })
+        history.append(
+            {
+                "sender": "+852111",
+                "body": "look at this",
+                "ts": "1",
+                "media": media_paths,
+            },
+        )
         assert ch._group_history[chat_str][0]["media"] == [str(img)]
 
     def test_history_context_includes_media_count(self, tmp_path):
@@ -737,11 +798,18 @@ class TestGroupHistory:
         ch = _make_channel()
         chat_str = "group123@g.us"
         ch._group_history[chat_str] = [
-            {"sender": "+852111", "body": "photo", "ts": "1", "media": [str(img)]},
+            {
+                "sender": "+852111",
+                "body": "photo",
+                "ts": "1",
+                "media": [str(img)],
+            },
         ]
         # Simulate injection format
         history = ch._group_history.get(chat_str, [])
-        lines = ["=== UNTRUSTED WhatsApp group history (context only, not directed at you) ==="]
+        lines = [
+            "=== UNTRUSTED WhatsApp group history (context only, not directed at you) ===",
+        ]
         for h in history[-10:]:
             line = f"  {h['sender']}: {h['body']}"
             if h.get("media"):
@@ -755,6 +823,7 @@ class TestGroupHistory:
 # ===================================================================
 # TestEnvelopeFormat
 # ===================================================================
+
 
 class TestEnvelopeFormat:
     """Tests for the [WhatsApp group/DM] ... envelope prefix."""
@@ -779,16 +848,17 @@ class TestEnvelopeFormat:
         # Agent extraction: skip [WhatsApp ...], find first ": " after "] "
         bracket_end = wrapped.find("] ")
         assert bracket_end > 0
-        after = wrapped[bracket_end + 2:]
+        after = wrapped[bracket_end + 2 :]
         idx = after.find(": ")
         assert idx > 0
-        raw = after[idx + 2:]
+        raw = after[idx + 2 :]
         assert raw == "/new"
 
 
 # ===================================================================
 # TestMentionDetection (_is_bot_mentioned)
 # ===================================================================
+
 
 class TestMentionDetection:
     def _setup_channel(self) -> WhatsAppChannel:
@@ -916,10 +986,12 @@ class TestUpdateConfigDeadClientRestart:
     async def test_dead_client_forces_full_restart(self):
         ch = _make_channel()
         ch._connected = False  # simulate the zombie state
-        result = await ch.update_config({
-            "enabled": True,
-            "auth_dir": ch._auth_dir,
-        })
+        result = await ch.update_config(
+            {
+                "enabled": True,
+                "auth_dir": ch._auth_dir,
+            },
+        )
         # False = caller (service_factories) does clone + replace_channel
         assert result is False
 
@@ -927,11 +999,13 @@ class TestUpdateConfigDeadClientRestart:
     async def test_healthy_client_allows_in_place_patch(self):
         ch = _make_channel()
         ch._connected = True  # client is alive
-        result = await ch.update_config({
-            "enabled": True,
-            "auth_dir": ch._auth_dir,
-            "send_read_receipts": False,  # a soft-patchable field
-        })
+        result = await ch.update_config(
+            {
+                "enabled": True,
+                "auth_dir": ch._auth_dir,
+                "send_read_receipts": False,  # a soft-patchable field
+            },
+        )
         assert result is True
         # Soft field took effect without restart.
         assert ch._send_read_receipts is False
@@ -940,6 +1014,7 @@ class TestUpdateConfigDeadClientRestart:
 # ===================================================================
 # TestSend
 # ===================================================================
+
 
 class TestSend:
     async def test_basic_text_send(self):
@@ -984,6 +1059,7 @@ class TestSend:
 # TestSendMedia — outbound attachments via WhatsAppChannel.send_media
 # ===================================================================
 
+
 class TestSendMedia:
     """Primary outbound media path. Called by base.send_content_parts
     for every non-text block the agent emits (via send_file_to_user
@@ -1004,7 +1080,11 @@ class TestSendMedia:
     async def test_send_image(self, tmp_path):
         ch, f = self._ready_channel(tmp_path)
         part = ImageContent(type=ContentType.IMAGE, image_url=str(f))
-        await ch.send_media("12345@s.whatsapp.net", part, {"chat_jid": "12345@s.whatsapp.net"})
+        await ch.send_media(
+            "12345@s.whatsapp.net",
+            part,
+            {"chat_jid": "12345@s.whatsapp.net"},
+        )
         ch._client.send_image.assert_called_once()
         args = ch._client.send_image.call_args.args
         assert args[1] == str(f)
@@ -1014,7 +1094,11 @@ class TestSendMedia:
         vid = tmp_path / "clip.mp4"
         vid.write_bytes(b"\x00\x00\x00\x20ftypmp42" + b"\x00" * 10)
         part = VideoContent(type=ContentType.VIDEO, video_url=str(vid))
-        await ch.send_media("12345@s.whatsapp.net", part, {"chat_jid": "12345@s.whatsapp.net"})
+        await ch.send_media(
+            "12345@s.whatsapp.net",
+            part,
+            {"chat_jid": "12345@s.whatsapp.net"},
+        )
         ch._client.send_video.assert_called_once()
         assert ch._client.send_document.call_count == 0
 
@@ -1023,7 +1107,11 @@ class TestSendMedia:
         aud = tmp_path / "voice.ogg"
         aud.write_bytes(b"OggS" + b"\x00" * 10)
         part = AudioContent(type=ContentType.AUDIO, data=str(aud))
-        await ch.send_media("12345@s.whatsapp.net", part, {"chat_jid": "12345@s.whatsapp.net"})
+        await ch.send_media(
+            "12345@s.whatsapp.net",
+            part,
+            {"chat_jid": "12345@s.whatsapp.net"},
+        )
         ch._client.send_audio.assert_called_once()
         # ptt=True for voice notes
         assert ch._client.send_audio.call_args.kwargs.get("ptt") is True
@@ -1033,14 +1121,22 @@ class TestSendMedia:
         doc = tmp_path / "doc.pdf"
         doc.write_bytes(b"%PDF-1.5")
         part = FileContent(type=ContentType.FILE, file_url=str(doc))
-        await ch.send_media("12345@s.whatsapp.net", part, {"chat_jid": "12345@s.whatsapp.net"})
+        await ch.send_media(
+            "12345@s.whatsapp.net",
+            part,
+            {"chat_jid": "12345@s.whatsapp.net"},
+        )
         ch._client.send_document.assert_called_once()
         assert ch._client.send_image.call_count == 0
 
     async def test_send_strips_file_scheme(self, tmp_path):
         ch, f = self._ready_channel(tmp_path)
         part = ImageContent(type=ContentType.IMAGE, image_url=f"file://{f}")
-        await ch.send_media("12345@s.whatsapp.net", part, {"chat_jid": "12345@s.whatsapp.net"})
+        await ch.send_media(
+            "12345@s.whatsapp.net",
+            part,
+            {"chat_jid": "12345@s.whatsapp.net"},
+        )
         args = ch._client.send_image.call_args.args
         assert args[1] == str(f)
 
@@ -1048,27 +1144,43 @@ class TestSendMedia:
         ch, _ = self._ready_channel(tmp_path)
         missing = tmp_path / "gone.jpg"
         part = ImageContent(type=ContentType.IMAGE, image_url=str(missing))
-        await ch.send_media("12345@s.whatsapp.net", part, {"chat_jid": "12345@s.whatsapp.net"})
+        await ch.send_media(
+            "12345@s.whatsapp.net",
+            part,
+            {"chat_jid": "12345@s.whatsapp.net"},
+        )
         ch._client.send_image.assert_not_called()
 
     async def test_no_path_noop(self, tmp_path):
         ch, _ = self._ready_channel(tmp_path)
         part = ImageContent(type=ContentType.IMAGE, image_url="")
-        await ch.send_media("12345@s.whatsapp.net", part, {"chat_jid": "12345@s.whatsapp.net"})
+        await ch.send_media(
+            "12345@s.whatsapp.net",
+            part,
+            {"chat_jid": "12345@s.whatsapp.net"},
+        )
         ch._client.send_image.assert_not_called()
 
     async def test_disconnected_noop(self, tmp_path):
         ch, f = self._ready_channel(tmp_path)
         ch._connected = False
         part = ImageContent(type=ContentType.IMAGE, image_url=str(f))
-        await ch.send_media("12345@s.whatsapp.net", part, {"chat_jid": "12345@s.whatsapp.net"})
+        await ch.send_media(
+            "12345@s.whatsapp.net",
+            part,
+            {"chat_jid": "12345@s.whatsapp.net"},
+        )
         ch._client.send_image.assert_not_called()
 
     async def test_disabled_noop(self, tmp_path):
         ch, f = self._ready_channel(tmp_path)
         ch.enabled = False
         part = ImageContent(type=ContentType.IMAGE, image_url=str(f))
-        await ch.send_media("12345@s.whatsapp.net", part, {"chat_jid": "12345@s.whatsapp.net"})
+        await ch.send_media(
+            "12345@s.whatsapp.net",
+            part,
+            {"chat_jid": "12345@s.whatsapp.net"},
+        )
         ch._client.send_image.assert_not_called()
 
     async def test_file_fallback_to_file_id(self, tmp_path):
@@ -1080,7 +1192,11 @@ class TestSendMedia:
         part.type = ContentType.FILE
         part.file_url = None
         part.file_id = str(doc)
-        await ch.send_media("12345@s.whatsapp.net", part, {"chat_jid": "12345@s.whatsapp.net"})
+        await ch.send_media(
+            "12345@s.whatsapp.net",
+            part,
+            {"chat_jid": "12345@s.whatsapp.net"},
+        )
         ch._client.send_document.assert_called_once()
 
     async def test_send_fails_logs_error(self, tmp_path):
@@ -1088,12 +1204,17 @@ class TestSendMedia:
         ch._client.send_image = AsyncMock(side_effect=RuntimeError("boom"))
         part = ImageContent(type=ContentType.IMAGE, image_url=str(f))
         # Should not raise — error is caught + logged
-        await ch.send_media("12345@s.whatsapp.net", part, {"chat_jid": "12345@s.whatsapp.net"})
+        await ch.send_media(
+            "12345@s.whatsapp.net",
+            part,
+            {"chat_jid": "12345@s.whatsapp.net"},
+        )
 
 
 # ===================================================================
 # TestChunkText
 # ===================================================================
+
 
 class TestChunkText:
     def test_short_text_not_chunked(self):
@@ -1124,6 +1245,7 @@ class TestChunkText:
 # TestTypingLoop
 # ===================================================================
 
+
 class TestTypingLoop:
     async def test_typing_loop_created_and_cancelled(self):
         ch = _make_channel()
@@ -1135,7 +1257,9 @@ class TestTypingLoop:
         typing_jid = MagicMock()
         typing_jid.SerializeToString = lambda: b"\x00"
 
-        task = asyncio.create_task(ch._typing_loop(mock_client, typing_jid, interval=0.05))
+        task = asyncio.create_task(
+            ch._typing_loop(mock_client, typing_jid, interval=0.05),
+        )
         await asyncio.sleep(0.15)
         assert not task.done()
         task.cancel()
@@ -1148,6 +1272,7 @@ class TestTypingLoop:
 # ===================================================================
 # Utility functions
 # ===================================================================
+
 
 class TestJidUtils:
     def test_jid_to_str(self):
@@ -1188,6 +1313,7 @@ class TestFormatSender:
 # TestStripBotMention
 # ===================================================================
 
+
 class TestStripBotMention:
     """Tests for bot @mention stripping (enables /command detection)."""
 
@@ -1210,7 +1336,9 @@ class TestStripBotMention:
         ch = _make_channel()
         ch._bot_phone = "817089933036"
         ch._bot_lid = "229661330157571"
-        assert ch._strip_bot_mention("@+817089933036 @229661330157571 hi") == "hi"
+        assert (
+            ch._strip_bot_mention("@+817089933036 @229661330157571 hi") == "hi"
+        )
 
     def test_no_mention_unchanged(self):
         ch = _make_channel()
@@ -1221,7 +1349,9 @@ class TestStripBotMention:
         ch = _make_channel()
         ch._bot_phone = ""
         ch._bot_lid = ""
-        assert ch._strip_bot_mention("@+817089933036 hi") == "@+817089933036 hi"
+        assert (
+            ch._strip_bot_mention("@+817089933036 hi") == "@+817089933036 hi"
+        )
 
     def test_empty_text(self):
         ch = _make_channel()
@@ -1237,7 +1367,10 @@ class TestStripBotMention:
         ch = _make_channel()
         ch._bot_phone = "817089933036"
         # Mention of a DIFFERENT number should stay
-        assert ch._strip_bot_mention("@+85251159218 hello") == "@+85251159218 hello"
+        assert (
+            ch._strip_bot_mention("@+85251159218 hello")
+            == "@+85251159218 hello"
+        )
 
     def test_mention_in_middle(self):
         ch = _make_channel()
@@ -1254,6 +1387,7 @@ class TestStripBotMention:
 # ===================================================================
 # TestSlashCommandDetection
 # ===================================================================
+
 
 class TestSlashCommandDetection:
     """Tests for slash command detection after mention strip."""
@@ -1286,6 +1420,7 @@ class TestSlashCommandDetection:
 # TestAckReactions
 # ===================================================================
 
+
 class TestAckReactions:
     """Tests for the thinking/done reaction acknowledgement flow."""
 
@@ -1298,7 +1433,10 @@ class TestAckReactions:
         sender_jid = MagicMock()
         await ch._send_reaction(client, chat_jid, sender_jid, "MSGID", "🤔")
         client.build_reaction.assert_awaited_once_with(
-            chat_jid, sender_jid, "MSGID", "🤔",
+            chat_jid,
+            sender_jid,
+            "MSGID",
+            "🤔",
         )
         client.send_message.assert_awaited_once_with(chat_jid, "REACTION_MSG")
 
@@ -1308,7 +1446,11 @@ class TestAckReactions:
         client.build_reaction = AsyncMock(side_effect=RuntimeError("boom"))
         # Should not raise
         await ch._send_reaction(
-            client, MagicMock(), MagicMock(), "MSGID", "🤔",
+            client,
+            MagicMock(),
+            MagicMock(),
+            "MSGID",
+            "🤔",
         )
 
     async def test_empty_emoji_clears_reaction(self):
@@ -1319,7 +1461,11 @@ class TestAckReactions:
         client.build_reaction = AsyncMock(return_value="EMPTY")
         client.send_message = AsyncMock()
         await ch._send_reaction(
-            client, MagicMock(), MagicMock(), "MSGID", "",
+            client,
+            MagicMock(),
+            MagicMock(),
+            "MSGID",
+            "",
         )
         client.build_reaction.assert_called_once()
         assert client.build_reaction.call_args[0][3] == ""
@@ -1354,6 +1500,7 @@ class TestAckReactions:
 # Reply-to trigger message tests
 # ---------------------------------------------------------------------------
 
+
 class TestReplyToTrigger:
     """Tests for the reply-to-trigger-message feature."""
 
@@ -1383,7 +1530,11 @@ class TestReplyToTrigger:
         ch._client.build_reply_message = AsyncMock(return_value=reply_proto)
         ch._client.send_message = AsyncMock()
 
-        await ch.send("test_chat", "hello world", meta={"chat_jid": "test_chat"})
+        await ch.send(
+            "test_chat",
+            "hello world",
+            meta={"chat_jid": "test_chat"},
+        )
 
         ch._client.build_reply_message.assert_awaited_once_with(
             message="hello world",
@@ -1443,7 +1594,9 @@ class TestReplyToTrigger:
         """If build_reply_message raises, should still attempt normal send."""
         ch = _make_channel(reply_to_trigger=True)
         ch._pending_quote_msgs["test_chat"] = MagicMock()
-        ch._client.build_reply_message = AsyncMock(side_effect=Exception("proto error"))
+        ch._client.build_reply_message = AsyncMock(
+            side_effect=Exception("proto error"),
+        )
         ch._client.send_message = AsyncMock()
 
         # Should not raise — error is caught
@@ -1453,6 +1606,7 @@ class TestReplyToTrigger:
 # ---------------------------------------------------------------------------
 # Typing loop tests (SendChatPresence panic prevention)
 # ---------------------------------------------------------------------------
+
 
 class TestTypingLoopPresencePanicPrevention:
     """Tests for _typing_loop — especially that cancelled typing does NOT
@@ -1470,7 +1624,9 @@ class TestTypingLoopPresencePanicPrevention:
         ch._client._NewAClient__client.SendChatPresence = mock_inner
         ch._client.uuid = "test-uuid"
 
-        task = asyncio.create_task(ch._typing_loop(ch._client, mock_jid, interval=0.1))
+        task = asyncio.create_task(
+            ch._typing_loop(ch._client, mock_jid, interval=0.1),
+        )
         await asyncio.sleep(0.25)
         task.cancel()
         try:
@@ -1483,12 +1639,14 @@ class TestTypingLoopPresencePanicPrevention:
         for call in mock_inner.call_args_list:
             args = call[0]
             # 4th arg is presence type: 0=composing, 2=paused
-            assert args[3] == 0, f"Expected presence type 0 (composing), got {args[3]}"
+            assert (
+                args[3] == 0
+            ), f"Expected presence type 0 (composing), got {args[3]}"
 
     @pytest.mark.asyncio
     async def test_cancelled_typing_does_not_send_paused(self):
         """CRITICAL: Cancelling typing loop must NOT send presence type 2.
-        
+
         SendChatPresence(type=2) causes neonize Go panic:
         'index out of range [2] with length 2' -> SIGABRT -> process crash.
         """
@@ -1501,7 +1659,9 @@ class TestTypingLoopPresencePanicPrevention:
         ch._client._NewAClient__client.SendChatPresence = mock_inner
         ch._client.uuid = "test-uuid"
 
-        task = asyncio.create_task(ch._typing_loop(ch._client, mock_jid, interval=0.1))
+        task = asyncio.create_task(
+            ch._typing_loop(ch._client, mock_jid, interval=0.1),
+        )
         await asyncio.sleep(0.15)
         task.cancel()
         try:
@@ -1525,6 +1685,7 @@ class TestTypingLoopPresencePanicPrevention:
         mock_jid.SerializeToString = MagicMock(return_value=b"\x00")
 
         call_count = 0
+
         async def flaky_send(*args):
             nonlocal call_count
             call_count += 1
@@ -1535,7 +1696,9 @@ class TestTypingLoopPresencePanicPrevention:
         ch._client._NewAClient__client.SendChatPresence = flaky_send
         ch._client.uuid = "test-uuid"
 
-        task = asyncio.create_task(ch._typing_loop(ch._client, mock_jid, interval=0.1))
+        task = asyncio.create_task(
+            ch._typing_loop(ch._client, mock_jid, interval=0.1),
+        )
         await asyncio.sleep(0.35)
         task.cancel()
         try:
@@ -1544,7 +1707,9 @@ class TestTypingLoopPresencePanicPrevention:
             pass
 
         # Should have retried after error
-        assert call_count >= 2, f"Expected at least 2 calls (1 error + 1 success), got {call_count}"
+        assert (
+            call_count >= 2
+        ), f"Expected at least 2 calls (1 error + 1 success), got {call_count}"
 
     @pytest.mark.asyncio
     async def test_typing_loop_cancellation_is_clean(self):
@@ -1557,7 +1722,9 @@ class TestTypingLoopPresencePanicPrevention:
         ch._client._NewAClient__client.SendChatPresence = AsyncMock()
         ch._client.uuid = "test-uuid"
 
-        task = asyncio.create_task(ch._typing_loop(ch._client, mock_jid, interval=0.1))
+        task = asyncio.create_task(
+            ch._typing_loop(ch._client, mock_jid, interval=0.1),
+        )
         await asyncio.sleep(0.15)
         task.cancel()
 
@@ -1574,6 +1741,7 @@ class TestTypingLoopPresencePanicPrevention:
 # ========================================================================
 # send_media - sticker filename convention (.sticker.webp)
 # ========================================================================
+
 
 class TestSendMediaStickerConvention:
     """`.sticker.webp` filename convention routes to send_sticker.
@@ -1687,14 +1855,16 @@ class TestSendMediaStickerConvention:
         ch._client.send_image.assert_not_awaited()
 
 
-
 # ===================================================================
 # TestAlbumCollation — multi-image album buffer + flush
 # ===================================================================
 
 
-def _make_album_message(expected_images: int, expected_videos: int = 0,
-                        with_quote: bool = False):
+def _make_album_message(
+    expected_images: int,
+    expected_videos: int = 0,
+    with_quote: bool = False,
+):
     """Build a fake WAMessage whose top-level field is ``albumMessage``.
 
     When ``with_quote=True`` the album header carries a fake
@@ -1727,9 +1897,18 @@ def _make_image_child(caption: str = ""):
     return _make_proto_message(imageMessage=img)
 
 
-async def _drive_inbound(channel, msg, msg_id="m1", sender="alice",
-                          chat="group@g.us", body="", parts=None,
-                          quote_parts=None, paths=None, is_group=True):
+async def _drive_inbound(
+    channel,
+    msg,
+    msg_id="m1",
+    sender="alice",
+    chat="group@g.us",
+    body="",
+    parts=None,
+    quote_parts=None,
+    paths=None,
+    is_group=True,
+):
     """Invoke the album collation gate the same way ``_on_message``
     does.  Returns the gate's bool decision so tests can assert
     'buffered vs fall-through'.  We bypass the rest of the
@@ -1782,11 +1961,15 @@ class TestAlbumCollation:
         for i in range(3):
             child = _make_image_child(caption=("hello" if i == 0 else ""))
             buffered = await _drive_inbound(
-                ch, child, msg_id=f"c{i}",
-                parts=[ImageContent(
-                    type=ContentType.IMAGE,
-                    image_url=f"/tmp/img{i}.jpg",
-                )],
+                ch,
+                child,
+                msg_id=f"c{i}",
+                parts=[
+                    ImageContent(
+                        type=ContentType.IMAGE,
+                        image_url=f"/tmp/img{i}.jpg",
+                    ),
+                ],
                 paths=[f"/tmp/img{i}.jpg"],
                 body=("hello" if i == 0 else ""),
             )
@@ -1796,9 +1979,13 @@ class TestAlbumCollation:
         ch._dispatch_inbound_message.assert_awaited_once()
         kwargs = ch._dispatch_inbound_message.await_args.kwargs
         assert len(kwargs["content_parts"]) == 3
-        assert all(isinstance(p, ImageContent) for p in kwargs["content_parts"])
+        assert all(
+            isinstance(p, ImageContent) for p in kwargs["content_parts"]
+        )
         assert kwargs["media_local_paths"] == [
-            "/tmp/img0.jpg", "/tmp/img1.jpg", "/tmp/img2.jpg",
+            "/tmp/img0.jpg",
+            "/tmp/img1.jpg",
+            "/tmp/img2.jpg",
         ]
         assert "hello" in kwargs["body"]
         # Buffer cleared after flush.
@@ -1814,26 +2001,29 @@ class TestAlbumCollation:
             text="=== UNTRUSTED reply-to ===\nFrom: bob",
         )
         await _drive_inbound(
-            ch, _make_album_message(2),
+            ch,
+            _make_album_message(2),
             quote_parts=[quote],
         )
         # Two image children
         for i in range(2):
             await _drive_inbound(
-                ch, _make_image_child(),
+                ch,
+                _make_image_child(),
                 msg_id=f"c{i}",
-                parts=[ImageContent(
-                    type=ContentType.IMAGE,
-                    image_url=f"/tmp/img{i}.jpg",
-                )],
+                parts=[
+                    ImageContent(
+                        type=ContentType.IMAGE,
+                        image_url=f"/tmp/img{i}.jpg",
+                    ),
+                ],
             )
 
         kwargs = ch._dispatch_inbound_message.await_args.kwargs
         # Quote prepended ahead of all images on the merged turn.
         assert kwargs["content_parts"][0] is quote
         assert all(
-            isinstance(p, ImageContent)
-            for p in kwargs["content_parts"][1:]
+            isinstance(p, ImageContent) for p in kwargs["content_parts"][1:]
         )
 
     async def test_concurrent_albums_from_different_senders_isolated(self):
@@ -1844,27 +2034,49 @@ class TestAlbumCollation:
         await _drive_inbound(ch, _make_album_message(2), sender="alice")
         await _drive_inbound(ch, _make_album_message(2), sender="bob")
         await _drive_inbound(
-            ch, _make_image_child(), sender="alice", msg_id="a1",
-            parts=[ImageContent(type=ContentType.IMAGE, image_url="/t/a1.jpg")],
+            ch,
+            _make_image_child(),
+            sender="alice",
+            msg_id="a1",
+            parts=[
+                ImageContent(type=ContentType.IMAGE, image_url="/t/a1.jpg"),
+            ],
         )
         await _drive_inbound(
-            ch, _make_image_child(), sender="bob", msg_id="b1",
-            parts=[ImageContent(type=ContentType.IMAGE, image_url="/t/b1.jpg")],
+            ch,
+            _make_image_child(),
+            sender="bob",
+            msg_id="b1",
+            parts=[
+                ImageContent(type=ContentType.IMAGE, image_url="/t/b1.jpg"),
+            ],
         )
         await _drive_inbound(
-            ch, _make_image_child(), sender="alice", msg_id="a2",
-            parts=[ImageContent(type=ContentType.IMAGE, image_url="/t/a2.jpg")],
+            ch,
+            _make_image_child(),
+            sender="alice",
+            msg_id="a2",
+            parts=[
+                ImageContent(type=ContentType.IMAGE, image_url="/t/a2.jpg"),
+            ],
         )
         # Alice's album now complete → first dispatch fires.
         await _drive_inbound(
-            ch, _make_image_child(), sender="bob", msg_id="b2",
-            parts=[ImageContent(type=ContentType.IMAGE, image_url="/t/b2.jpg")],
+            ch,
+            _make_image_child(),
+            sender="bob",
+            msg_id="b2",
+            parts=[
+                ImageContent(type=ContentType.IMAGE, image_url="/t/b2.jpg"),
+            ],
         )
         # Bob's album now complete → second dispatch fires.
 
         assert ch._dispatch_inbound_message.await_count == 2
         # Inspect both calls — each only contains its own sender's images.
-        calls = [c.kwargs for c in ch._dispatch_inbound_message.await_args_list]
+        calls = [
+            c.kwargs for c in ch._dispatch_inbound_message.await_args_list
+        ]
         a_call = next(c for c in calls if c["sender_str"] == "alice")
         b_call = next(c for c in calls if c["sender_str"] == "bob")
         a_urls = [p.image_url for p in a_call["content_parts"]]
@@ -1889,7 +2101,8 @@ class TestAlbumCollation:
         await _drive_inbound(ch, _make_album_message(3))  # buffer open
         plain = _make_proto_message(conversation="oh wait nvm")
         result = await _drive_inbound(
-            ch, plain,
+            ch,
+            plain,
             parts=[TextContent(type=ContentType.TEXT, text="oh wait nvm")],
         )
         assert result is False
@@ -1903,6 +2116,7 @@ class TestAlbumCollation:
         fires, flush whatever we've collected — better partial
         than a perpetually-stuck buffer."""
         import asyncio as _asyncio
+
         ch = _make_channel()
         ch._dispatch_inbound_message = AsyncMock()
         # Compress the timeout so the test runs fast.
@@ -1911,10 +2125,15 @@ class TestAlbumCollation:
         await _drive_inbound(ch, _make_album_message(3))
         # Only one child arrives.
         await _drive_inbound(
-            ch, _make_image_child(), msg_id="c0",
-            parts=[ImageContent(
-                type=ContentType.IMAGE, image_url="/tmp/i0.jpg",
-            )],
+            ch,
+            _make_image_child(),
+            msg_id="c0",
+            parts=[
+                ImageContent(
+                    type=ContentType.IMAGE,
+                    image_url="/tmp/i0.jpg",
+                ),
+            ],
         )
         # Wait past the timeout to let the flush task run.
         await _asyncio.sleep(0.3)
@@ -1930,6 +2149,7 @@ class TestAlbumCollation:
         previous album finished cancels the old buffer (the only
         sane interpretation: the previous send was lost / aborted)."""
         import asyncio as _asyncio
+
         ch = _make_channel()
         ch._dispatch_inbound_message = AsyncMock()
 

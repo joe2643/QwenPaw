@@ -210,10 +210,23 @@ async def proactive_trigger_loop(
 
     try:
         from ....app.agent_context import get_current_agent_id
-        from ....app.multi_agent_manager import MultiAgentManager
+        from ....app.multi_agent_manager import (
+            get_registered_multi_agent_manager,
+        )
 
         active_agent_id = get_current_agent_id()
-        multi_agent_manager = MultiAgentManager()
+        # Use the process-scoped registered manager — instantiating
+        # ``MultiAgentManager()`` here would fork off a fresh state
+        # dict and force ``get_agent`` to recreate the workspace on
+        # every poll, defeating reuse and (for Signal-enabled agents)
+        # spawning a duplicate signal-cli daemon each tick.
+        multi_agent_manager = get_registered_multi_agent_manager()
+        if multi_agent_manager is None:
+            logger.warning(
+                "Proactive trigger: MultiAgentManager not registered "
+                "yet — proactive loop disabled until app fully starts",
+            )
+            return
         workspace = await multi_agent_manager.get_agent(active_agent_id)
     except Exception as e:
         logger.error(f"Failed to initialize workspace for proactive loop: {e}")

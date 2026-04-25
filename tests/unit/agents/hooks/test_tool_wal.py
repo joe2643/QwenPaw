@@ -79,7 +79,8 @@ class TestFilenameResolution:
 
 class TestSessionWALInstance:
     def test_session_id_routes_writes_to_scoped_file(
-        self, workspace: Path,
+        self,
+        workspace: Path,
     ):
         wal = SessionWAL(workspace, session_id="signal:group:abc")
         wal.log_tool_start("bash", "ls -la")
@@ -89,7 +90,8 @@ class TestSessionWALInstance:
         assert not (workspace / ".session_wal.jsonl").exists()
 
     def test_no_session_id_writes_to_legacy_file(
-        self, workspace: Path,
+        self,
+        workspace: Path,
     ):
         # Back-compat path — keep working for tests that predate
         # session scoping.
@@ -98,7 +100,8 @@ class TestSessionWALInstance:
         assert (workspace / ".session_wal.jsonl").exists()
 
     def test_wal_file_override_wins_over_session_id(
-        self, workspace: Path,
+        self,
+        workspace: Path,
     ):
         # Tests sometimes want to poke a specific filename.
         wal = SessionWAL(
@@ -110,7 +113,8 @@ class TestSessionWALInstance:
         assert (workspace / ".custom.jsonl").exists()
 
     def test_rotation_still_works_per_scoped_file(
-        self, workspace: Path,
+        self,
+        workspace: Path,
     ):
         wal = SessionWAL(workspace, session_id="signal:group:rot")
         # Push enough entries to trip rotation (_WAL_MAX_LINES = 200).
@@ -130,7 +134,8 @@ class TestSessionWALInstance:
 
 class TestCrashReportIsolation:
     def test_pending_on_session_a_does_not_leak_to_session_b(
-        self, workspace: Path,
+        self,
+        workspace: Path,
     ):
         # Session A starts a tool and crashes without log_tool_done.
         wal_a = SessionWAL(workspace, session_id="signal:group:abc")
@@ -139,7 +144,8 @@ class TestCrashReportIsolation:
 
         # Session B is a fresh channel/chat for the same agent.
         report_b = SessionWAL.get_crash_report(
-            workspace, session_id="whatsapp:group:xyz",
+            workspace,
+            session_id="whatsapp:group:xyz",
         )
         # The load-bearing assertion — prior to session scoping this
         # was the leak that rebroadcast the Signal image-gen task
@@ -147,31 +153,36 @@ class TestCrashReportIsolation:
         assert report_b is None
 
     def test_session_a_sees_its_own_crash(
-        self, workspace: Path,
+        self,
+        workspace: Path,
     ):
         # Positive case: same session id, crash visible.
         wal = SessionWAL(workspace, session_id="signal:group:abc")
         wal.log_tool_start("image_gen", "prompt=x")
         report = SessionWAL.get_crash_report(
-            workspace, session_id="signal:group:abc",
+            workspace,
+            session_id="signal:group:abc",
         )
         assert report is not None
         assert "CRASH RECOVERY" in report
         assert "image_gen" in report
 
     def test_completed_tool_does_not_trigger_crash(
-        self, workspace: Path,
+        self,
+        workspace: Path,
     ):
         wal = SessionWAL(workspace, session_id="signal:group:abc")
         wal.log_tool_start("bash", "ls")
         wal.log_tool_done("bash")
         report = SessionWAL.get_crash_report(
-            workspace, session_id="signal:group:abc",
+            workspace,
+            session_id="signal:group:abc",
         )
         assert report is None
 
     def test_legacy_unscoped_wal_does_not_contaminate_scoped_session(
-        self, workspace: Path,
+        self,
+        workspace: Path,
     ):
         # A pre-upgrade installation might still have
         # ``.session_wal.jsonl`` on disk from before this change.
@@ -180,12 +191,14 @@ class TestCrashReportIsolation:
         legacy.log_tool_start("old_task", "stuff")
         # Fresh session after upgrade.
         report = SessionWAL.get_crash_report(
-            workspace, session_id="signal:group:abc",
+            workspace,
+            session_id="signal:group:abc",
         )
         assert report is None
 
     def test_crash_detection_marks_pending_as_crashed(
-        self, workspace: Path,
+        self,
+        workspace: Path,
     ):
         # After get_crash_report finds a pending entry and reports
         # it, it rewrites the entry as ``status: "crashed"`` so the
@@ -199,7 +212,8 @@ class TestCrashReportIsolation:
         assert second is None
 
     def test_reports_list_most_recent_pending(
-        self, workspace: Path,
+        self,
+        workspace: Path,
     ):
         # When multiple tool_starts are pending in the same session
         # (nested / interrupted), the reported one is the MOST
@@ -208,7 +222,8 @@ class TestCrashReportIsolation:
         wal.log_tool_start("older_tool", "x")
         wal.log_tool_start("newer_tool", "y")
         report = SessionWAL.get_crash_report(
-            workspace, session_id="signal:group:abc",
+            workspace,
+            session_id="signal:group:abc",
         )
         assert "newer_tool" in report
 

@@ -227,10 +227,14 @@ class CommandHandler(ConversationCommandHandlerMixin):
         try:
             from .hooks.mempalace_diary import _bg_mempalace_save
             import asyncio
+
             asyncio.create_task(_bg_mempalace_save(self, messages))
         except Exception as e:
             import logging
-            logging.getLogger(__name__).debug(f"MemPalace bg save skipped: {e}")
+
+            logging.getLogger(__name__).debug(
+                f"MemPalace bg save skipped: {e}",
+            )
 
         self.memory.clear_compressed_summary()
 

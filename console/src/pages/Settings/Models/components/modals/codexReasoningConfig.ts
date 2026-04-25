@@ -26,12 +26,7 @@
  * "skip reasoning entirely" (fastest, no think tokens).
  */
 
-export type CodexEffortLevel =
-  | "none"
-  | "low"
-  | "medium"
-  | "high"
-  | "xhigh";
+export type CodexEffortLevel = "none" | "low" | "medium" | "high" | "xhigh";
 
 export const CODEX_EFFORT_LEVELS: readonly CodexEffortLevel[] = [
   "none",

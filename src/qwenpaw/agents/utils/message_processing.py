@@ -438,10 +438,12 @@ async def process_file_and_media_blocks_in_message(msg) -> None:
                     if lang == "zh"
                     else f"User uploaded a file, downloaded to {local_path}"
                 )
-                notes.append({
-                    "type": "text",
-                    "text": f"<system-note>{inner}</system-note>",
-                })
+                notes.append(
+                    {
+                        "type": "text",
+                        "text": f"<system-note>{inner}</system-note>",
+                    },
+                )
             message.content = [*notes, *message.content]
 
 

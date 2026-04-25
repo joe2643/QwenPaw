@@ -496,32 +496,67 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
         if mp_cfg and mp_cfg.enabled:
             try:
                 from .hooks.mempalace_diary import (
-                    MemPalacePreCompactHook, MemPalaceIntervalHook, MemPalacePreReplyHook,
+                    MemPalacePreCompactHook,
+                    MemPalaceIntervalHook,
+                    MemPalacePreReplyHook,
                 )
+
                 registered = []
-                _session_id = self._request_context.get("session_id", "default")
+                _session_id = self._request_context.get(
+                    "session_id",
+                    "default",
+                )
                 if mp_cfg.precompact_save.enabled:
-                    hook = MemPalacePreCompactHook(compact_threshold=mp_cfg.precompact_save.threshold)
-                    self.register_instance_hook(hook_type="pre_reasoning", hook_name="mempalace_precompact", hook=hook.__call__)
+                    hook = MemPalacePreCompactHook(
+                        compact_threshold=mp_cfg.precompact_save.threshold,
+                    )
+                    self.register_instance_hook(
+                        hook_type="pre_reasoning",
+                        hook_name="mempalace_precompact",
+                        hook=hook.__call__,
+                    )
                     registered.append("precompact")
                 if mp_cfg.interval_save.enabled:
-                    hook = MemPalaceIntervalHook(working_dir=working_dir, write_interval=mp_cfg.interval_save.write_interval, session_id=_session_id)
-                    self.register_instance_hook(hook_type="post_reasoning", hook_name="mempalace_interval", hook=hook.__call__)
+                    hook = MemPalaceIntervalHook(
+                        working_dir=working_dir,
+                        write_interval=mp_cfg.interval_save.write_interval,
+                        session_id=_session_id,
+                    )
+                    self.register_instance_hook(
+                        hook_type="post_reasoning",
+                        hook_name="mempalace_interval",
+                        hook=hook.__call__,
+                    )
                     registered.append("interval")
                 if mp_cfg.pre_reply_save:
-                    hook = MemPalacePreReplyHook(working_dir=working_dir, session_id=_session_id)
-                    self.register_instance_hook(hook_type="pre_reply", hook_name="mempalace_prereply", hook=hook.__call__)
+                    hook = MemPalacePreReplyHook(
+                        working_dir=working_dir,
+                        session_id=_session_id,
+                    )
+                    self.register_instance_hook(
+                        hook_type="pre_reply",
+                        hook_name="mempalace_prereply",
+                        hook=hook.__call__,
+                    )
                     registered.append("pre_reply")
                 # L2 Room Recall — auto-inject relevant context
                 if getattr(mp_cfg, "l2_recall", True):
                     try:
                         from .hooks.mempalace_recall import MemPalaceRecallHook
+
                         recall_hook = MemPalaceRecallHook()
-                        self.register_instance_hook(hook_type="pre_reasoning", hook_name="mempalace_l2_recall", hook=recall_hook.__call__)
+                        self.register_instance_hook(
+                            hook_type="pre_reasoning",
+                            hook_name="mempalace_l2_recall",
+                            hook=recall_hook.__call__,
+                        )
                         registered.append("l2_recall")
                     except ImportError as e:
                         logger.warning("L2 Recall hook not available: %s", e)
-                logger.info("MemPalace hooks registered: %s", ", ".join(registered))
+                logger.info(
+                    "MemPalace hooks registered: %s",
+                    ", ".join(registered),
+                )
             except ImportError as e:
                 logger.warning("MemPalace hooks not available: %s", e)
         else:
@@ -532,19 +567,37 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
         # trigger recovery on an unrelated channel/chat for the same
         # agent (see the docstring in ``tool_wal.py`` for the failure
         # mode this prevents).
-        wal_enabled = mp_cfg.session_wal if (mp_cfg and mp_cfg.enabled) else False
+        wal_enabled = (
+            mp_cfg.session_wal if (mp_cfg and mp_cfg.enabled) else False
+        )
         if wal_enabled:
             try:
                 from .hooks.tool_wal import (
-                    SessionWAL, ToolWALPreActingHook, ToolWALPostActingHook, ReasoningWALHook,
+                    SessionWAL,
+                    ToolWALPreActingHook,
+                    ToolWALPostActingHook,
+                    ReasoningWALHook,
                 )
+
                 wal = SessionWAL(
                     working_dir=working_dir,
                     session_id=_session_id,
                 )
-                self.register_instance_hook(hook_type="pre_acting", hook_name="wal_pre_acting", hook=ToolWALPreActingHook(wal).__call__)
-                self.register_instance_hook(hook_type="post_acting", hook_name="wal_post_acting", hook=ToolWALPostActingHook(wal).__call__)
-                self.register_instance_hook(hook_type="post_reasoning", hook_name="wal_post_reasoning", hook=ReasoningWALHook(wal).__call__)
+                self.register_instance_hook(
+                    hook_type="pre_acting",
+                    hook_name="wal_pre_acting",
+                    hook=ToolWALPreActingHook(wal).__call__,
+                )
+                self.register_instance_hook(
+                    hook_type="post_acting",
+                    hook_name="wal_post_acting",
+                    hook=ToolWALPostActingHook(wal).__call__,
+                )
+                self.register_instance_hook(
+                    hook_type="post_reasoning",
+                    hook_name="wal_post_reasoning",
+                    hook=ReasoningWALHook(wal).__call__,
+                )
                 logger.info(
                     "Session WAL hooks registered (session=%s)",
                     _session_id,
@@ -559,11 +612,14 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
         if sc_cfg and sc_cfg.enabled:
             try:
                 from .hooks.skillclaw_capture import SkillClawCaptureHook
+
                 _sc_session_id = self._request_context.get(
-                    "session_id", "default",
+                    "session_id",
+                    "default",
                 )
                 _sc_channel = self._request_context.get(
-                    "channel_name", "all",
+                    "channel_name",
+                    "all",
                 )
                 sc_hook = SkillClawCaptureHook(
                     records_dir=sc_cfg.records_dir,

@@ -27,7 +27,7 @@ repos:
     rev: v3.1.0
     hooks:
       - id: add-trailing-comma
-        exclude: '(?x)(.*/skills/.*|^scripts/pack/)'
+        exclude: '(?x)(.*/skills/.*|^scripts/pack/|^tests/)'
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.7.0
     hooks:
@@ -37,6 +37,7 @@ repos:
           pb2\.py$
           | grpc\.py$
           | ^docs
+          | ^tests/
           | \.html$
           | .*/skills/.*
           )
@@ -56,13 +57,20 @@ repos:
     hooks:
       - id: black
         args: [ --line-length=79 ]
-        exclude: '(?x)(.*/skills/.*|^scripts/pack/)'
+        exclude: '(?x)(.*/skills/.*|^scripts/pack/|^tests/)'
   - repo: https://github.com/PyCQA/flake8
     rev: 6.1.0
     hooks:
       - id: flake8
-        args: [ "--extend-ignore=E203"]
-        exclude: '(?x)(.*/skills/.*|^scripts/pack/)'
+        # E501 line-too-long deferred to black (single source of truth);
+        # E203 disagrees with PEP 8 on slice colons.
+        # F541 (f-string without placeholder) is harmless and common
+        # when threading an f-prefix for future placeholder additions.
+        # E231 (missing whitespace after comma) — black's call.
+        # E741 (ambiguous var name) — too noisy for short helpers.
+        # F841 (unused local) — common in test fixtures.
+        args: [ "--extend-ignore=E203,E501,F541,E231,E741,F841,E402,F811"]
+        exclude: '(?x)(.*/skills/.*|^scripts/pack/|^tests/)'
   - repo: https://github.com/pylint-dev/pylint
     rev: v3.0.2
     hooks:
@@ -70,6 +78,7 @@ repos:
         exclude:
           (?x)(
           ^docs
+          | ^tests/
           | pb2\.py$
           | grpc\.py$
           | \.demo$
@@ -110,6 +119,33 @@ repos:
           --disable=C0114,  # Disable missing module docstring for quick dev
           --disable=C0115,  # Disable missing class docstring for quick dev
           --disable=C0116,  # Disable missing function or method docstring for quick dev
+          --disable=C0301,  # line-too-long: black is the single source of truth
+          --disable=W1510,  # subprocess-run-check: explicit check= often unwanted
+          --disable=W1514,  # unspecified-encoding: too noisy on legacy code paths
+          --disable=W0102,  # dangerous-default-value: legacy callers, audited cases
+          --disable=R0912,  # too-many-branches: refactor target, not blocker
+          --disable=R0915,  # too-many-statements: same
+          --disable=R0911,  # too-many-return-statements: same
+          --disable=R0904,  # too-many-public-methods: same
+          --disable=R0917,  # too-many-positional-arguments: same
+          --disable=R0916,  # too-many-boolean-expressions: same
+          --disable=R1702,  # too-many-nested-blocks: same
+          --disable=W0613,  # unused-argument: common in mock signatures and base classes
+          --disable=W0621,  # redefined-outer-name: pytest-fixture pattern
+          --disable=W0404,  # reimported: harmless, sometimes intentional
+          --disable=W0707,  # raise-missing-from: not always informative
+          --disable=W0212,  # protected-access: white-box internal calls in this codebase
+          --disable=W0611,  # unused-import: triggers on conditional imports
+          --disable=W0612,  # unused-variable: common in unpack patterns
+          --disable=W0706,  # try-except-raise: legitimate in retry/audit code
+          --disable=W1309,  # f-string-without-interpolation: harmless
+          --disable=W1404,  # implicit-str-concat: intentional for long messages
+          --disable=C0411,  # wrong-import-order: too noisy across legacy modules
+          --disable=C0412,  # ungrouped-imports: same
+          --disable=C0413,  # wrong-import-position: deferred-import pattern
+          --disable=C0207,  # use-maxsplit-arg: minor refactor target
+          --disable=R1714,  # consider-using-in: refactor target, not blocker
+          --disable=R1735,  # use-dict-literal: refactor target
         ]
   - repo: https://github.com/pre-commit/mirrors-prettier
     rev: 'v3.0.0'

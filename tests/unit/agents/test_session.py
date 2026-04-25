@@ -362,13 +362,17 @@ async def test_round_trip_preserves_session_state(sess, tmp_session_dir):
         "_compressed_summary": "",
     }
     await sess.save_session_state(
-        "whatsapp:+85251159218", user_id="+85251159218", memory=mod,
+        "whatsapp:+85251159218",
+        user_id="+85251159218",
+        memory=mod,
     )
 
     # Fresh module — simulates a new process loading the file.
     fresh = FakeModule()
     await sess.load_session_state(
-        "whatsapp:+85251159218", user_id="+85251159218", memory=fresh,
+        "whatsapp:+85251159218",
+        user_id="+85251159218",
+        memory=fresh,
     )
     assert fresh.data == mod.data
 
@@ -381,14 +385,20 @@ async def test_dm_and_group_sessions_do_not_collide(sess, tmp_session_dir):
     the same guarantee at the session-state layer.
     """
     dm_mod = FakeModule()
-    dm_mod.data = {"content": [[{"role": "user", "content": "dm"}, []]],
-                   "_compressed_summary": ""}
+    dm_mod.data = {
+        "content": [[{"role": "user", "content": "dm"}, []]],
+        "_compressed_summary": "",
+    }
     group_mod = FakeModule()
-    group_mod.data = {"content": [[{"role": "user", "content": "group"}, []]],
-                      "_compressed_summary": ""}
+    group_mod.data = {
+        "content": [[{"role": "user", "content": "group"}, []]],
+        "_compressed_summary": "",
+    }
 
     await sess.save_session_state(
-        "whatsapp:+85251159218", user_id="+85251159218", memory=dm_mod,
+        "whatsapp:+85251159218",
+        user_id="+85251159218",
+        memory=dm_mod,
     )
     await sess.save_session_state(
         "whatsapp:group:120363421135228220@g.us",
@@ -399,7 +409,9 @@ async def test_dm_and_group_sessions_do_not_collide(sess, tmp_session_dir):
     loaded_dm = FakeModule()
     loaded_group = FakeModule()
     await sess.load_session_state(
-        "whatsapp:+85251159218", user_id="+85251159218", memory=loaded_dm,
+        "whatsapp:+85251159218",
+        user_id="+85251159218",
+        memory=loaded_dm,
     )
     await sess.load_session_state(
         "whatsapp:group:120363421135228220@g.us",
@@ -416,7 +428,8 @@ async def test_dm_and_group_sessions_do_not_collide(sess, tmp_session_dir):
 
 @pytest.mark.asyncio
 async def test_overwrite_same_session_replaces_not_appends(
-    sess, tmp_session_dir,
+    sess,
+    tmp_session_dir,
 ):
     """Successive saves to the same session must fully replace the
     prior content (not merge / not append a second JSON object).
@@ -424,12 +437,16 @@ async def test_overwrite_same_session_replaces_not_appends(
     turn or trips the 'extra data' decoder path.
     """
     mod = FakeModule()
-    mod.data = {"content": [[{"role": "user", "content": "old"}, []]],
-                "_compressed_summary": ""}
+    mod.data = {
+        "content": [[{"role": "user", "content": "old"}, []]],
+        "_compressed_summary": "",
+    }
     await sess.save_session_state("s", user_id="u", memory=mod)
 
-    mod.data = {"content": [[{"role": "user", "content": "new"}, []]],
-                "_compressed_summary": "summary"}
+    mod.data = {
+        "content": [[{"role": "user", "content": "new"}, []]],
+        "_compressed_summary": "summary",
+    }
     await sess.save_session_state("s", user_id="u", memory=mod)
 
     fresh = FakeModule()
@@ -475,6 +492,7 @@ class _FakeRunner:
         self._task_tracker = tracker
         # Bind the real method so we test production code.
         from qwenpaw.app.runner.runner import AgentRunner
+
         self.shutdown_handler = AgentRunner.shutdown_handler.__get__(self)
 
 
@@ -517,10 +535,12 @@ async def test_shutdown_handler_noop_when_tracker_absent():
     """A runner without a tracker (e.g. early-init state) must not
     crash during shutdown — just report clean."""
     from qwenpaw.app.runner.runner import AgentRunner
+
     class _Bare:
         agent_id = "x"
         _task_tracker = None
         shutdown_handler = AgentRunner.shutdown_handler
+
     ok = await _Bare().shutdown_handler(timeout=1.0)
     assert ok is True
 
@@ -594,7 +614,8 @@ async def test_shutdown_all_runners_survives_runner_exception():
 
 @pytest.mark.asyncio
 async def test_finally_block_saves_even_on_mid_stream_cancellation(
-    sess, tmp_session_dir,
+    sess,
+    tmp_session_dir,
 ):
     """Async-generator contract: ``finally`` in an async generator
     runs when the consumer stops iterating (gc / aclose / cancel).
@@ -619,7 +640,9 @@ async def test_finally_block_saves_even_on_mid_stream_cancellation(
                 [{"role": "assistant", "content": "partial"}, []],
             )
             await sess.save_session_state(
-                "cancel-test", user_id="u", memory=mod,
+                "cancel-test",
+                user_id="u",
+                memory=mod,
             )
             saved.set()
 
@@ -647,14 +670,17 @@ import asyncio  # noqa: E402 — late import keeps earlier tests hermetic
 
 @pytest.mark.asyncio
 async def test_save_creates_prev_backup_after_first_overwrite(
-    sess, tmp_session_dir,
+    sess,
+    tmp_session_dir,
 ):
     """Every save after the first must leave a ``.prev`` sibling
     with the previous content — that's the safety net the load-side
     fallback relies on."""
     mod = FakeModule()
-    mod.data = {"content": [[{"role": "user", "content": "turn-1"}, []]],
-                "_compressed_summary": ""}
+    mod.data = {
+        "content": [[{"role": "user", "content": "turn-1"}, []]],
+        "_compressed_summary": "",
+    }
     await sess.save_session_state("s", user_id="u", memory=mod)
 
     # First save — no backup yet.
@@ -663,8 +689,10 @@ async def test_save_creates_prev_backup_after_first_overwrite(
     assert not os.path.exists(path + ".prev")
 
     # Second save rotates the first one to .prev.
-    mod.data = {"content": [[{"role": "user", "content": "turn-2"}, []]],
-                "_compressed_summary": ""}
+    mod.data = {
+        "content": [[{"role": "user", "content": "turn-2"}, []]],
+        "_compressed_summary": "",
+    }
     await sess.save_session_state("s", user_id="u", memory=mod)
 
     assert os.path.exists(path)
@@ -676,7 +704,8 @@ async def test_save_creates_prev_backup_after_first_overwrite(
 
 @pytest.mark.asyncio
 async def test_save_is_atomic_no_tmp_file_left_behind(
-    sess, tmp_session_dir,
+    sess,
+    tmp_session_dir,
 ):
     """After a successful save, ``<path>.tmp`` must not linger —
     if it does, a later ``save`` could pick up a stale tmp file
@@ -693,7 +722,8 @@ async def test_save_is_atomic_no_tmp_file_left_behind(
 
 @pytest.mark.asyncio
 async def test_save_never_leaves_primary_missing_between_steps(
-    sess, tmp_session_dir,
+    sess,
+    tmp_session_dir,
 ):
     """Regression guard: on 2026-04-24 a SIGKILL hit between the
     ``os.replace(primary → .prev)`` and the following write, leaving
@@ -743,7 +773,8 @@ async def test_save_never_leaves_primary_missing_between_steps(
 
 @pytest.mark.asyncio
 async def test_load_recovers_from_prev_when_primary_missing(
-    sess, tmp_session_dir,
+    sess,
+    tmp_session_dir,
 ):
     """The real-world symptom: primary session file went missing
     between a successful save and the next load (root cause still
@@ -778,11 +809,11 @@ async def test_load_recovers_from_prev_when_primary_missing(
 
 @pytest.mark.asyncio
 async def test_load_skips_when_both_primary_and_prev_missing(
-    sess, tmp_session_dir,
+    sess,
+    tmp_session_dir,
 ):
     """No file + no backup → fall back to the historic "skip"
     behaviour; don't crash, don't populate the module."""
     mod = FakeModule()
     await sess.load_session_state("no:such:session", user_id="u", memory=mod)
     assert mod.data is None
-

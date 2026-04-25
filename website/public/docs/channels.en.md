@@ -768,14 +768,14 @@ The session is persisted under `$WORKING_DIR/credentials/whatsapp/default/neoniz
 
 **WhatsApp-specific fields:**
 
-| Field                | Type    | Default            | Description                                                          |
-| -------------------- | ------- | ------------------ | -------------------------------------------------------------------- |
-| `auth_dir`           | string  | `""`               | Directory for neonize-qwenpaw session DB. Defaults to `$WORKING_DIR/credentials/whatsapp/default` (follows `QWENPAW_WORKING_DIR` / legacy `~/.copaw` / `~/.qwenpaw`) |
-| `send_read_receipts` | bool    | `true`             | Send read receipts (double blue ticks)                               |
-| `self_chat_mode`     | bool    | `false`            | Process messages sent from the bot's own number (for self-commands)  |
-| `text_chunk_limit`   | int     | `4096`             | Maximum characters per outgoing message (longer replies are split)   |
-| `groups`             | list    | `[]`               | Group JID allowlist (e.g. `"120363421135228220@g.us"`)                |
-| `group_allow_from`   | list    | `[]`               | Who can trigger the bot in groups. `["*"]` = everyone                |
+| Field                | Type   | Default | Description                                                                                                                                                          |
+| -------------------- | ------ | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `auth_dir`           | string | `""`    | Directory for neonize-qwenpaw session DB. Defaults to `$WORKING_DIR/credentials/whatsapp/default` (follows `QWENPAW_WORKING_DIR` / legacy `~/.copaw` / `~/.qwenpaw`) |
+| `send_read_receipts` | bool   | `true`  | Send read receipts (double blue ticks)                                                                                                                               |
+| `self_chat_mode`     | bool   | `false` | Process messages sent from the bot's own number (for self-commands)                                                                                                  |
+| `text_chunk_limit`   | int    | `4096`  | Maximum characters per outgoing message (longer replies are split)                                                                                                   |
+| `groups`             | list   | `[]`    | Group JID allowlist (e.g. `"120363421135228220@g.us"`)                                                                                                               |
+| `group_allow_from`   | list   | `[]`    | Who can trigger the bot in groups. `["*"]` = everyone                                                                                                                |
 
 ### Features
 
@@ -801,20 +801,47 @@ The Signal channel talks to the official [`signal-cli`](https://github.com/AsamK
 
 ### Install signal-cli
 
-Pick the distribution that matches your platform. Both expose the same `signal-cli` command:
+Pick the distribution that matches your platform. All expose the same `signal-cli` command, but the feature surface differs:
 
-| Platform                             | Distribution                                                                                                 | Install                                                                                                           |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
-| **Linux x86_64**                     | Native-image (GraalVM, ~97 MB, self-contained ELF, no Java runtime needed)                                   | Download `signal-cli-X.Y.Z-Linux-native.tar.gz` from [releases](https://github.com/AsamK/signal-cli/releases); extract to `/opt/signal-cli/` and symlink into `/usr/local/bin/`. |
-| **Linux ARM64 / macOS / Windows**    | JAR bundle (~98 MB, requires Java 21+)                                                                       | Download `signal-cli-X.Y.Z.tar.gz` from releases, plus install Java 21 (`brew install openjdk@21` on macOS, `apt install openjdk-21-jre` on Debian/Ubuntu, MSI installer on Windows). |
+| Distribution                         | Runtime               | Group @mention via picker      | Sticker-pack upload                                             | Use when                                                                                  |
+| ------------------------------------ | --------------------- | ------------------------------ | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| **JAR bundle, latest (≥ v0.14.x)**   | **Java 25+ required** | ✅ works (structured mentions) | ✅ works                                                        | **Recommended.** Full feature parity.                                                     |
+| JAR bundle, v0.13.24                 | Java 21+              | ❌ drops mentions silently     | ✅ works                                                        | Java 25 unavailable and you don't need group mentions.                                    |
+| Native-image (GraalVM), Linux x86_64 | none (self-contained) | ❌ drops mentions (≤ 0.14.1)   | ❌ fails with `Unable to parse entity` (GraalVM reflection gap) | Only if you can't install a JDK and only need DM messaging without sticker-pack creation. |
 
-> The JAR bundle ships with a shell wrapper at `bin/signal-cli` that auto-bootstraps the JVM, so `signal_cli_path` in your config points at the same command regardless of architecture.
+> **Known native-image bug:** the GraalVM native build (as of `0.14.1`) omits reflection metadata for `StickerUploadAttributesResponse`, so `uploadStickerPack` fails with `Upload error (maybe image size too large): Unable to parse entity`. The JAR bundle is **not** affected.
+
+**Recommended setup (Linux, all features):**
+
+```bash
+# 1. Install Java 25 runtime (Ubuntu 24.10+ has it in main apt):
+sudo apt install -y openjdk-25-jre
+# On older distros, pull Eclipse Temurin 25 tarball from https://adoptium.net/
+
+# 2. Download signal-cli JAR bundle (v0.14.3 tested):
+mkdir -p ~/opt && cd ~/opt
+curl -L https://github.com/AsamK/signal-cli/releases/download/v0.14.3/signal-cli-0.14.3.tar.gz \
+    | tar xz
+
+# 3. Pin signal-cli to JDK 25 without changing system default via a wrapper:
+mkdir -p ~/opt/bin
+cat > ~/opt/bin/signal-cli <<'SH'
+#!/bin/sh
+export JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64
+exec "$JAVA_HOME/bin/java" --enable-native-access=ALL-UNNAMED \
+    -classpath "/home/$(whoami)/opt/signal-cli-0.14.3/lib/*" \
+    org.asamk.signal.Main "$@"
+SH
+chmod +x ~/opt/bin/signal-cli
+```
+
+This wrapper is what you'll point `signal_cli_path` at — the system-default `java` can stay on JDK 21 for other tools.
 
 Confirm it works:
 
 ```bash
-signal-cli --version
-# signal-cli 0.14.1
+~/opt/bin/signal-cli --version
+# signal-cli 0.14.3
 ```
 
 ### Register or link an account
@@ -838,12 +865,14 @@ signal-cli -a +85212345678 register
 signal-cli -a +85212345678 verify 123456
 ```
 
-Either way, `signal-cli` stores account data under `~/.local/share/signal-cli/`. Grab the account UUID from that store — you'll need it for `account_uuid` below:
+Either way, `signal-cli` stores account data under `~/.local/share/signal-cli/`. QwenPaw **auto-discovers** the account UUID from that store on channel start — you don't need to fill it into `agent.json` explicitly:
 
 ```bash
 cat ~/.local/share/signal-cli/data/accounts.json
 # { "accounts": [ { "number": "+85212345678", "uuid": "447e962a-...", "path": "..." } ] }
 ```
+
+The UUID is only read for group-mention detection (to match Signal's structured `mentions` array against the bot's ACI). Setting `account_uuid` explicitly in config still works and wins over auto-discovery if you want to pin it.
 
 ### Configure
 
@@ -851,8 +880,7 @@ cat ~/.local/share/signal-cli/data/accounts.json
 "signal": {
     "enabled": true,
     "account": "+85212345678",
-    "account_uuid": "447e962a-1f09-4a21-aef6-79617d8e8ad0",
-    "signal_cli_path": "signal-cli",
+    "signal_cli_path": "/home/<user>/opt/bin/signal-cli",
     "dm_policy": "allowlist",
     "group_policy": "allowlist",
     "allow_from": ["+85298765432", "uuid:5720b72c-1051-47bd-962b-8c0c9db5aff1"],
@@ -865,35 +893,64 @@ cat ~/.local/share/signal-cli/data/accounts.json
 
 **Signal-specific fields:**
 
-| Field                | Type         | Default              | Description                                                                                                              |
-| -------------------- | ------------ | -------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `account`            | string       | `""` (required)      | Phone number registered with signal-cli, E.164 format                                                                    |
-| `account_uuid`       | string       | `""`                 | Bot account UUID (from `accounts.json`); used to detect self-mentions in groups                                          |
-| `signal_cli_path`    | string       | `"signal-cli"`       | Path or PATH-lookup name of the signal-cli binary. Use an absolute path if it's not on `$PATH`.                          |
-| `extra_args`         | list[str]    | `[]`                 | Extra CLI flags appended to the spawn command, e.g. `["--trust-new-identities", "always"]`                               |
-| `show_typing`        | bool         | `true`               | Continuous typing-indicator loop during streaming                                                                        |
-| `send_read_receipts` | bool         | `true`               | Send read receipts                                                                                                       |
-| `text_chunk_limit`   | int          | `4000`               | Maximum characters per outgoing message                                                                                  |
-| `groups`             | list         | `[]`                 | Group internal-id allowlist (base64-looking values like `sBlO8LhzR42X...=`, from `signal-cli listGroups`)                |
-| `group_allow_from`   | list         | `[]`                 | Who can trigger the bot in groups. `["*"]` = everyone; supports `+phone` or `uuid:...`                                   |
+| Field                | Type      | Default         | Description                                                                                               |
+| -------------------- | --------- | --------------- | --------------------------------------------------------------------------------------------------------- |
+| `account`            | string    | `""` (required) | Phone number registered with signal-cli, E.164 format                                                     |
+| `account_uuid`       | string    | `""`            | Bot account UUID (from `accounts.json`); used to detect self-mentions in groups                           |
+| `signal_cli_path`    | string    | `"signal-cli"`  | Path or PATH-lookup name of the signal-cli binary. Use an absolute path if it's not on `$PATH`.           |
+| `extra_args`         | list[str] | `[]`            | Extra CLI flags appended to the spawn command, e.g. `["--trust-new-identities", "always"]`                |
+| `show_typing`        | bool      | `true`          | Continuous typing-indicator loop during streaming                                                         |
+| `send_read_receipts` | bool      | `true`          | Send read receipts                                                                                        |
+| `text_chunk_limit`   | int       | `4000`          | Maximum characters per outgoing message                                                                   |
+| `groups`             | list      | `[]`            | Group internal-id allowlist (base64-looking values like `sBlO8LhzR42X...=`, from `signal-cli listGroups`) |
+| `group_allow_from`   | list      | `[]`            | Who can trigger the bot in groups. `["*"]` = everyone; supports `+phone` or `uuid:...`                    |
 
 ### Features
 
 - **Text** (DM + group) with native markdown via `text_mode: "styled"` (`**bold**`, `*italic*`, `` `code` ``, `~~strike~~`)
 - **Images**, **audio**, **video**, **files** (receive + send via base64 attachments)
 - **Reactions**: receive + send emoji reactions
-- **Quote/reply-to**: extracts quoted message text + attachments as context
+- **Quote/reply-to**: extracts quoted message text + attachments as context, including quoted stickers
 - **Group history**: non-mentioned messages buffered with media, injected when bot is mentioned
 - **Typing indicator**: continuously refreshed during response generation
-- **Subprocess supervisor**: JSON-RPC over stdin/stdout, real-time receive, auto-respawn with 5–60 s backoff if the subprocess dies
+- **Subprocess supervisor**: JSON-RPC over stdin/stdout, real-time receive, auto-respawn with 5–60 s backoff; inline orphan reap by PPid so parallel agents don't kill each other's signal-cli
+- **Stickers**: inbound stickers download to the media dir with emoji hint; outbound pack management tools (see below)
+
+### Stickers
+
+Inbound stickers are auto-handled: when a `dataMessage.sticker` reference arrives, the channel fetches the webp via `getSticker`, saves it under the channel's media dir, and emits a `[Signal sticker 🦀 at <path>]` text hint plus the ImageContent so the agent can reason about both the emoji and the visual. Same flow for stickers inside a quoted/reply-to message. The fetched webp is cached by `(pack_id, sticker_id)` — subsequent previews of the same sticker skip the RPC entirely (Signal packs are protocol-immutable, so a cache hit is always authoritative).
+
+> **Outbound stickers default to PNG.** Signal Android renders user-uploaded WebP stickers as **voice-message** blobs (independent of VP8L vs VP8X encoding) unless the WebP came from Signal Desktop's own creator — third-party packs that work in practice (e.g. LIHKG Dog) ship PNG. CoPaw's `signal_prepare_sticker_webp` therefore defaults to PNG output, and `signal_create_sticker_pack` / `signal_add_stickers_to_pack` accept PNG **or** WebP per sticker (auto-detected by magic bytes; correct `contentType` written into the manifest). Pass `--format webp` only when you also need the same file to flow through WhatsApp's `.sticker.webp` filename convention.
+
+Outbound sticker **pack management** is exposed as agent tools:
+
+| Tool                          | What it does                                                                                                                                                                                                                                        |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `signal_prepare_sticker_webp` | Convert any image (PNG / JPG / WebP) into a Signal-spec sticker file: 512×512, ≤ 300 KB, alpha preserved, transparent letterbox. **Default output is PNG** (Signal-friendly); pass `output_format="webp"` for WhatsApp.                             |
+| `signal_list_sticker_packs`   | Merges `listStickerPacks` RPC output with CoPaw's local registry — returns title / author / pack_id / per-sticker emoji + source paths, and flags packs superseded by later uploads.                                                                |
+| `signal_preview_sticker`      | Fetch one sticker's webp bytes; caches to disk and returns an `ImageBlock` the agent can reason about.                                                                                                                                              |
+| `signal_install_sticker_pack` | Wraps `addStickerPack` (install a pack shared via a `signal.art` link).                                                                                                                                                                             |
+| `signal_create_sticker_pack`  | Stage manifest.json + numbered PNG / WebP copies under `{media_dir}/sticker_pack_staging/<uuid>/` (extension and `contentType` chosen per file from magic bytes), run `uploadStickerPack`, return the new `pack_id` + `pack_key` + per-sticker ids. |
+| `signal_add_stickers_to_pack` | Grow an existing pack (Signal packs are immutable, so this downloads the original stickers + appends the new ones + re-uploads as a new pack). Registry records the lineage.                                                                        |
+| `signal_send_sticker`         | Send by pack reference (`pack_id:sticker_id`). Omit `to` to auto-resolve to the current chat context.                                                                                                                                               |
+
+A persistent registry at `{media_dir}/sticker_packs.json` records `pack_id` / `pack_key` / `label` / `previous_pack_id` / `superseded_by` / per-sticker source paths for every pack CoPaw uploaded or installed — `signal_list_sticker_packs` merges it with signal-cli's own view so the agent sees the full history even across re-uploads.
+
+An accompanying **`sticker_format` skill** documents the conversion CLI for agents running outside the CoPaw venv (e.g. external tooling invoked via `execute_shell_command`) — it bundles `prepare_sticker_webp.py` so any Pillow-equipped Python can produce a format-compliant sticker.
+
+> **Pipeline tip:** generate → convert → pack → send. If you're chaining an image generator (codex image gen, dalle, etc.) into a sticker pack, always route through `signal_prepare_sticker_webp` first; the pack upload preflight rejects anything that isn't already 512×512 / PNG-or-WebP / ≤ 300 KB. Default to PNG output for Signal — WebP works for WhatsApp's `.sticker.webp` filename routing but mis-renders as a voice message on Signal Android.
 
 ### Notes
 
 - Signal doesn't expose a public API — `signal-cli` is the only supported bridge. Earlier releases of this channel used `bbernhard/signal-cli-rest-api` Docker container; the subprocess transport removes that dependency.
-- Only **one** process may hold a signal-cli account's SQLite store at a time. Stop any older REST-API container or daemon before starting QwenPaw.
+- Only **one** process (and thus one QwenPaw agent) may hold a signal-cli account's SQLite store at a time. Configure the Signal channel on a **single** agent per phone number; enabling the same account on two agents triggers file-lock contention and a respawn storm. Stop any older REST-API container or daemon before starting QwenPaw.
 - Group IDs in `groups` are the **internal-id** from `signal-cli listGroups` (base64-looking strings like `sBlO8LhzR42X...=`), NOT the `group.xxx` external form.
 - `group_allow_from` accepts phone numbers (`+85212345678`), UUIDs (`uuid:xxx-xxx-...`), or `"*"` for everyone.
-- If the subprocess keeps respawning, run `signal-cli -a +<number> --output=json jsonRpc` by hand to see the real error; the most common issues are a missing/wrong account under `~/.local/share/signal-cli/`, a `signal_cli_path` that can't be resolved, or Java 21 not on `$PATH` when using the JAR bundle.
+- If the subprocess keeps respawning, run `signal-cli -a +<number> --output=json jsonRpc` by hand to see the real error; the most common issues are a missing/wrong account under `~/.local/share/signal-cli/`, a `signal_cli_path` that can't be resolved, or the wrong JDK for the JAR version (see the install table above).
+- When a group message gets silently dropped, the channel logs the reason at INFO level:
+  - `signal: blocked group <gid> (not in allowlist ...)` — add the group id to `groups`.
+  - `signal: blocked sender <uid> in group <gid> by group_allow_from` — widen `group_allow_from`.
+  - `signal: require_mention drop ... mentions=[]` — structured mention didn't land; check you're on a v0.14.x JAR with JDK 25 (v0.13.24 JAR + native binary both omit the `mentions` array).
 
 ---
 

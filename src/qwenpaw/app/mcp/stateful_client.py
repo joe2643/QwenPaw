@@ -311,7 +311,10 @@ class StdIOStatefulClient(StatefulClientBase):
         self._validate_connection()
 
         return await _call_with_timeout(
-            self.session, name, arguments or {}, self._tool_call_timeout,
+            self.session,
+            name,
+            arguments or {},
+            self._tool_call_timeout,
         )
 
     async def get_callable_function(
@@ -377,7 +380,9 @@ async def _call_with_timeout(
     if timeout is None:
         return await session.call_tool(name, arguments)
     return await session.call_tool(
-        name, arguments, read_timeout_seconds=timedelta(seconds=timeout),
+        name,
+        arguments,
+        read_timeout_seconds=timedelta(seconds=timeout),
     )
 
 
@@ -647,7 +652,10 @@ class HttpStatefulClient(StatefulClientBase):
         self._validate_connection()
 
         return await _call_with_timeout(
-            self.session, name, arguments or {}, self._tool_call_timeout,
+            self.session,
+            name,
+            arguments or {},
+            self._tool_call_timeout,
         )
 
     async def get_callable_function(

@@ -36,6 +36,33 @@ class ReloadResult(str, enum.Enum):
         return self is ReloadResult.RELOADED
 
 
+# Process-scoped reference to the live MultiAgentManager.  Set once
+# at app startup (see ``_app.py``) so tool code that runs outside an
+# HTTP request — and therefore can't pull the manager from
+# ``app.state.multi_agent_manager`` — can still reach the canonical
+# instance via :func:`get_registered_multi_agent_manager`.
+#
+# Without this, callers like ``signal_sticker._get_signal_channel``
+# and the proactive trigger were instantiating fresh ``MultiAgentManager``
+# objects each invocation; each fresh instance had an empty ``self.agents``
+# dict, so ``get_agent(agent_id)`` always took the "create new workspace"
+# path — spawning a duplicate ``signal-cli`` daemon every tool call and
+# producing the lock-contention storm we kept hitting.
+_REGISTERED_MANAGER: "MultiAgentManager | None" = None
+
+
+def register_multi_agent_manager(manager: "MultiAgentManager") -> None:
+    """Publish ``manager`` as the canonical process-wide instance."""
+    global _REGISTERED_MANAGER
+    _REGISTERED_MANAGER = manager
+
+
+def get_registered_multi_agent_manager() -> "MultiAgentManager | None":
+    """Return the registered live MultiAgentManager, or ``None`` if
+    no app has registered yet (e.g. during unit tests)."""
+    return _REGISTERED_MANAGER
+
+
 def _cooldown_seconds_from_env(default: float = 30.0) -> float:
     """Read reload cooldown from ``COPAW_RELOAD_COOLDOWN_SECONDS`` env var."""
     raw = os.environ.get("COPAW_RELOAD_COOLDOWN_SECONDS", "").strip()
@@ -376,9 +403,7 @@ class MultiAgentManager:
             ):
                 skip_count = self._reload_skip_count.get(agent_id, 0) + 1
                 self._reload_skip_count[agent_id] = skip_count
-                log_fn = (
-                    logger.error if skip_count >= 10 else logger.warning
-                )
+                log_fn = logger.error if skip_count >= 10 else logger.warning
                 log_fn(
                     "reload_agent skipped for %s: only %.1fs since last "
                     "reload (cooldown=%.0fs, skip_count=%d). Likely a "
@@ -548,7 +573,9 @@ class MultiAgentManager:
             except Exception as e:
                 logger.error(
                     "Error draining runner for %s: %s",
-                    agent_id, e, exc_info=True,
+                    agent_id,
+                    e,
+                    exc_info=True,
                 )
                 return agent_id, False
 
@@ -561,7 +588,8 @@ class MultiAgentManager:
             logger.warning(
                 "shutdown_all_runners: %d runner(s) did not fully drain "
                 "within timeout — some session state may be lost: %s",
-                len(incomplete), incomplete,
+                len(incomplete),
+                incomplete,
             )
         else:
             logger.info("shutdown_all_runners: all runners drained")

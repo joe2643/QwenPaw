@@ -211,10 +211,7 @@ async def test_http_mode_posts_to_ingest_endpoint(tmp_path, monkeypatch):
     )
     await hook(_FakeAgent(messages=[_FakeMsg("user", "hi")]), {})
 
-    assert (
-        captured["url"]
-        == "http://localhost:8787/v1/sessions/ingest"
-    )
+    assert captured["url"] == "http://localhost:8787/v1/sessions/ingest"
     assert captured["json"]["session_id"] == "http-test"
     assert captured["json"]["turn"] == 1
     assert captured["headers"]["Authorization"] == "Bearer secret"
@@ -234,7 +231,8 @@ async def test_http_mode_falls_back_to_file_on_5xx(tmp_path, monkeypatch):
             self.text = "service unavailable"
 
     class _MockClient:
-        def __init__(self, *a, **k): pass
+        def __init__(self, *a, **k):
+            pass
 
         async def post(self, url, json=None, headers=None):
             return _MockResponse()
@@ -269,7 +267,8 @@ async def test_http_mode_falls_back_on_connection_error(tmp_path, monkeypatch):
     import httpx
 
     class _MockClient:
-        def __init__(self, *a, **k): pass
+        def __init__(self, *a, **k):
+            pass
 
         async def post(self, url, json=None, headers=None):
             raise httpx.ConnectError("connection refused")

@@ -73,7 +73,7 @@ def _check_auth(authorization: Optional[str]) -> None:
         return
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, detail="missing bearer token")
-    if authorization[len("Bearer "):] != expected:
+    if authorization[len("Bearer ") :] != expected:
         raise HTTPException(403, detail="invalid bearer token")
 
 
@@ -128,7 +128,10 @@ async def chat_completions(
         timeout=httpx.Timeout(600, connect=30),
     ) as client:
         async with client.stream(
-            "POST", upstream_url, json=responses_body, headers=headers,
+            "POST",
+            upstream_url,
+            json=responses_body,
+            headers=headers,
         ) as upstream:
             if upstream.status_code != 200:
                 err_bytes = await upstream.aread()
@@ -181,7 +184,8 @@ async def _stream_sse(
                 return
 
             async for chunk_dict in translate_responses_events_to_chat_chunks(
-                upstream, state,
+                upstream,
+                state,
             ):
                 yield f"data: {json.dumps(chunk_dict)}\n\n".encode()
 

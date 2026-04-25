@@ -70,9 +70,11 @@ def _write_wal(tmp: Path) -> None:
 # _read_wal
 # ---------------------------------------------------------------------------
 
+
 class TestReadWal:
     def test_parses_all_event_types(self, tmp_path):
         from qwenpaw.skill_review.review import _read_wal
+
         _write_wal(tmp_path)
         result = _read_wal(tmp_path)
         assert "[reasoning]" in result
@@ -81,15 +83,22 @@ class TestReadWal:
 
     def test_empty_workspace_returns_empty_string(self, tmp_path):
         from qwenpaw.skill_review.review import _read_wal
+
         result = _read_wal(tmp_path)
         assert result == ""
 
     def test_respects_max_entries(self, tmp_path):
         from qwenpaw.skill_review.review import _read_wal
+
         # Write 300 entries with content long enough to pass the >20 char filter
         wal_path = tmp_path / ".session_wal.jsonl"
         lines = [
-            json.dumps({"type": "reasoning", "content": f"message number {i} with enough length"})
+            json.dumps(
+                {
+                    "type": "reasoning",
+                    "content": f"message number {i} with enough length",
+                },
+            )
             for i in range(300)
         ]
         wal_path.write_text("\n".join(lines), encoding="utf-8")
@@ -102,6 +111,7 @@ class TestReadWal:
 # State file multi-session isolation (Step 1 regression)
 # ---------------------------------------------------------------------------
 
+
 class TestStateFileIsolation:
     """Verify that two hook instances with different session_ids use separate state files."""
 
@@ -109,10 +119,14 @@ class TestStateFileIsolation:
         from qwenpaw.agents.hooks.mempalace_diary import MemPalaceIntervalHook
 
         hook_a = MemPalaceIntervalHook(
-            working_dir=tmp_path, write_interval=15, session_id="session-aaa"
+            working_dir=tmp_path,
+            write_interval=15,
+            session_id="session-aaa",
         )
         hook_b = MemPalaceIntervalHook(
-            working_dir=tmp_path, write_interval=15, session_id="session-bbb"
+            working_dir=tmp_path,
+            write_interval=15,
+            session_id="session-bbb",
         )
 
         assert hook_a.state_file != hook_b.state_file
@@ -123,10 +137,14 @@ class TestStateFileIsolation:
         from qwenpaw.agents.hooks.mempalace_diary import MemPalaceIntervalHook
 
         hook_a = MemPalaceIntervalHook(
-            working_dir=tmp_path, write_interval=15, session_id="session-aaa"
+            working_dir=tmp_path,
+            write_interval=15,
+            session_id="session-aaa",
         )
         hook_b = MemPalaceIntervalHook(
-            working_dir=tmp_path, write_interval=15, session_id="session-bbb"
+            working_dir=tmp_path,
+            write_interval=15,
+            session_id="session-bbb",
         )
 
         # Simulate session A having saved at count=15
@@ -138,7 +156,9 @@ class TestStateFileIsolation:
 
         # Reload hook B from disk — should not pick up session A's count
         hook_b2 = MemPalaceIntervalHook(
-            working_dir=tmp_path, write_interval=15, session_id="session-bbb"
+            working_dir=tmp_path,
+            write_interval=15,
+            session_id="session-bbb",
         )
         assert hook_b2.last_write_count == 0
 
@@ -147,36 +167,56 @@ class TestStateFileIsolation:
 # run_once — mocked LLM
 # ---------------------------------------------------------------------------
 
+
 class TestRunOnceMocked:
     """Test run_once() with mocked LLM to avoid live API calls."""
 
     def _make_llm_response(
-        self, propose: bool, name: str = "test_skill", action: str = "create"
+        self,
+        propose: bool,
+        name: str = "test_skill",
+        action: str = "create",
     ) -> str:
         if not propose:
             return json.dumps({"propose": False})
-        return json.dumps({
-            "propose": True,
-            "action": action,
-            "name": name,
-            "description": "A test skill",
-            "skill_md": "## Purpose\nTest.\n## Steps\n1. Do it.",
-        })
+        return json.dumps(
+            {
+                "propose": True,
+                "action": action,
+                "name": name,
+                "description": "A test skill",
+                "skill_md": "## Purpose\nTest.\n## Steps\n1. Do it.",
+            },
+        )
 
     def test_no_proposal_when_wal_empty(self, tmp_path):
         from qwenpaw.skill_review.review import run_once
+
         proposals = run_once("test", tmp_path, dry_run=True)
         assert proposals == []
 
     def test_proposal_parsed_correctly(self, tmp_path):
         from qwenpaw.skill_review.review import run_once
+
         _write_wal(tmp_path)
 
-        fake_response = self._make_llm_response(propose=True, name="hk_cinema_booking")
+        fake_response = self._make_llm_response(
+            propose=True,
+            name="hk_cinema_booking",
+        )
         with (
-            patch("qwenpaw.skill_review.review._load_api_config", return_value=("fake-key", "https://fake.api")),
-            patch("qwenpaw.skill_review.review._call_llm", return_value=fake_response),
-            patch("qwenpaw.skill_review.review._get_existing_skills", return_value="(none)"),
+            patch(
+                "qwenpaw.skill_review.review._load_api_config",
+                return_value=("fake-key", "https://fake.api"),
+            ),
+            patch(
+                "qwenpaw.skill_review.review._call_llm",
+                return_value=fake_response,
+            ),
+            patch(
+                "qwenpaw.skill_review.review._get_existing_skills",
+                return_value="(none)",
+            ),
         ):
             proposals = run_once("test", tmp_path, dry_run=True)
 
@@ -187,13 +227,23 @@ class TestRunOnceMocked:
 
     def test_no_proposal_when_llm_declines(self, tmp_path):
         from qwenpaw.skill_review.review import run_once
+
         _write_wal(tmp_path)
 
         fake_response = self._make_llm_response(propose=False)
         with (
-            patch("qwenpaw.skill_review.review._load_api_config", return_value=("fake-key", "https://fake.api")),
-            patch("qwenpaw.skill_review.review._call_llm", return_value=fake_response),
-            patch("qwenpaw.skill_review.review._get_existing_skills", return_value="(none)"),
+            patch(
+                "qwenpaw.skill_review.review._load_api_config",
+                return_value=("fake-key", "https://fake.api"),
+            ),
+            patch(
+                "qwenpaw.skill_review.review._call_llm",
+                return_value=fake_response,
+            ),
+            patch(
+                "qwenpaw.skill_review.review._get_existing_skills",
+                return_value="(none)",
+            ),
         ):
             proposals = run_once("test", tmp_path, dry_run=True)
 
@@ -201,18 +251,34 @@ class TestRunOnceMocked:
 
     def test_create_skill_called_when_not_dry_run(self, tmp_path):
         from qwenpaw.skill_review.review import run_once
+
         _write_wal(tmp_path)
 
-        fake_response = self._make_llm_response(propose=True, name="my_new_skill")
+        fake_response = self._make_llm_response(
+            propose=True,
+            name="my_new_skill",
+        )
         mock_svc = MagicMock()
         mock_svc.create_skill.return_value = "my_new_skill"
 
         with (
-            patch("qwenpaw.skill_review.review._load_api_config", return_value=("fake-key", "https://fake.api")),
-            patch("qwenpaw.skill_review.review._call_llm", return_value=fake_response),
-            patch("qwenpaw.skill_review.review._get_existing_skills", return_value="(none)"),
+            patch(
+                "qwenpaw.skill_review.review._load_api_config",
+                return_value=("fake-key", "https://fake.api"),
+            ),
+            patch(
+                "qwenpaw.skill_review.review._call_llm",
+                return_value=fake_response,
+            ),
+            patch(
+                "qwenpaw.skill_review.review._get_existing_skills",
+                return_value="(none)",
+            ),
             # SkillService is lazily imported inside run_once; patch at the source module
-            patch("qwenpaw.agents.skills_manager.SkillService", return_value=mock_svc),
+            patch(
+                "qwenpaw.agents.skills_manager.SkillService",
+                return_value=mock_svc,
+            ),
         ):
             proposals = run_once("test", tmp_path, dry_run=False)
 
@@ -227,6 +293,7 @@ class TestRunOnceMocked:
 
     def test_api_config_failure_returns_empty(self, tmp_path):
         from qwenpaw.skill_review.review import run_once
+
         _write_wal(tmp_path)
 
         with patch(
@@ -242,6 +309,7 @@ class TestRunOnceMocked:
 # _send_notification
 # ---------------------------------------------------------------------------
 
+
 class TestSendNotification:
     """Test _send_notification without network calls."""
 
@@ -251,17 +319,26 @@ class TestSendNotification:
             NOTIFICATION_TARGET_SESSION,
             NOTIFICATION_TARGET_USER,
         )
+
         return [
-            "qwenpaw", "channels", "send",
-            "--agent-id", agent,
-            "--channel", NOTIFICATION_CHANNEL,
-            "--target-user", NOTIFICATION_TARGET_USER,
-            "--target-session", NOTIFICATION_TARGET_SESSION,
-            "--text", unittest.mock.ANY,  # checked separately
+            "qwenpaw",
+            "channels",
+            "send",
+            "--agent-id",
+            agent,
+            "--channel",
+            NOTIFICATION_CHANNEL,
+            "--target-user",
+            NOTIFICATION_TARGET_USER,
+            "--target-session",
+            NOTIFICATION_TARGET_SESSION,
+            "--text",
+            unittest.mock.ANY,  # checked separately
         ]
 
     def test_success_returns_true(self):
         from qwenpaw.skill_review.review import _send_notification
+
         mock_result = MagicMock()
         mock_result.returncode = 0
         with patch("subprocess.run", return_value=mock_result) as mock_sub:
@@ -277,6 +354,7 @@ class TestSendNotification:
 
     def test_nonzero_exit_returns_false(self):
         from qwenpaw.skill_review.review import _send_notification
+
         mock_result = MagicMock()
         mock_result.returncode = 1
         mock_result.stderr = "connection refused"
@@ -286,22 +364,35 @@ class TestSendNotification:
 
     def test_timeout_returns_false(self):
         from qwenpaw.skill_review.review import _send_notification
-        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="qwenpaw", timeout=30)):
+
+        with patch(
+            "subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="qwenpaw", timeout=30),
+        ):
             result = _send_notification("slow_skill", "desc", "default")
         assert result is False
 
     def test_exception_returns_false_does_not_raise(self):
         from qwenpaw.skill_review.review import _send_notification
-        with patch("subprocess.run", side_effect=FileNotFoundError("copaw not found")):
+
+        with patch(
+            "subprocess.run",
+            side_effect=FileNotFoundError("copaw not found"),
+        ):
             result = _send_notification("any_skill", "desc", "default")
         assert result is False
 
     def test_text_contains_skill_name_and_description(self):
         from qwenpaw.skill_review.review import _send_notification
+
         mock_result = MagicMock()
         mock_result.returncode = 0
         with patch("subprocess.run", return_value=mock_result) as mock_sub:
-            _send_notification("hk_cinema", "Book HK cinema tickets", "default")
+            _send_notification(
+                "hk_cinema",
+                "Book HK cinema tickets",
+                "default",
+            )
         cmd = mock_sub.call_args[0][0]
         text_idx = cmd.index("--text") + 1
         text = cmd[text_idx]
@@ -314,58 +405,112 @@ class TestSendNotification:
 # run_once — notification integration
 # ---------------------------------------------------------------------------
 
+
 class TestRunOnceNotification:
     """Verify notification is called/suppressed correctly in run_once."""
 
-    def _make_llm_response(self, name: str = "notif_skill", action: str = "create") -> str:
-        return json.dumps({
-            "propose": True,
-            "action": action,
-            "name": name,
-            "description": "Notification test skill",
-            "skill_md": "## Purpose\nTest.\n## Steps\n1. Done.",
-        })
+    def _make_llm_response(
+        self,
+        name: str = "notif_skill",
+        action: str = "create",
+    ) -> str:
+        return json.dumps(
+            {
+                "propose": True,
+                "action": action,
+                "name": name,
+                "description": "Notification test skill",
+                "skill_md": "## Purpose\nTest.\n## Steps\n1. Done.",
+            },
+        )
 
     def test_dry_run_does_not_fire_notification(self, tmp_path):
         from qwenpaw.skill_review.review import run_once
+
         _write_wal(tmp_path)
         with (
-            patch("qwenpaw.skill_review.review._load_api_config", return_value=("k", "https://x")),
-            patch("qwenpaw.skill_review.review._call_llm", return_value=self._make_llm_response()),
-            patch("qwenpaw.skill_review.review._get_existing_skills", return_value="(none)"),
-            patch("qwenpaw.skill_review.review._send_notification") as mock_notif,
+            patch(
+                "qwenpaw.skill_review.review._load_api_config",
+                return_value=("k", "https://x"),
+            ),
+            patch(
+                "qwenpaw.skill_review.review._call_llm",
+                return_value=self._make_llm_response(),
+            ),
+            patch(
+                "qwenpaw.skill_review.review._get_existing_skills",
+                return_value="(none)",
+            ),
+            patch(
+                "qwenpaw.skill_review.review._send_notification",
+            ) as mock_notif,
         ):
             run_once("test", tmp_path, dry_run=True)
         mock_notif.assert_not_called()
 
     def test_notification_false_does_not_fire(self, tmp_path):
         from qwenpaw.skill_review.review import run_once
+
         _write_wal(tmp_path)
         mock_svc = MagicMock()
         mock_svc.create_skill.return_value = "notif_skill"
         with (
-            patch("qwenpaw.skill_review.review._load_api_config", return_value=("k", "https://x")),
-            patch("qwenpaw.skill_review.review._call_llm", return_value=self._make_llm_response()),
-            patch("qwenpaw.skill_review.review._get_existing_skills", return_value="(none)"),
-            patch("qwenpaw.agents.skills_manager.SkillService", return_value=mock_svc),
-            patch("qwenpaw.skill_review.review._send_notification") as mock_notif,
+            patch(
+                "qwenpaw.skill_review.review._load_api_config",
+                return_value=("k", "https://x"),
+            ),
+            patch(
+                "qwenpaw.skill_review.review._call_llm",
+                return_value=self._make_llm_response(),
+            ),
+            patch(
+                "qwenpaw.skill_review.review._get_existing_skills",
+                return_value="(none)",
+            ),
+            patch(
+                "qwenpaw.agents.skills_manager.SkillService",
+                return_value=mock_svc,
+            ),
+            patch(
+                "qwenpaw.skill_review.review._send_notification",
+            ) as mock_notif,
         ):
             run_once("test", tmp_path, dry_run=False, notification=False)
         mock_notif.assert_not_called()
 
     def test_normal_path_fires_notification_once(self, tmp_path):
         from qwenpaw.skill_review.review import run_once
+
         _write_wal(tmp_path)
         mock_svc = MagicMock()
         mock_svc.create_skill.return_value = "notif_skill"
         with (
-            patch("qwenpaw.skill_review.review._load_api_config", return_value=("k", "https://x")),
-            patch("qwenpaw.skill_review.review._call_llm", return_value=self._make_llm_response()),
-            patch("qwenpaw.skill_review.review._get_existing_skills", return_value="(none)"),
-            patch("qwenpaw.agents.skills_manager.SkillService", return_value=mock_svc),
-            patch("qwenpaw.skill_review.review._send_notification") as mock_notif,
+            patch(
+                "qwenpaw.skill_review.review._load_api_config",
+                return_value=("k", "https://x"),
+            ),
+            patch(
+                "qwenpaw.skill_review.review._call_llm",
+                return_value=self._make_llm_response(),
+            ),
+            patch(
+                "qwenpaw.skill_review.review._get_existing_skills",
+                return_value="(none)",
+            ),
+            patch(
+                "qwenpaw.agents.skills_manager.SkillService",
+                return_value=mock_svc,
+            ),
+            patch(
+                "qwenpaw.skill_review.review._send_notification",
+            ) as mock_notif,
         ):
-            proposals = run_once("test", tmp_path, dry_run=False, notification=True)
+            proposals = run_once(
+                "test",
+                tmp_path,
+                dry_run=False,
+                notification=True,
+            )
         assert len(proposals) == 1
         mock_notif.assert_called_once_with(
             skill_name="notif_skill",
@@ -377,15 +522,30 @@ class TestRunOnceNotification:
     def test_notification_not_fired_when_skill_already_exists(self, tmp_path):
         """create_skill returns None when skill exists — no notification."""
         from qwenpaw.skill_review.review import run_once
+
         _write_wal(tmp_path)
         mock_svc = MagicMock()
         mock_svc.create_skill.return_value = None  # already exists
         with (
-            patch("qwenpaw.skill_review.review._load_api_config", return_value=("k", "https://x")),
-            patch("qwenpaw.skill_review.review._call_llm", return_value=self._make_llm_response()),
-            patch("qwenpaw.skill_review.review._get_existing_skills", return_value="(none)"),
-            patch("qwenpaw.agents.skills_manager.SkillService", return_value=mock_svc),
-            patch("qwenpaw.skill_review.review._send_notification") as mock_notif,
+            patch(
+                "qwenpaw.skill_review.review._load_api_config",
+                return_value=("k", "https://x"),
+            ),
+            patch(
+                "qwenpaw.skill_review.review._call_llm",
+                return_value=self._make_llm_response(),
+            ),
+            patch(
+                "qwenpaw.skill_review.review._get_existing_skills",
+                return_value="(none)",
+            ),
+            patch(
+                "qwenpaw.agents.skills_manager.SkillService",
+                return_value=mock_svc,
+            ),
+            patch(
+                "qwenpaw.skill_review.review._send_notification",
+            ) as mock_notif,
         ):
             run_once("test", tmp_path, dry_run=False, notification=True)
         mock_notif.assert_not_called()
@@ -395,39 +555,57 @@ class TestRunOnceNotification:
 # Q3: Auto-enable + Q2: Update path
 # ---------------------------------------------------------------------------
 
+
 class TestAutoEnableAndUpdatePath:
     """Verify Hermes-style auto-enable and update path behaviour."""
 
     def _make_create_response(self, name: str = "auto_skill") -> str:
-        return json.dumps({
-            "propose": True,
-            "action": "create",
-            "name": name,
-            "description": "Auto-enabled skill",
-            "skill_md": "## Purpose\nTest.\n## Steps\n1. Done.",
-        })
+        return json.dumps(
+            {
+                "propose": True,
+                "action": "create",
+                "name": name,
+                "description": "Auto-enabled skill",
+                "skill_md": "## Purpose\nTest.\n## Steps\n1. Done.",
+            },
+        )
 
     def _make_update_response(self, name: str = "existing_skill") -> str:
-        return json.dumps({
-            "propose": True,
-            "action": "update",
-            "name": name,
-            "description": "Updated skill",
-            "skill_md": "## Purpose\nUpdated.\n## Steps\n1. Better.",
-        })
+        return json.dumps(
+            {
+                "propose": True,
+                "action": "update",
+                "name": name,
+                "description": "Updated skill",
+                "skill_md": "## Purpose\nUpdated.\n## Steps\n1. Better.",
+            },
+        )
 
     def test_new_skill_auto_enabled(self, tmp_path):
         """create path must pass enable=True (Hermes-style auto-enable)."""
         from qwenpaw.skill_review.review import run_once
+
         _write_wal(tmp_path)
         mock_svc = MagicMock()
         mock_svc.create_skill.return_value = "auto_skill"
 
         with (
-            patch("qwenpaw.skill_review.review._load_api_config", return_value=("k", "https://x")),
-            patch("qwenpaw.skill_review.review._call_llm", return_value=self._make_create_response()),
-            patch("qwenpaw.skill_review.review._get_existing_skills", return_value="(none)"),
-            patch("qwenpaw.agents.skills_manager.SkillService", return_value=mock_svc),
+            patch(
+                "qwenpaw.skill_review.review._load_api_config",
+                return_value=("k", "https://x"),
+            ),
+            patch(
+                "qwenpaw.skill_review.review._call_llm",
+                return_value=self._make_create_response(),
+            ),
+            patch(
+                "qwenpaw.skill_review.review._get_existing_skills",
+                return_value="(none)",
+            ),
+            patch(
+                "qwenpaw.agents.skills_manager.SkillService",
+                return_value=mock_svc,
+            ),
             patch("qwenpaw.skill_review.review._send_notification"),
         ):
             proposals = run_once("test", tmp_path, dry_run=False)
@@ -444,15 +622,28 @@ class TestAutoEnableAndUpdatePath:
     def test_update_path_calls_overwrite(self, tmp_path):
         """update path must pass overwrite=True so existing skill is replaced."""
         from qwenpaw.skill_review.review import run_once
+
         _write_wal(tmp_path)
         mock_svc = MagicMock()
         mock_svc.create_skill.return_value = "existing_skill"
 
         with (
-            patch("qwenpaw.skill_review.review._load_api_config", return_value=("k", "https://x")),
-            patch("qwenpaw.skill_review.review._call_llm", return_value=self._make_update_response()),
-            patch("qwenpaw.skill_review.review._get_existing_skills", return_value="- existing_skill: old desc"),
-            patch("qwenpaw.agents.skills_manager.SkillService", return_value=mock_svc),
+            patch(
+                "qwenpaw.skill_review.review._load_api_config",
+                return_value=("k", "https://x"),
+            ),
+            patch(
+                "qwenpaw.skill_review.review._call_llm",
+                return_value=self._make_update_response(),
+            ),
+            patch(
+                "qwenpaw.skill_review.review._get_existing_skills",
+                return_value="- existing_skill: old desc",
+            ),
+            patch(
+                "qwenpaw.agents.skills_manager.SkillService",
+                return_value=mock_svc,
+            ),
             patch("qwenpaw.skill_review.review._send_notification"),
         ):
             proposals = run_once("test", tmp_path, dry_run=False)
@@ -470,10 +661,16 @@ class TestAutoEnableAndUpdatePath:
     def test_notification_create_template_contains_auto_enabled(self):
         """Create notification must mention that skill is already live."""
         from qwenpaw.skill_review.review import _send_notification
+
         mock_result = MagicMock()
         mock_result.returncode = 0
         with patch("subprocess.run", return_value=mock_result) as mock_sub:
-            _send_notification("new_skill", "A brand new skill", "default", action="create")
+            _send_notification(
+                "new_skill",
+                "A brand new skill",
+                "default",
+                action="create",
+            )
         cmd = mock_sub.call_args[0][0]
         text = cmd[cmd.index("--text") + 1]
         assert "已啟用" in text
@@ -483,10 +680,16 @@ class TestAutoEnableAndUpdatePath:
     def test_notification_update_template_contains_update_wording(self):
         """Update notification must mention skill was updated and state preserved."""
         from qwenpaw.skill_review.review import _send_notification
+
         mock_result = MagicMock()
         mock_result.returncode = 0
         with patch("subprocess.run", return_value=mock_result) as mock_sub:
-            _send_notification("old_skill", "Improved skill", "default", action="update")
+            _send_notification(
+                "old_skill",
+                "Improved skill",
+                "default",
+                action="update",
+            )
         cmd = mock_sub.call_args[0][0]
         text = cmd[cmd.index("--text") + 1]
         assert "更新咗" in text
@@ -498,14 +701,18 @@ class TestAutoEnableAndUpdatePath:
 # Live smoke test (skipped unless credentials present)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.skipif(
-    not (Path.home() / ".copaw.secret" / "providers" / "custom" / "bailian.json").exists(),
+    not (
+        Path.home() / ".copaw.secret" / "providers" / "custom" / "bailian.json"
+    ).exists(),
     reason="bailian.json not found — live API test skipped",
 )
 class TestRunOnceLive:
     def test_live_dry_run(self, tmp_path):
         """End-to-end with real LLM (thinking=True). Skipped if no credentials."""
         from qwenpaw.skill_review.review import run_once
+
         _write_wal(tmp_path)
 
         proposals = run_once("smoke_test", tmp_path, dry_run=True)
@@ -520,6 +727,7 @@ class TestRunOnceLive:
 # ---------------------------------------------------------------------------
 # User context loading tests
 # ---------------------------------------------------------------------------
+
 
 class TestLoadUserContext:
     """Tests for _load_user_context() — PROFILE.md loading with identity stripping."""

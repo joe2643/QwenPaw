@@ -79,6 +79,7 @@ class MediaServer:
         # untouched.
         if token_store_path is None:
             from ..constant import WORKING_DIR
+
             self._token_store_path: Path = (
                 Path(WORKING_DIR).expanduser() / "media_token_store.json"
             )
@@ -237,7 +238,8 @@ class MediaServer:
             logger.warning(
                 "media-server: token store at %s unreadable (%s); "
                 "starting with empty store",
-                path, e,
+                path,
+                e,
             )
             return {}
         if not isinstance(raw, dict):
@@ -253,9 +255,9 @@ class MediaServer:
                 loaded[str(token)] = (str(raw_path), expires)
         if loaded:
             logger.info(
-                "media-server: restored %d signed-URL token(s) "
-                "from %s",
-                len(loaded), path,
+                "media-server: restored %d signed-URL token(s) " "from %s",
+                len(loaded),
+                path,
             )
         return loaded
 
@@ -282,7 +284,8 @@ class MediaServer:
             # so log and continue rather than failing the sign call.
             logger.warning(
                 "media-server: failed to persist token store at %s: %s",
-                path, e,
+                path,
+                e,
             )
 
     def _sign(self, file_path: str, expires: int) -> str:

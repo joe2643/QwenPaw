@@ -68,16 +68,15 @@ def _paired_tool_result(output: list[dict]) -> list[Msg]:
 
 
 def _block_types(msg: Msg) -> list:
-    return [
-        b.get("type") for b in msg.content if isinstance(b, dict)
-    ]
+    return [b.get("type") for b in msg.content if isinstance(b, dict)]
 
 
 def _tool_result_output_types(msg: Msg) -> list:
     for b in msg.content:
         if isinstance(b, dict) and b.get("type") == "tool_result":
             return [
-                o.get("type") for o in b.get("output", [])
+                o.get("type")
+                for o in b.get("output", [])
                 if isinstance(o, dict)
             ]
     return []
@@ -91,17 +90,19 @@ def _tool_result_output_types(msg: Msg) -> list:
 def test_image_capable_model_strips_video_not_image() -> None:
     # Claude-family capability profile.
     msgs = [
-        _user_with_blocks([
-            {"type": "text", "text": "see both"},
-            {
-                "type": "image",
-                "source": {"type": "url", "url": "/tmp/a.png"},
-            },
-            {
-                "type": "video",
-                "source": {"type": "url", "url": "/tmp/b.webm"},
-            },
-        ]),
+        _user_with_blocks(
+            [
+                {"type": "text", "text": "see both"},
+                {
+                    "type": "image",
+                    "source": {"type": "url", "url": "/tmp/a.png"},
+                },
+                {
+                    "type": "video",
+                    "source": {"type": "url", "url": "/tmp/b.webm"},
+                },
+            ],
+        ),
     ]
     out = normalize_messages_for_model_request(
         msgs,
@@ -116,7 +117,8 @@ def test_image_capable_model_strips_video_not_image() -> None:
     # Stripped video got replaced by a text placeholder that
     # preserves the path.
     text_blocks = [
-        b for b in out[0].content
+        b
+        for b in out[0].content
         if isinstance(b, dict) and b.get("type") == "text"
     ]
     placeholder_text = " ".join(b.get("text", "") for b in text_blocks)
@@ -127,12 +129,14 @@ def test_image_capable_model_strips_video_not_image() -> None:
 def test_video_capable_model_keeps_video() -> None:
     # Gemini-family capability profile.
     msgs = [
-        _user_with_blocks([
-            {
-                "type": "video",
-                "source": {"type": "url", "url": "/tmp/b.webm"},
-            },
-        ]),
+        _user_with_blocks(
+            [
+                {
+                    "type": "video",
+                    "source": {"type": "url", "url": "/tmp/b.webm"},
+                },
+            ],
+        ),
     ]
     out = normalize_messages_for_model_request(
         msgs,
@@ -147,11 +151,22 @@ def test_video_capable_model_keeps_video() -> None:
 def test_text_only_model_strips_everything() -> None:
     # Strict no-media: every block stripped.
     msgs = [
-        _user_with_blocks([
-            {"type": "image", "source": {"type": "url", "url": "/tmp/x.png"}},
-            {"type": "video", "source": {"type": "url", "url": "/tmp/y.mp4"}},
-            {"type": "audio", "source": {"type": "url", "url": "/tmp/z.wav"}},
-        ]),
+        _user_with_blocks(
+            [
+                {
+                    "type": "image",
+                    "source": {"type": "url", "url": "/tmp/x.png"},
+                },
+                {
+                    "type": "video",
+                    "source": {"type": "url", "url": "/tmp/y.mp4"},
+                },
+                {
+                    "type": "audio",
+                    "source": {"type": "url", "url": "/tmp/z.wav"},
+                },
+            ],
+        ),
     ]
     out = normalize_messages_for_model_request(
         msgs,
@@ -171,9 +186,14 @@ def test_per_type_flag_none_defers_to_supports_multimodal() -> None:
     # falls back to the catch-all.  supports_multimodal=False means
     # every media type is stripped.
     msgs = [
-        _user_with_blocks([
-            {"type": "image", "source": {"type": "url", "url": "/tmp/x.png"}},
-        ]),
+        _user_with_blocks(
+            [
+                {
+                    "type": "image",
+                    "source": {"type": "url", "url": "/tmp/x.png"},
+                },
+            ],
+        ),
     ]
     out = normalize_messages_for_model_request(
         msgs,
@@ -189,17 +209,19 @@ def test_per_type_flag_none_defers_to_supports_multimodal() -> None:
 
 def test_tool_result_output_strips_video_preserves_image() -> None:
     # The precise shape that blew up on Claude OAuth in production.
-    msgs = _paired_tool_result([
-        {
-            "type": "video",
-            "source": {"type": "url", "url": "/tmp/clip.webm"},
-        },
-        {"type": "text", "text": "view_video loaded the clip"},
-        {
-            "type": "image",
-            "source": {"type": "url", "url": "/tmp/thumb.jpg"},
-        },
-    ])
+    msgs = _paired_tool_result(
+        [
+            {
+                "type": "video",
+                "source": {"type": "url", "url": "/tmp/clip.webm"},
+            },
+            {"type": "text", "text": "view_video loaded the clip"},
+            {
+                "type": "image",
+                "source": {"type": "url", "url": "/tmp/thumb.jpg"},
+            },
+        ],
+    )
     out = normalize_messages_for_model_request(
         msgs,
         supports_multimodal=True,
@@ -213,11 +235,13 @@ def test_tool_result_output_strips_video_preserves_image() -> None:
     # video → placeholder text, original text preserved, image kept.
     assert output_types == ["text", "text", "image"]
     tool_result = next(
-        b for b in tr_msg.content
+        b
+        for b in tr_msg.content
         if isinstance(b, dict) and b.get("type") == "tool_result"
     )
     all_text = " ".join(
-        o.get("text", "") for o in tool_result["output"]
+        o.get("text", "")
+        for o in tool_result["output"]
         if isinstance(o, dict) and o.get("type") == "text"
     )
     assert "/tmp/clip.webm" in all_text
@@ -228,18 +252,28 @@ def test_tool_result_with_non_list_output_untouched() -> None:
     # normalizer must leave it alone.
     msgs = [
         Msg(
-            name="assistant", role="assistant",
-            content=[{"type": "tool_use", "id": "tr1", "name": "echo",
-                      "input": {}}],
+            name="assistant",
+            role="assistant",
+            content=[
+                {
+                    "type": "tool_use",
+                    "id": "tr1",
+                    "name": "echo",
+                    "input": {},
+                },
+            ],
         ),
         Msg(
-            name="user", role="user",
-            content=[{
-                "type": "tool_result",
-                "id": "tr1",
-                "name": "echo",
-                "output": "just text",
-            }],
+            name="user",
+            role="user",
+            content=[
+                {
+                    "type": "tool_result",
+                    "id": "tr1",
+                    "name": "echo",
+                    "output": "just text",
+                },
+            ],
         ),
     ]
     out = normalize_messages_for_model_request(

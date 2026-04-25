@@ -86,10 +86,7 @@ export default function MediaServerPage() {
   if (loading) {
     return (
       <div className={styles.mediaServerPage}>
-        <PageHeader
-          parent={t("nav.control")}
-          current={t("nav.mediaServer")}
-        />
+        <PageHeader parent={t("nav.control")} current={t("nav.mediaServer")} />
         <div className={styles.pageContent}>
           <span>{t("common.loading")}</span>
         </div>
@@ -99,10 +96,7 @@ export default function MediaServerPage() {
 
   return (
     <div className={styles.mediaServerPage}>
-      <PageHeader
-        parent={t("nav.control")}
-        current={t("nav.mediaServer")}
-      />
+      <PageHeader parent={t("nav.control")} current={t("nav.mediaServer")} />
       <div className={styles.pageContent}>
         <Card>
           <Alert
@@ -220,10 +214,7 @@ export default function MediaServerPage() {
                     },
                   ]}
                 >
-                  <Input
-                    placeholder="media"
-                    disabled={!mediaEnabled}
-                  />
+                  <Input placeholder="media" disabled={!mediaEnabled} />
                 </Form.Item>
 
                 <Form.Item
@@ -233,9 +224,7 @@ export default function MediaServerPage() {
                   rules={[
                     {
                       required: true,
-                      message: t(
-                        "mediaServer.namedTunnelHostnameRequired",
-                      ),
+                      message: t("mediaServer.namedTunnelHostnameRequired"),
                     },
                   ]}
                 >
@@ -258,10 +247,7 @@ export default function MediaServerPage() {
               </>
             )}
 
-            <Form.Item
-              label={t("mediaServer.secret")}
-              name="media_secret"
-            >
+            <Form.Item label={t("mediaServer.secret")} name="media_secret">
               <Input.Password
                 placeholder="qwenpaw-media-2026"
                 disabled={!mediaEnabled}

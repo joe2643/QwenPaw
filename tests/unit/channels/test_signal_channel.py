@@ -22,12 +22,20 @@ from qwenpaw.app.channels.signal.channel import (
 
 # ───────────────────────────── fakes ─────────────────────────────────
 
+
 class FakeClient:
     """Records outbound calls, exposes `connected` flag, pushes
     notifications through the registered callback."""
 
     def __init__(self, *_args, **_kwargs):
         self.connected = False
+        # Mirror the real SignalSubprocessClient init args that
+        # SignalChannel.update_config compares against — without
+        # these attributes the hard-field check raises
+        # ``AttributeError: 'FakeClient' object has no attribute
+        # '_signal_cli_path'`` instead of returning a clean True/False.
+        self._signal_cli_path = _kwargs.get("signal_cli_path") or "signal-cli"
+        self._extra_args: List[str] = list(_kwargs.get("extra_args") or [])
         self.sent: List[Dict[str, Any]] = []
         self.reactions: List[Dict[str, Any]] = []
         self.typing: List[Dict[str, Any]] = []
@@ -52,16 +60,18 @@ class FakeClient:
         text_style: Optional[List[str]] = None,
         mentions: Optional[List[str]] = None,
     ) -> Optional[int]:
-        self.sent.append({
-            "target": target,
-            "text": text,
-            "is_group": is_group,
-            "quote_timestamp": quote_timestamp,
-            "quote_author": quote_author,
-            "attachments": list(attachments or []),
-            "text_style": list(text_style or []),
-            "mentions": list(mentions or []),
-        })
+        self.sent.append(
+            {
+                "target": target,
+                "text": text,
+                "is_group": is_group,
+                "quote_timestamp": quote_timestamp,
+                "quote_author": quote_author,
+                "attachments": list(attachments or []),
+                "text_style": list(text_style or []),
+                "mentions": list(mentions or []),
+            },
+        )
         return 1_700_000_000
 
     async def send_reaction(self, *args, **kwargs) -> bool:
@@ -75,7 +85,12 @@ class FakeClient:
         return None
 
     async def get_sticker(
-        self, pack_id, sticker_id, dest_dir, *, pack_key=None,
+        self,
+        pack_id,
+        sticker_id,
+        dest_dir,
+        *,
+        pack_key=None,
     ):
         """Default behaviour: write a stub webp into dest_dir and
         return the path.  Tests that want to exercise failure paths
@@ -89,8 +104,10 @@ class FakeClient:
 
 # ───────────────────────────── helpers ───────────────────────────────
 
+
 def _make_channel(**overrides: Any) -> SignalChannel:
     """Build a SignalChannel with the subprocess client swapped for a fake."""
+
     async def _noop_process(_request):
         if False:
             yield None  # pragma: no cover
@@ -109,6 +126,7 @@ def _make_channel(**overrides: Any) -> SignalChannel:
 
 
 # ───────────────────────────── markdown ──────────────────────────────
+
 
 def test_markdown_bold_produces_text_style_range() -> None:
     plain, styles = _markdown_to_signal("hello **world** foo")
@@ -133,6 +151,7 @@ def test_markdown_monospace_and_italic() -> None:
 
 
 # ───────────────────────────── reply-to (quote) ──────────────────────
+
 
 async def test_quote_with_image_attachment_inlines_local_path(
     tmp_path,
@@ -261,24 +280,28 @@ async def test_quote_with_sticker_fetch_failure_labels_as_failed(
 
     async def _fail(*_a, **_kw):
         return None
+
     ch.client.get_sticker = _fail
 
-    parts = await ch._extract_quote_content({
-        "quote": {
-            "text": "",
-            "author": "+85298765432",
-            "sticker": {
-                "packId": "PID" * 10,
-                "stickerId": 0,
-                "emoji": "😀",
+    parts = await ch._extract_quote_content(
+        {
+            "quote": {
+                "text": "",
+                "author": "+85298765432",
+                "sticker": {
+                    "packId": "PID" * 10,
+                    "stickerId": 0,
+                    "emoji": "😀",
+                },
             },
         },
-    })
+    )
     text = next(p.text for p in parts if hasattr(p, "text"))
     assert "Media: sticker 😀 (fetch failed)" in text
 
 
 # ───────────────────────────── outbound mentions ─────────────────────
+
 
 def test_compile_outbound_mentions_phone_bare() -> None:
     ch = _make_channel()
@@ -334,6 +357,7 @@ def test_compile_outbound_mentions_keeps_full_uuid_as_is() -> None:
 
 # ───────────────────────────── outbound send ─────────────────────────
 
+
 @pytest.mark.asyncio
 async def test_send_sets_target_and_style_and_mention_params() -> None:
     ch = _make_channel()
@@ -353,9 +377,7 @@ async def test_send_sets_target_and_style_and_mention_params() -> None:
     # Bold style in `text_style`
     assert any(s.endswith(":BOLD") for s in frame["text_style"])
     # Mention compiled to "start:1:+number" form
-    assert any(
-        m.split(":")[-1] == "+85298349370" for m in frame["mentions"]
-    )
+    assert any(m.split(":")[-1] == "+85298349370" for m in frame["mentions"])
 
 
 @pytest.mark.asyncio
@@ -399,7 +421,115 @@ async def test_send_disabled_channel_is_noop() -> None:
 
 # ───────────────────────────── inbound ───────────────────────────────
 
+
 @pytest.mark.asyncio
+# ───────────────────────────── update_config ─────────────────────────
+
+
+def test_signal_channel_requests_sequential_restart() -> None:
+    """Two signal-cli daemons cannot share an account — the default
+    zero-downtime ``replace_channel`` (start-new-then-stop-old)
+    contests the lock and stalls RPCs in the overlap window.  This
+    flag pins the channel to the safe stop-old-then-start-new path."""
+    from qwenpaw.app.channels.signal.channel import SignalChannel
+
+    assert SignalChannel.requires_sequential_restart is True
+
+
+@pytest.mark.asyncio
+async def test_update_config_soft_patches_runtime_fields() -> None:
+    """Fields that Python reads at request time (read-receipts,
+    chunk limit, allowlists, ack reactions, etc.) get patched into
+    the live channel WITHOUT bouncing the signal-cli subprocess.
+    Before this, every Console save triggered a daemon respawn +
+    file-lock contest just to flip ``send_read_receipts``."""
+    ch = _make_channel(send_read_receipts=True, text_chunk_limit=4000)
+    ch.client.connected = True
+
+    res = await ch.update_config(
+        {
+            "enabled": True,
+            "account": "+85251159218",  # same as fixture default
+            "signal_cli_path": "signal-cli",
+            "send_read_receipts": False,
+            "text_chunk_limit": 1234,
+            "ack_reaction_thinking": "✨",
+            "groups": ["GROUPABC=="],
+            "group_allow_from": ["+85299999999"],
+            "dm_policy": "allowlist",
+            "group_policy": "allowlist",
+            "allow_from": ["+85211111111"],
+            "require_mention": True,
+            "reply_to_trigger": False,
+        },
+    )
+    assert res is True, "soft-patchable fields must NOT request a restart"
+    assert ch._send_read_receipts is False
+    assert ch._text_chunk_limit == 1234
+    assert ch._ack_reaction_thinking == "✨"
+    assert ch._groups == ["GROUPABC=="]
+    assert ch._group_allow_from == ["+85299999999"]
+    assert ch.dm_policy == "allowlist"
+    assert ch.allow_from == ["+85211111111"]
+    assert ch.require_mention is True
+    assert ch._reply_to_trigger is False
+
+
+@pytest.mark.parametrize(
+    "hard_field,changed_value",
+    [
+        ("enabled", False),
+        ("account", "+85299999999"),
+        ("signal_cli_path", "/opt/different/signal-cli"),
+        ("extra_args", ["--trust-new-identities", "always"]),
+    ],
+)
+@pytest.mark.asyncio
+async def test_update_config_returns_false_on_hard_field_change(
+    hard_field,
+    changed_value,
+) -> None:
+    """Hard fields are baked into the signal-cli spawn cmdline (or
+    determine whether to spawn at all) — patching them in-place
+    would leave a stale daemon talking to the wrong account.  The
+    channel must fall through to a full restart in this case."""
+    ch = _make_channel()
+    ch.client.connected = True
+
+    cfg = {
+        "enabled": True,
+        "account": "+85251159218",
+        "signal_cli_path": "signal-cli",
+        "extra_args": [],
+    }
+    cfg[hard_field] = changed_value
+    res = await ch.update_config(cfg)
+    assert (
+        res is False
+    ), f"changing hard field {hard_field!r} must trigger restart"
+
+
+@pytest.mark.asyncio
+async def test_update_config_returns_false_when_subprocess_dead() -> None:
+    """If signal-cli isn't connected, in-place patch would just
+    perpetuate a broken channel.  Force a full restart so the
+    daemon respawns and the file lock is re-acquired cleanly."""
+    ch = _make_channel()
+    ch.client.connected = False  # subprocess crashed or never connected
+
+    res = await ch.update_config(
+        {
+            "enabled": True,
+            "account": "+85251159218",
+            "signal_cli_path": "signal-cli",
+        },
+    )
+    assert res is False
+
+
+# ───────────────────────────── inbound flow ──────────────────────────
+
+
 async def test_inbound_dm_enqueues_agent_request() -> None:
     enqueue_calls: List[Any] = []
 
@@ -435,17 +565,19 @@ async def test_group_without_mention_buffers_into_history() -> None:
     ch.client.connected = True
 
     group_id = "GID=="
-    await ch._on_notification({
-        "envelope": {
-            "sourceNumber": "+85211111111",
-            "sourceName": "Bob",
-            "timestamp": 1,
-            "dataMessage": {
-                "message": "casual chat",
-                "groupInfo": {"groupId": group_id},
+    await ch._on_notification(
+        {
+            "envelope": {
+                "sourceNumber": "+85211111111",
+                "sourceName": "Bob",
+                "timestamp": 1,
+                "dataMessage": {
+                    "message": "casual chat",
+                    "groupInfo": {"groupId": group_id},
+                },
             },
         },
-    })
+    )
     # Nothing sent, but history now has the line
     assert group_id in ch._group_history
     assert ch._group_history[group_id][0]["body"] == "casual chat"
@@ -460,49 +592,57 @@ async def test_group_with_mention_enqueues_and_injects_history() -> None:
 
     group_id = "GID=="
     # Prior unmentioned chatter → captured as history
-    await ch._on_notification({
-        "envelope": {
-            "sourceNumber": "+85211111111",
-            "sourceName": "Bob",
-            "timestamp": 1,
-            "dataMessage": {
-                "message": "weather is nice",
-                "groupInfo": {"groupId": group_id},
+    await ch._on_notification(
+        {
+            "envelope": {
+                "sourceNumber": "+85211111111",
+                "sourceName": "Bob",
+                "timestamp": 1,
+                "dataMessage": {
+                    "message": "weather is nice",
+                    "groupInfo": {"groupId": group_id},
+                },
             },
         },
-    })
+    )
     # Now a mention triggers the bot
-    await ch._on_notification({
-        "envelope": {
-            "sourceNumber": "+85222222222",
-            "sourceName": "Carol",
-            "timestamp": 2,
-            "dataMessage": {
-                "message": "@+85251159218 summarise",
-                "mentions": [{"number": "+85251159218", "start": 0, "length": 1}],
-                "groupInfo": {"groupId": group_id},
+    await ch._on_notification(
+        {
+            "envelope": {
+                "sourceNumber": "+85222222222",
+                "sourceName": "Carol",
+                "timestamp": 2,
+                "dataMessage": {
+                    "message": "@+85251159218 summarise",
+                    "mentions": [
+                        {"number": "+85251159218", "start": 0, "length": 1},
+                    ],
+                    "groupInfo": {"groupId": group_id},
+                },
             },
         },
-    })
+    )
     assert len(enqueue_calls) == 1
     # Collect text chunks from the enqueued request and assert that the
     # group-history context snippet actually made it into the prompt.
     texts = (
         [
-            p.text for p in enqueue_calls[0].input[-1].content
+            p.text
+            for p in enqueue_calls[0].input[-1].content
             if hasattr(p, "text") and p.text
         ]
         if hasattr(enqueue_calls[0], "input")
         else []
     )
-    assert any("weather is nice" in t for t in texts), (
-        "group-history context should have been injected into the prompt"
-    )
+    assert any(
+        "weather is nice" in t for t in texts
+    ), "group-history context should have been injected into the prompt"
     # History should be drained after injection
     assert ch._group_history.get(group_id) == []
 
 
 # ───────────────────────────── inbound sticker ───────────────────────
+
 
 @pytest.mark.asyncio
 async def test_inbound_sticker_only_message_enqueues_with_hint(
@@ -521,22 +661,24 @@ async def test_inbound_sticker_only_message_enqueues_with_hint(
     ch._enqueue = enqueue_calls.append
     ch.client.connected = True
 
-    await ch._on_notification({
-        "envelope": {
-            "sourceNumber": "+85298765432",
-            "sourceUuid": "abcd1234-0000-0000-0000-000000000000",
-            "sourceName": "Alice",
-            "timestamp": 1_700_000_000,
-            "dataMessage": {
-                "sticker": {
-                    "packId": "abcdef0123456789" * 2,
-                    "packKey": "fedcba9876543210" * 4,
-                    "stickerId": 7,
-                    "emoji": "🔥",
+    await ch._on_notification(
+        {
+            "envelope": {
+                "sourceNumber": "+85298765432",
+                "sourceUuid": "abcd1234-0000-0000-0000-000000000000",
+                "sourceName": "Alice",
+                "timestamp": 1_700_000_000,
+                "dataMessage": {
+                    "sticker": {
+                        "packId": "abcdef0123456789" * 2,
+                        "packKey": "fedcba9876543210" * 4,
+                        "stickerId": 7,
+                        "emoji": "🔥",
+                    },
                 },
             },
         },
-    })
+    )
 
     assert len(enqueue_calls) == 1
     req = enqueue_calls[0]
@@ -546,9 +688,7 @@ async def test_inbound_sticker_only_message_enqueues_with_hint(
     # is why we scan instead of hard-indexing.
     content = req.input[-1].content
     texts = [c.text for c in content if getattr(c, "type", None) == "text"]
-    images = [
-        c for c in content if getattr(c, "type", None) == "image"
-    ]
+    images = [c for c in content if getattr(c, "type", None) == "image"]
     assert any("Signal sticker" in t for t in texts), texts
     assert any("🔥" in t for t in texts), "emoji should survive"
     # Path in the hint should point at the file we wrote into the
@@ -570,23 +710,26 @@ async def test_inbound_sticker_without_emoji_omits_emoji_token(
     ch._enqueue = enqueue_calls.append
     ch.client.connected = True
 
-    await ch._on_notification({
-        "envelope": {
-            "sourceNumber": "+85298765432",
-            "timestamp": 1_700_000_000,
-            "dataMessage": {
-                "sticker": {
-                    "packId": "abc" * 10,
-                    "packKey": "def" * 20,
-                    "stickerId": 0,
+    await ch._on_notification(
+        {
+            "envelope": {
+                "sourceNumber": "+85298765432",
+                "timestamp": 1_700_000_000,
+                "dataMessage": {
+                    "sticker": {
+                        "packId": "abc" * 10,
+                        "packKey": "def" * 20,
+                        "stickerId": 0,
+                    },
                 },
             },
         },
-    })
+    )
 
     req = enqueue_calls[0]
     texts = [
-        c.text for c in req.input[-1].content
+        c.text
+        for c in req.input[-1].content
         if getattr(c, "type", None) == "text"
     ]
     hint = next(t for t in texts if "Signal sticker" in t)
@@ -611,26 +754,30 @@ async def test_inbound_sticker_fetch_failure_drops_sticker_silently(
 
     async def _fail_sticker(*_args, **_kwargs):
         return None
+
     ch.client.get_sticker = _fail_sticker
 
-    await ch._on_notification({
-        "envelope": {
-            "sourceNumber": "+85298765432",
-            "timestamp": 1_700_000_000,
-            "dataMessage": {
-                "message": "check this out",
-                "sticker": {
-                    "packId": "abc" * 10,
-                    "packKey": "def" * 20,
-                    "stickerId": 0,
+    await ch._on_notification(
+        {
+            "envelope": {
+                "sourceNumber": "+85298765432",
+                "timestamp": 1_700_000_000,
+                "dataMessage": {
+                    "message": "check this out",
+                    "sticker": {
+                        "packId": "abc" * 10,
+                        "packKey": "def" * 20,
+                        "stickerId": 0,
+                    },
                 },
             },
         },
-    })
+    )
 
     assert len(enqueue_calls) == 1
     texts = [
-        c.text for c in enqueue_calls[0].input[-1].content
+        c.text
+        for c in enqueue_calls[0].input[-1].content
         if getattr(c, "type", None) == "text"
     ]
     assert any("check this out" in t for t in texts)
@@ -638,6 +785,7 @@ async def test_inbound_sticker_fetch_failure_drops_sticker_silently(
 
 
 # ───────────────────────────── allowlist ─────────────────────────────
+
 
 def test_is_source_allowed_phone() -> None:
     ch = _make_channel(dm_policy="allowlist", allow_from=["+85298765432"])
@@ -651,7 +799,10 @@ def test_is_source_allowed_uuid_prefix() -> None:
         allow_from=["uuid:abcd1234-0000-0000-0000-000000000000"],
     )
     assert ch._is_source_allowed("", "abcd1234-0000-0000-0000-000000000000")
-    assert not ch._is_source_allowed("", "11111111-0000-0000-0000-000000000000")
+    assert not ch._is_source_allowed(
+        "",
+        "11111111-0000-0000-0000-000000000000",
+    )
 
 
 @pytest.mark.asyncio
@@ -689,6 +840,7 @@ async def test_dm_allowlist_empty_rejects_all() -> None:
 
 # ───────────────────────────── bot self-mention strip ────────────────
 
+
 def test_strip_bot_self_mention_plain_phone() -> None:
     ch = _make_channel()
     stripped = ch._strip_bot_self_mention("@+85251159218 /stop now")
@@ -703,8 +855,10 @@ def test_strip_bot_self_mention_name_with_id() -> None:
 
 # ───────────────────────────── data_dir resolution ───────────────────
 
+
 def test_data_dir_resolves_from_explicit(tmp_path) -> None:
     from qwenpaw.app.channels.signal.channel import _resolve_signal_data_dir
+
     custom = tmp_path / "custom-dir"
     resolved = _resolve_signal_data_dir(str(custom), None)
     assert resolved == custom
@@ -712,6 +866,7 @@ def test_data_dir_resolves_from_explicit(tmp_path) -> None:
 
 def test_data_dir_resolves_from_workspace_dir(tmp_path) -> None:
     from qwenpaw.app.channels.signal.channel import _resolve_signal_data_dir
+
     ws = tmp_path / "agent-ws"
     resolved = _resolve_signal_data_dir("", ws)
     assert resolved == ws / "credentials" / "signal" / "default"
@@ -723,6 +878,7 @@ def test_data_dir_resolves_from_working_dir_fallback() -> None:
         _resolve_signal_data_dir,
         _DEFAULT_DATA_DIR,
     )
+
     resolved = _resolve_signal_data_dir("", None)
     assert resolved == _DEFAULT_DATA_DIR
 
@@ -731,6 +887,7 @@ def test_data_dir_explicit_expands_tilde(tmp_path) -> None:
     """Explicit ``~/foo`` is expanded to the user's home."""
     from pathlib import Path as _P
     from qwenpaw.app.channels.signal.channel import _resolve_signal_data_dir
+
     resolved = _resolve_signal_data_dir("~/foo", None)
     assert str(resolved).startswith(str(_P.home()))
     assert resolved.name == "foo"
@@ -745,11 +902,13 @@ def test_channel_stores_resolved_data_dir(tmp_path) -> None:
 
 # ───────────────────────────── subprocess -c flag ────────────────────
 
+
 def test_subprocess_cmd_includes_config_flag(tmp_path) -> None:
     """data_dir string/Path produces `-c <path>` before `-a`."""
     from qwenpaw.app.channels.signal.subprocess_client import (
         SignalSubprocessClient,
     )
+
     target = tmp_path / "signal-data"
     client = SignalSubprocessClient(
         account="+85251159218",
@@ -768,6 +927,7 @@ def test_subprocess_cmd_no_config_flag_when_unset() -> None:
     from qwenpaw.app.channels.signal.subprocess_client import (
         SignalSubprocessClient,
     )
+
     for v in (None, ""):
         client = SignalSubprocessClient(account="+1", data_dir=v)
         cmd = client._build_cmd()
@@ -776,8 +936,10 @@ def test_subprocess_cmd_no_config_flag_when_unset() -> None:
 
 # ───────────────────────────── download_attachment dest_dir ─────────
 
+
 async def test_download_attachment_copies_into_dest_dir(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ) -> None:
     # Without this copy the returned path sits under
     # ~/.local/share/signal-cli/attachments/, which isn't in the
@@ -821,6 +983,7 @@ async def test_download_attachment_copies_into_dest_dir(
 
 # ───────────────────────────── subprocess client: get_sticker ───────
 
+
 async def test_get_sticker_writes_under_dest_dir(tmp_path) -> None:
     """Happy path: RPC returns base64 bytes, get_sticker persists
     them under dest_dir with a deterministic filename and the pack
@@ -840,11 +1003,14 @@ async def test_get_sticker_writes_under_dest_dir(tmp_path) -> None:
         if method == "getSticker":
             return {"data": _b64.b64encode(b"WEBPBYTES").decode("ascii")}
         raise AssertionError(f"unexpected method {method}")
+
     client.call = _fake_call  # type: ignore[method-assign]
 
     dest_dir = tmp_path / "m"
     result = await client.get_sticker(
-        "PACKHEXID" * 4, 3, dest_dir,
+        "PACKHEXID" * 4,
+        3,
+        dest_dir,
     )
     assert result is not None
     assert result.parent == dest_dir
@@ -880,6 +1046,7 @@ async def test_get_sticker_falls_back_to_add_pack_then_retries(
         if method == "addStickerPack":
             return None
         raise AssertionError(f"unexpected method {method}")
+
     client.call = _fake_call  # type: ignore[method-assign]
 
     result = await client.get_sticker(
@@ -892,12 +1059,97 @@ async def test_get_sticker_falls_back_to_add_pack_then_retries(
     assert result.read_bytes() == b"OK"
     # Order: getSticker (fail) → addStickerPack → getSticker (ok)
     assert [c["method"] for c in calls] == [
-        "getSticker", "addStickerPack", "getSticker",
+        "getSticker",
+        "addStickerPack",
+        "getSticker",
     ]
     uri = calls[1]["params"]["uri"]
     assert uri.startswith("https://signal.art/addstickers/#")
     assert "pack_id=PACKID" in uri
     assert "pack_key=PACKKEY" in uri
+
+
+async def test_get_sticker_cache_hit_skips_rpc(tmp_path) -> None:
+    """Pre-existing webp at the deterministic cache path must be
+    returned immediately without any ``getSticker`` RPC — Signal
+    packs are protocol-immutable so cached bytes are always
+    current.  Without this short-circuit every preview burns
+    50-300 KB of base64 + a round-trip."""
+    from qwenpaw.app.channels.signal.subprocess_client import (
+        SignalSubprocessClient,
+    )
+
+    client = SignalSubprocessClient(account="+1")
+
+    # Seed the cache file with the exact name ``get_sticker`` uses.
+    pack_id = "ABCDEF1234567890" * 2
+    cached = tmp_path / f"signal_sticker_{pack_id[:8]}_7.webp"
+    cached.write_bytes(b"cached-webp-bytes")
+
+    calls: List[str] = []
+
+    async def _fake_call(method, params=None, timeout=None):
+        calls.append(method)
+        raise AssertionError("RPC should not fire on cache hit")
+
+    client.call = _fake_call  # type: ignore[method-assign]
+
+    result = await client.get_sticker(pack_id, 7, tmp_path)
+    assert result == cached
+    assert calls == [], f"expected zero RPCs, got {calls}"
+
+
+async def test_get_sticker_refresh_bypasses_cache(tmp_path) -> None:
+    """``refresh=True`` forces a re-fetch even when the cache file
+    exists — used when a previous write was truncated (e.g.
+    ``readline()`` overflow before we bumped the buffer)."""
+    import base64 as _b64
+    from qwenpaw.app.channels.signal.subprocess_client import (
+        SignalSubprocessClient,
+    )
+
+    client = SignalSubprocessClient(account="+1")
+    pack_id = "FFFFFFFF" + "0" * 24
+    cached = tmp_path / f"signal_sticker_{pack_id[:8]}_0.webp"
+    cached.write_bytes(b"stale")
+
+    async def _fake_call(method, params=None, timeout=None):
+        assert method == "getSticker"
+        return {"data": _b64.b64encode(b"fresh-bytes").decode("ascii")}
+
+    client.call = _fake_call  # type: ignore[method-assign]
+
+    result = await client.get_sticker(
+        pack_id,
+        0,
+        tmp_path,
+        refresh=True,
+    )
+    assert result == cached
+    assert cached.read_bytes() == b"fresh-bytes"
+
+
+async def test_get_sticker_cache_miss_ignores_empty_file(tmp_path) -> None:
+    """A zero-byte cache file (e.g. partial write from a previous
+    crash) must not count as cached — re-fetch and overwrite."""
+    import base64 as _b64
+    from qwenpaw.app.channels.signal.subprocess_client import (
+        SignalSubprocessClient,
+    )
+
+    client = SignalSubprocessClient(account="+1")
+    pack_id = "1234" + "0" * 28
+    cached = tmp_path / f"signal_sticker_{pack_id[:8]}_2.webp"
+    cached.write_bytes(b"")  # truncated
+
+    async def _fake_call(method, params=None, timeout=None):
+        return {"data": _b64.b64encode(b"fresh-bytes").decode("ascii")}
+
+    client.call = _fake_call  # type: ignore[method-assign]
+
+    result = await client.get_sticker(pack_id, 2, tmp_path)
+    assert result == cached
+    assert cached.read_bytes() == b"fresh-bytes"
 
 
 async def test_get_sticker_returns_none_without_key_when_fetch_fails(
@@ -915,6 +1167,7 @@ async def test_get_sticker_returns_none_without_key_when_fetch_fails(
 
     async def _fake_call(method, params=None, timeout=None):
         raise RuntimeError("nope")
+
     client.call = _fake_call  # type: ignore[method-assign]
 
     result = await client.get_sticker("PID" * 10, 0, tmp_path)
@@ -922,6 +1175,7 @@ async def test_get_sticker_returns_none_without_key_when_fetch_fails(
 
 
 # ───────────────────────── subprocess client: orphan reap ──────────
+
 
 async def test_reap_account_orphans_sigterms_matches_and_noops_otherwise(
     monkeypatch,
@@ -931,6 +1185,7 @@ async def test_reap_account_orphans_sigterms_matches_and_noops_otherwise(
     anything else would be a footgun for devs running parallel
     signal-cli on other accounts."""
     import sys
+
     if not sys.platform.startswith("linux"):
         pytest.skip("orphan reap is Linux-only")
 
@@ -943,6 +1198,7 @@ async def test_reap_account_orphans_sigterms_matches_and_noops_otherwise(
 
     def _fake_kill(pid, sig):
         kills.append({"pid": pid, "sig": int(sig)})
+
     monkeypatch.setattr(sc.os, "kill", _fake_kill)
 
     # First probe returns an orphan; second probe (after grace) says
@@ -954,6 +1210,7 @@ async def test_reap_account_orphans_sigterms_matches_and_noops_otherwise(
         if state["calls"] == 1:
             return [9999]
         return []
+
     monkeypatch.setattr(sc, "_iter_signal_cli_pids", _fake_iter)
 
     await client._reap_account_orphans()
@@ -962,6 +1219,7 @@ async def test_reap_account_orphans_sigterms_matches_and_noops_otherwise(
     assert kills[0]["pid"] == 9999
     # First call should be SIGTERM, not SIGKILL.
     import signal as _sig
+
     assert kills[0]["sig"] == int(_sig.SIGTERM)
 
 
@@ -969,6 +1227,7 @@ async def test_reap_account_orphans_escalates_to_sigkill(monkeypatch) -> None:
     """An orphan that shrugs off SIGTERM must get SIGKILL — otherwise
     the next signal-cli stalls on the file lock indefinitely."""
     import sys
+
     if not sys.platform.startswith("linux"):
         pytest.skip("orphan reap is Linux-only")
 
@@ -981,21 +1240,26 @@ async def test_reap_account_orphans_escalates_to_sigkill(monkeypatch) -> None:
 
     def _fake_kill(pid, sig):
         kills.append({"pid": pid, "sig": int(sig)})
+
     monkeypatch.setattr(sc.os, "kill", _fake_kill)
 
     # Orphan survives all probes — must end in SIGKILL.
     monkeypatch.setattr(
-        sc, "_iter_signal_cli_pids", lambda _acct: [4242],
+        sc,
+        "_iter_signal_cli_pids",
+        lambda _acct: [4242],
     )
 
     # Speed up the wait loop so the test isn't slow.
     async def _fast_sleep(_):
         return None
+
     monkeypatch.setattr(sc.asyncio, "sleep", _fast_sleep)
 
     await client._reap_account_orphans()
 
     import signal as _sig
+
     sigs = [k["sig"] for k in kills]
     assert int(_sig.SIGTERM) in sigs
     assert int(_sig.SIGKILL) in sigs
@@ -1006,6 +1270,7 @@ async def test_reap_ignores_self_child(monkeypatch) -> None:
     an orphan — that would just kill the signal-cli we want to
     keep."""
     import sys
+
     if not sys.platform.startswith("linux"):
         pytest.skip("orphan reap is Linux-only")
 
@@ -1015,15 +1280,20 @@ async def test_reap_ignores_self_child(monkeypatch) -> None:
 
     class _FakeProc:
         pid = 12345
+
     client._proc = _FakeProc()  # type: ignore[assignment]
 
     kills: List[int] = []
     monkeypatch.setattr(sc.os, "kill", lambda pid, sig: kills.append(pid))
     monkeypatch.setattr(
-        sc, "_iter_signal_cli_pids", lambda _acct: [12345, 67890],
+        sc,
+        "_iter_signal_cli_pids",
+        lambda _acct: [12345, 67890],
     )
+
     async def _fast_sleep(_):
         return None
+
     monkeypatch.setattr(sc.asyncio, "sleep", _fast_sleep)
     # Also keep the post-SIGTERM probe deterministic.
     call = {"n": 0}
@@ -1033,15 +1303,96 @@ async def test_reap_ignores_self_child(monkeypatch) -> None:
         if call["n"] == 1:
             return [12345, 67890]
         return [12345]  # our child still running; orphan gone
+
     monkeypatch.setattr(sc, "_iter_signal_cli_pids", _iter)
 
     await client._reap_account_orphans()
-    assert kills == [67890], (
-        f"expected only the orphan to be signalled, got {kills}"
+    assert kills == [
+        67890,
+    ], f"expected only the orphan to be signalled, got {kills}"
+
+
+async def test_iter_signal_cli_pids_filters_own_children_via_ppid(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """The crash loop in prod was caused by ``_iter_signal_cli_pids``
+    returning every signal-cli matching the account, including
+    children of our own copaw process (i.e. spawns from a parallel
+    supervise task during agent hot-reload).  The reaper then
+    SIGTERM'd those, killing live signal-cli daemons every <1s.
+
+    Real fix: filter by ``PPid`` from ``/proc/<pid>/status``.  A
+    process whose parent IS the current copaw is never an orphan.
+    Only init-adopted (PPid==1) or other-parent processes qualify
+    for reaping.
+    """
+    import os
+    import sys
+
+    if not sys.platform.startswith("linux"):
+        pytest.skip("/proc-based reap is Linux-only")
+
+    from qwenpaw.app.channels.signal import subprocess_client as sc
+
+    fake_proc = tmp_path / "proc"
+    fake_proc.mkdir()
+    my_pid = os.getpid()
+    my_uid = os.getuid()
+
+    def _make_pid(pid: int, ppid: int, account: str) -> None:
+        d = fake_proc / str(pid)
+        d.mkdir()
+        (d / "status").write_text(
+            f"Name:\tjava\nUid:\t{my_uid}\t{my_uid}\t{my_uid}\t{my_uid}\n"
+            f"PPid:\t{ppid}\n",
+            encoding="utf-8",
+        )
+        # cmdline is null-separated argv.
+        argv = [
+            "signal-cli",
+            "-c",
+            "/data",
+            "-a",
+            account,
+            "--output=json",
+            "jsonRpc",
+        ]
+        (d / "cmdline").write_bytes(b"\x00".join(a.encode() for a in argv))
+
+    # Three candidates on the same account:
+    #   our own child  (PPid = copaw)        → must NOT be reaped
+    #   reparented orphan (PPid = 1)         → must be reaped
+    #   live foreign signal-cli (PPid = 999) → must be reaped
+    _make_pid(11111, my_pid, "+8521")  # our child
+    _make_pid(22222, 1, "+8521")  # init-adopted orphan
+    _make_pid(33333, 999, "+8521")  # foreign-parent
+    _make_pid(44444, my_pid, "+8522")  # different account, our child
+    _make_pid(55555, 1, "+8522")  # different account orphan
+
+    hits = sc._iter_signal_cli_pids(
+        "+8521",
+        _proc_dir_override=fake_proc,
     )
+    # Our own child must be excluded; orphan + foreign-parent included.
+    assert sorted(hits) == [
+        22222,
+        33333,
+    ], f"expected only orphans on +8521, got {sorted(hits)}"
+    # Different-account scan must skip the wrong-account orphan +
+    # our own child, returning only the init-adopted orphan on the
+    # second account.
+    hits_other = sc._iter_signal_cli_pids(
+        "+8522",
+        _proc_dir_override=fake_proc,
+    )
+    assert hits_other == [
+        55555,
+    ], f"expected only init-adopted orphan on +8522, got {hits_other}"
 
 
 # ───────────────────────── subprocess client: pack RPCs ─────────────
+
 
 async def test_list_sticker_packs_returns_array_on_list_result(
     tmp_path,
@@ -1049,11 +1400,13 @@ async def test_list_sticker_packs_returns_array_on_list_result(
     from qwenpaw.app.channels.signal.subprocess_client import (
         SignalSubprocessClient,
     )
+
     client = SignalSubprocessClient(account="+1")
 
     async def _fake_call(method, params=None, timeout=None):
         assert method == "listStickerPacks"
         return [{"packId": "A" * 32, "title": "x"}]
+
     client.call = _fake_call  # type: ignore[method-assign]
     packs = await client.list_sticker_packs()
     assert len(packs) == 1
@@ -1066,10 +1419,12 @@ async def test_list_sticker_packs_tolerates_packs_key_wrapper() -> None:
     from qwenpaw.app.channels.signal.subprocess_client import (
         SignalSubprocessClient,
     )
+
     client = SignalSubprocessClient(account="+1")
 
     async def _fake_call(method, params=None, timeout=None):
         return {"packs": [{"packId": "B", "title": "y"}]}
+
     client.call = _fake_call  # type: ignore[method-assign]
     packs = await client.list_sticker_packs()
     assert packs == [{"packId": "B", "title": "y"}]
@@ -1082,10 +1437,12 @@ async def test_list_sticker_packs_returns_empty_on_rpc_error() -> None:
     from qwenpaw.app.channels.signal.subprocess_client import (
         SignalSubprocessClient,
     )
+
     client = SignalSubprocessClient(account="+1")
 
     async def _fake_call(method, params=None, timeout=None):
         raise RuntimeError("boom")
+
     client.call = _fake_call  # type: ignore[method-assign]
     assert await client.list_sticker_packs() == []
 
@@ -1094,37 +1451,43 @@ async def test_add_sticker_pack_uses_signal_art_uri() -> None:
     from qwenpaw.app.channels.signal.subprocess_client import (
         SignalSubprocessClient,
     )
+
     client = SignalSubprocessClient(account="+1")
     calls: List[Dict[str, Any]] = []
 
     async def _fake_call(method, params=None, timeout=None):
         calls.append({"method": method, "params": params})
         return None
+
     client.call = _fake_call  # type: ignore[method-assign]
 
     ok = await client.add_sticker_pack("PACKID", "PACKKEY")
     assert ok is True
-    assert calls == [{
-        "method": "addStickerPack",
-        "params": {
-            "uri": (
-                "https://signal.art/addstickers/"
-                "#pack_id=PACKID&pack_key=PACKKEY"
-            ),
+    assert calls == [
+        {
+            "method": "addStickerPack",
+            "params": {
+                "uri": (
+                    "https://signal.art/addstickers/"
+                    "#pack_id=PACKID&pack_key=PACKKEY"
+                ),
+            },
         },
-    }]
+    ]
 
 
 async def test_upload_sticker_pack_handles_plain_url_string() -> None:
     from qwenpaw.app.channels.signal.subprocess_client import (
         SignalSubprocessClient,
     )
+
     client = SignalSubprocessClient(account="+1")
 
     async def _fake_call(method, params=None, timeout=None):
         assert method == "uploadStickerPack"
         assert params == {"path": "/tmp/pack/manifest.json"}
         return "https://signal.art/addstickers/#pack_id=X&pack_key=Y"
+
     client.call = _fake_call  # type: ignore[method-assign]
 
     url = await client.upload_sticker_pack("/tmp/pack/manifest.json")
@@ -1135,10 +1498,12 @@ async def test_upload_sticker_pack_handles_dict_url_field() -> None:
     from qwenpaw.app.channels.signal.subprocess_client import (
         SignalSubprocessClient,
     )
+
     client = SignalSubprocessClient(account="+1")
 
     async def _fake_call(method, params=None, timeout=None):
         return {"url": "https://signal.art/addstickers/#pack_id=Z&pack_key=W"}
+
     client.call = _fake_call  # type: ignore[method-assign]
 
     url = await client.upload_sticker_pack("/x.json")
@@ -1152,35 +1517,52 @@ async def test_send_sticker_message_wires_sticker_param() -> None:
     from qwenpaw.app.channels.signal.subprocess_client import (
         SignalSubprocessClient,
     )
+
     client = SignalSubprocessClient(account="+85251159218")
     calls: List[Dict[str, Any]] = []
 
     async def _fake_call(method, params=None, timeout=None):
         calls.append({"method": method, "params": params})
         return {"timestamp": 42}
+
     client.call = _fake_call  # type: ignore[method-assign]
 
     # DM
     ts = await client.send_sticker_message(
-        "+85298765432", "PACKID", 3, is_group=False,
+        "+85298765432",
+        "PACKID",
+        3,
+        is_group=False,
     )
     assert ts == 42
     dm_params = calls[0]["params"]
     assert dm_params["sticker"] == "PACKID:3"
-    assert dm_params["recipients"] == ["+85298765432"]
+    # signal-cli 0.14.x's documented JSON-RPC schema for ``send``
+    # uses singular ``recipient`` (still accepts plural
+    # ``recipients`` as a compat fallback, but using the canonical
+    # field avoids any version-specific routing quirks for sticker
+    # sends — observed in prod where ``recipients`` made 0.14.3
+    # render as a non-sticker payload on the receiver).
+    assert dm_params["recipient"] == ["+85298765432"]
+    assert "recipients" not in dm_params
     assert "groupId" not in dm_params
 
     # Group
     ts2 = await client.send_sticker_message(
-        "GROUPBASE64==", "PACKID", 0, is_group=True,
+        "GROUPBASE64==",
+        "PACKID",
+        0,
+        is_group=True,
     )
     assert ts2 == 42
     grp_params = calls[1]["params"]
     assert grp_params["groupId"] == "GROUPBASE64=="
+    assert "recipient" not in grp_params
     assert "recipients" not in grp_params
 
 
 # ───────────────────────────── mention prefix collision ──────────────
+
 
 def test_is_mentioned_plain_text_phone() -> None:
     """Account +85298349370 in body '@+85298349370 hello' → mentioned."""
@@ -1213,8 +1595,10 @@ def test_is_mentioned_via_structured_mention() -> None:
 
 # ───────────────────────────── link-endpoint helpers ─────────────────
 
+
 def test_read_signal_accounts_missing_file(tmp_path) -> None:
     from qwenpaw.app.routers.config import _read_signal_accounts
+
     res = _read_signal_accounts(tmp_path / "does-not-exist")
     assert res == {"accounts": []}
 
@@ -1222,15 +1606,22 @@ def test_read_signal_accounts_missing_file(tmp_path) -> None:
 def test_read_signal_accounts_valid_file(tmp_path) -> None:
     import json as _json
     from qwenpaw.app.routers.config import _read_signal_accounts
+
     data_dir = tmp_path / "sig"
     (data_dir / "data").mkdir(parents=True)
-    (data_dir / "data" / "accounts.json").write_text(_json.dumps({
-        "accounts": [{
-            "number": "+85298349370",
-            "uuid": "447e962a-0000-0000-0000-000000000000",
-            "path": "some/path",
-        }],
-    }))
+    (data_dir / "data" / "accounts.json").write_text(
+        _json.dumps(
+            {
+                "accounts": [
+                    {
+                        "number": "+85298349370",
+                        "uuid": "447e962a-0000-0000-0000-000000000000",
+                        "path": "some/path",
+                    },
+                ],
+            },
+        ),
+    )
     res = _read_signal_accounts(data_dir)
     assert res["accounts"][0]["number"] == "+85298349370"
     assert res["accounts"][0]["uuid"].startswith("447e962a")
@@ -1239,6 +1630,7 @@ def test_read_signal_accounts_valid_file(tmp_path) -> None:
 def test_read_signal_accounts_malformed_file(tmp_path) -> None:
     """Garbage JSON → empty accounts (treated as not-linked)."""
     from qwenpaw.app.routers.config import _read_signal_accounts
+
     data_dir = tmp_path / "sig"
     (data_dir / "data").mkdir(parents=True)
     (data_dir / "data" / "accounts.json").write_text("not json {{")
@@ -1247,6 +1639,7 @@ def test_read_signal_accounts_malformed_file(tmp_path) -> None:
 
 def test_get_signal_link_state_idempotent() -> None:
     from qwenpaw.app.routers.config import _get_signal_link_state
+
     s1 = _get_signal_link_state("test-agent-zzz")
     s2 = _get_signal_link_state("test-agent-zzz")
     # Same dict object — idempotent and preserves in-flight state.
@@ -1261,18 +1654,27 @@ def test_get_signal_link_state_idempotent() -> None:
 # typed ``@+<number>`` forms. The channel now auto-populates
 # ``account_uuid`` from signal-cli's own ``accounts.json`` on startup.
 
+
 def test_auto_discover_account_uuid_from_accounts_json(tmp_path) -> None:
     import json as _json
+
     (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "accounts.json").write_text(_json.dumps({
-        "accounts": [
-            {"number": "+85298349370",
-             "uuid": "447e962a-1f09-4a21-aef6-79617d8e8ad0",
-             "path": "750890"},
-        ],
-    }))
+    (tmp_path / "data" / "accounts.json").write_text(
+        _json.dumps(
+            {
+                "accounts": [
+                    {
+                        "number": "+85298349370",
+                        "uuid": "447e962a-1f09-4a21-aef6-79617d8e8ad0",
+                        "path": "750890",
+                    },
+                ],
+            },
+        ),
+    )
     uuid = SignalChannel._auto_discover_account_uuid(
-        "+85298349370", tmp_path,
+        "+85298349370",
+        tmp_path,
     )
     assert uuid == "447e962a-1f09-4a21-aef6-79617d8e8ad0"
 
@@ -1281,54 +1683,66 @@ def test_auto_discover_account_uuid_lowercased(tmp_path) -> None:
     """Mixed-case UUIDs from signal-cli are normalized to lowercase so the
     equality check against structured mentions is case-insensitive."""
     import json as _json
+
     (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "accounts.json").write_text(_json.dumps({
-        "accounts": [{"number": "+1", "uuid": "AB-CD-EF"}],
-    }))
+    (tmp_path / "data" / "accounts.json").write_text(
+        _json.dumps(
+            {
+                "accounts": [{"number": "+1", "uuid": "AB-CD-EF"}],
+            },
+        ),
+    )
     assert (
-        SignalChannel._auto_discover_account_uuid("+1", tmp_path)
-        == "ab-cd-ef"
+        SignalChannel._auto_discover_account_uuid("+1", tmp_path) == "ab-cd-ef"
     )
 
 
 def test_auto_discover_account_uuid_missing_file(tmp_path) -> None:
     """Missing accounts.json → empty string (channel boots without UUID,
     falls back to plain-text mention detection)."""
-    assert (
-        SignalChannel._auto_discover_account_uuid("+1", tmp_path) == ""
-    )
+    assert SignalChannel._auto_discover_account_uuid("+1", tmp_path) == ""
 
 
 def test_auto_discover_account_uuid_wrong_account(tmp_path) -> None:
     """Account not listed → empty string (don't pick someone else's UUID)."""
     import json as _json
+
     (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "accounts.json").write_text(_json.dumps({
-        "accounts": [{"number": "+111", "uuid": "not-ours"}],
-    }))
-    assert (
-        SignalChannel._auto_discover_account_uuid("+999", tmp_path) == ""
+    (tmp_path / "data" / "accounts.json").write_text(
+        _json.dumps(
+            {
+                "accounts": [{"number": "+111", "uuid": "not-ours"}],
+            },
+        ),
     )
+    assert SignalChannel._auto_discover_account_uuid("+999", tmp_path) == ""
 
 
 def test_auto_discover_account_uuid_malformed_json(tmp_path) -> None:
     """Corrupt accounts.json → empty string, no exception."""
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "accounts.json").write_text("garbage {{")
-    assert (
-        SignalChannel._auto_discover_account_uuid("+1", tmp_path) == ""
-    )
+    assert SignalChannel._auto_discover_account_uuid("+1", tmp_path) == ""
 
 
 def test_channel_auto_populates_account_uuid_when_unset(tmp_path) -> None:
     """End-to-end: constructing a SignalChannel with account_uuid=""
     pulls the UUID from data_dir/data/accounts.json."""
     import json as _json
+
     (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "accounts.json").write_text(_json.dumps({
-        "accounts": [{"number": "+85298349370",
-                      "uuid": "447e962a-0000-0000-0000-000000000000"}],
-    }))
+    (tmp_path / "data" / "accounts.json").write_text(
+        _json.dumps(
+            {
+                "accounts": [
+                    {
+                        "number": "+85298349370",
+                        "uuid": "447e962a-0000-0000-0000-000000000000",
+                    },
+                ],
+            },
+        ),
+    )
     ch = _make_channel(
         account="+85298349370",
         account_uuid="",
@@ -1340,10 +1754,15 @@ def test_channel_auto_populates_account_uuid_when_unset(tmp_path) -> None:
 def test_channel_respects_explicit_account_uuid(tmp_path) -> None:
     """If caller provides account_uuid, discovery does NOT override it."""
     import json as _json
+
     (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "accounts.json").write_text(_json.dumps({
-        "accounts": [{"number": "+1", "uuid": "from-file"}],
-    }))
+    (tmp_path / "data" / "accounts.json").write_text(
+        _json.dumps(
+            {
+                "accounts": [{"number": "+1", "uuid": "from-file"}],
+            },
+        ),
+    )
     ch = _make_channel(
         account="+1",
         account_uuid="from-config",
@@ -1359,11 +1778,16 @@ def test_mention_detection_after_auto_discover_fixes_ui_tap(tmp_path) -> None:
     always fall through to plain-text, which missed UUID-only mentions
     entirely."""
     import json as _json
+
     bot_uuid = "447e962a-1f09-4a21-aef6-79617d8e8ad0"
     (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "accounts.json").write_text(_json.dumps({
-        "accounts": [{"number": "+85298349370", "uuid": bot_uuid}],
-    }))
+    (tmp_path / "data" / "accounts.json").write_text(
+        _json.dumps(
+            {
+                "accounts": [{"number": "+85298349370", "uuid": bot_uuid}],
+            },
+        ),
+    )
     ch = _make_channel(
         account="+85298349370",
         account_uuid="",
@@ -1381,6 +1805,7 @@ def test_mention_detection_after_auto_discover_fixes_ui_tap(tmp_path) -> None:
 # resolve the contact and the mention was dropped, leaving raw UUID text
 # in the recipient's view. We now emit the full UUID so the outbound
 # parser can round-trip the mention back into a proper structured form.
+
 
 def test_expand_mentions_uuid_only_emits_full_uuid() -> None:
     """When signal-cli gives us a UUID-only mention (privacy: no phone),
@@ -1403,12 +1828,15 @@ def test_expand_mentions_prefers_phone_over_uuid() -> None:
     """When a mention has both, the text form uses the phone number
     (shorter and rounds-trips via the phone-bare regex)."""
     ch = _make_channel()
-    mentions = [{
-        "start": 0, "length": 1,
-        "number": "+85251159218",
-        "uuid": "82e0393a-4c79-4905-b84d-986298f4f8c5",
-        "name": "Alice",
-    }]
+    mentions = [
+        {
+            "start": 0,
+            "length": 1,
+            "number": "+85251159218",
+            "uuid": "82e0393a-4c79-4905-b84d-986298f4f8c5",
+            "name": "Alice",
+        },
+    ]
     expanded = ch._expand_mentions("￼ hi", mentions)
     assert "+85251159218" in expanded
     # UUID must NOT leak into the bot's view when phone is available.

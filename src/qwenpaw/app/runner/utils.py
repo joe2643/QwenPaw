@@ -58,9 +58,8 @@ def _active_provider_is_codex_oauth() -> bool:
         if active is None:
             return False
         return (
-            (getattr(active, "provider_id", "") or "").lower()
-            == "codex-oauth"
-        )
+            getattr(active, "provider_id", "") or ""
+        ).lower() == "codex-oauth"
     except Exception:
         return False
 

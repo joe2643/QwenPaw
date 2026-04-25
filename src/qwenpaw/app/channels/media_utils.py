@@ -106,12 +106,15 @@ async def sign_media_path(
             params["auth"] = auth
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.get(
-                f"{_media_server_base()}/sign", params=params,
+                f"{_media_server_base()}/sign",
+                params=params,
             )
         if resp.status_code != 200:
             logger.debug(
                 "sign_media_path: media_server /sign returned %d for %s: %s",
-                resp.status_code, local_path, resp.text[:200],
+                resp.status_code,
+                local_path,
+                resp.text[:200],
             )
             return None
         body = resp.json()
@@ -120,7 +123,8 @@ async def sign_media_path(
     except Exception as e:
         logger.debug(
             "sign_media_path: media_server unreachable for %s: %s",
-            local_path, e,
+            local_path,
+            e,
         )
         return None
 

@@ -24,7 +24,9 @@ export function MemPalaceCard() {
     }
   }, []);
 
-  useEffect(() => { loadConfig(); }, [loadConfig]);
+  useEffect(() => {
+    loadConfig();
+  }, [loadConfig]);
 
   const update = async (patch: any) => {
     const newConfig = { ...config, ...patch };
@@ -42,7 +44,11 @@ export function MemPalaceCard() {
 
   if (loading) {
     return (
-      <Card className={styles.formCard} title="MemPalace Hooks" style={{ marginTop: 16 }}>
+      <Card
+        className={styles.formCard}
+        title="MemPalace Hooks"
+        style={{ marginTop: 16 }}
+      >
         <Spin />
       </Card>
     );
@@ -51,7 +57,12 @@ export function MemPalaceCard() {
   return (
     <Card
       className={styles.formCard}
-      title={<><DatabaseOutlined style={{ marginRight: 8 }} />MemPalace Hooks</>}
+      title={
+        <>
+          <DatabaseOutlined style={{ marginRight: 8 }} />
+          MemPalace Hooks
+        </>
+      }
       style={{ marginTop: 16 }}
       extra={saving ? <Text type="secondary">saving...</Text> : null}
     >
@@ -72,9 +83,11 @@ export function MemPalaceCard() {
               <Switch
                 size="small"
                 checked={config?.interval_save?.enabled ?? false}
-                onChange={(v) => update({
-                  interval_save: { ...config.interval_save, enabled: v },
-                })}
+                onChange={(v) =>
+                  update({
+                    interval_save: { ...config.interval_save, enabled: v },
+                  })
+                }
               />
               {config?.interval_save?.enabled && (
                 <>
@@ -84,9 +97,14 @@ export function MemPalaceCard() {
                     min={5}
                     max={100}
                     value={config?.interval_save?.write_interval ?? 15}
-                    onChange={(v) => update({
-                      interval_save: { ...config.interval_save, write_interval: v },
-                    })}
+                    onChange={(v) =>
+                      update({
+                        interval_save: {
+                          ...config.interval_save,
+                          write_interval: v,
+                        },
+                      })
+                    }
                     style={{ width: 60 }}
                   />
                   <Text type="secondary">msgs</Text>
@@ -100,9 +118,11 @@ export function MemPalaceCard() {
               <Switch
                 size="small"
                 checked={config?.precompact_save?.enabled ?? false}
-                onChange={(v) => update({
-                  precompact_save: { ...config.precompact_save, enabled: v },
-                })}
+                onChange={(v) =>
+                  update({
+                    precompact_save: { ...config.precompact_save, enabled: v },
+                  })
+                }
               />
               {config?.precompact_save?.enabled && (
                 <>
@@ -113,9 +133,14 @@ export function MemPalaceCard() {
                     max={0.95}
                     step={0.05}
                     value={config?.precompact_save?.threshold ?? 0.75}
-                    onChange={(v) => update({
-                      precompact_save: { ...config.precompact_save, threshold: v },
-                    })}
+                    onChange={(v) =>
+                      update({
+                        precompact_save: {
+                          ...config.precompact_save,
+                          threshold: v,
+                        },
+                      })
+                    }
                     style={{ width: 65 }}
                   />
                   <Text type="secondary">context</Text>

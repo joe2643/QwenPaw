@@ -258,7 +258,14 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
 
     # Create core managers (instant — no I/O)
     logger.debug("Initializing MultiAgentManager...")
+    from .multi_agent_manager import register_multi_agent_manager
+
     multi_agent_manager = MultiAgentManager()
+    # Publish the live manager so tool code that runs outside an HTTP
+    # request (e.g. agent tools, proactive triggers) can reach the
+    # SAME instance as request-bound routers — instead of newing up a
+    # fresh empty manager each call and spawning duplicate workspaces.
+    register_multi_agent_manager(multi_agent_manager)
     provider_manager = ProviderManager.get_instance()
     local_model_manager = LocalModelManager.get_instance()
 
@@ -329,9 +336,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
                         tunnel_domain=ms_cfg.tunnel_domain,
                         tunnel_mode=ms_cfg.tunnel_mode,
                         named_tunnel_name=ms_cfg.named_tunnel_name,
-                        named_tunnel_hostname=(
-                            ms_cfg.named_tunnel_hostname
-                        ),
+                        named_tunnel_hostname=(ms_cfg.named_tunnel_hostname),
                         named_tunnel_config_file=(
                             ms_cfg.named_tunnel_config_file
                         ),
@@ -519,12 +524,14 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
             loop = asyncio.get_event_loop()
             tasks = [t for t in asyncio.all_tasks(loop) if not t.done()]
             logger.warning(
-                "shutdown-diag: %d asyncio tasks still running", len(tasks),
+                "shutdown-diag: %d asyncio tasks still running",
+                len(tasks),
             )
             for t in tasks[:20]:
                 logger.warning(
                     "shutdown-diag: task=%s coro=%s",
-                    t.get_name(), getattr(t.get_coro(), "__qualname__", "?"),
+                    t.get_name(),
+                    getattr(t.get_coro(), "__qualname__", "?"),
                 )
         except Exception as e:
             logger.warning("shutdown-diag: task dump failed: %s", e)
@@ -536,6 +543,7 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
     try:
         for _sig in (_signal.SIGTERM, _signal.SIGINT):
             _prev = _signal.getsignal(_sig)
+
             def _make_handler(prev):
                 def _h(signum, frame):
                     _log_shutdown_signal(signum, frame)
@@ -544,7 +552,9 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
                             prev(signum, frame)
                         except Exception:
                             pass
+
                 return _h
+
             _signal.signal(_sig, _make_handler(_prev))
     except Exception as e:
         logger.warning("Could not install shutdown diagnostic handler: %s", e)

@@ -260,7 +260,11 @@ class CloudflareTunnelDriver:
             # Give terminate() a moment, then force anything still alive.
             if killed:
                 _, still = psutil.wait_procs(
-                    [psutil.Process(p) for p in killed if psutil.pid_exists(p)],
+                    [
+                        psutil.Process(p)
+                        for p in killed
+                        if psutil.pid_exists(p)
+                    ],
                     timeout=3,
                 )
                 for proc in still:
@@ -276,13 +280,16 @@ class CloudflareTunnelDriver:
                 tok.replace("/", r"\/") for tok in match_tokens
             )
             proc = await asyncio.create_subprocess_exec(
-                "pgrep", "-f", pattern,
+                "pgrep",
+                "-f",
+                pattern,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
             out, _ = await proc.communicate()
             pids = [
-                int(p) for p in out.decode().split()
+                int(p)
+                for p in out.decode().split()
                 if p.isdigit() and int(p) != my_pid
             ]
             for pid in pids:

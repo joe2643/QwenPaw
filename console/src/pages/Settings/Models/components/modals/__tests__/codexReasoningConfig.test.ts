@@ -18,9 +18,7 @@ import {
 
 describe("fromGenerateKwargs (codex)", () => {
   test("empty / null / undefined → defaults", () => {
-    expect(fromGenerateKwargs(undefined)).toEqual(
-      DEFAULT_CODEX_REASONING_FORM,
-    );
+    expect(fromGenerateKwargs(undefined)).toEqual(DEFAULT_CODEX_REASONING_FORM);
     expect(fromGenerateKwargs(null)).toEqual(DEFAULT_CODEX_REASONING_FORM);
     expect(fromGenerateKwargs({})).toEqual(DEFAULT_CODEX_REASONING_FORM);
   });
@@ -37,14 +35,16 @@ describe("fromGenerateKwargs (codex)", () => {
     // current model actually supports (``minimal``), or Claude-only
     // values (``max``), or garbage — all must fall back to default
     // rather than silently forwarding an unsupported level.
-    expect(fromGenerateKwargs({ reasoning_effort: "minimal" }).effort)
-      .toBeUndefined();
-    expect(fromGenerateKwargs({ reasoning_effort: "max" }).effort)
-      .toBeUndefined();
-    expect(fromGenerateKwargs({ reasoning_effort: 42 }).effort)
-      .toBeUndefined();
-    expect(fromGenerateKwargs({ reasoning_effort: null }).effort)
-      .toBeUndefined();
+    expect(
+      fromGenerateKwargs({ reasoning_effort: "minimal" }).effort,
+    ).toBeUndefined();
+    expect(
+      fromGenerateKwargs({ reasoning_effort: "max" }).effort,
+    ).toBeUndefined();
+    expect(fromGenerateKwargs({ reasoning_effort: 42 }).effort).toBeUndefined();
+    expect(
+      fromGenerateKwargs({ reasoning_effort: null }).effort,
+    ).toBeUndefined();
   });
 
   test("ignores unrelated keys", () => {

@@ -55,7 +55,9 @@ class TestMCPClientConfigTimeoutField:
 class TestClientStoresTimeout:
     def test_stdio_stores_timeout(self):
         c = StdIOStatefulClient(
-            name="s", command="true", tool_call_timeout=30.0,
+            name="s",
+            command="true",
+            tool_call_timeout=30.0,
         )
         assert c._tool_call_timeout == 30.0
 
@@ -117,7 +119,8 @@ class _HangingSession:
             deadline_s = float(read_timeout_seconds)
         try:
             await asyncio.wait_for(
-                asyncio.Event().wait(), timeout=deadline_s,
+                asyncio.Event().wait(),
+                timeout=deadline_s,
             )
         except asyncio.TimeoutError:
             # mcp library raises its own error; for our purposes any
@@ -127,10 +130,13 @@ class _HangingSession:
 
 
 def _connected_client(
-    session: _HangingSession, timeout: float | None,
+    session: _HangingSession,
+    timeout: float | None,
 ) -> StdIOStatefulClient:
     c = StdIOStatefulClient(
-        name="fake", command="true", tool_call_timeout=timeout,
+        name="fake",
+        command="true",
+        tool_call_timeout=timeout,
     )
     c.session = session  # type: ignore[assignment]
     c.is_connected = True
@@ -143,7 +149,8 @@ async def test_timeout_is_forwarded_to_session() -> None:
     client = _connected_client(sess, timeout=5.0)
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(
-            client.call_tool("ping", {}), timeout=0.2,
+            client.call_tool("ping", {}),
+            timeout=0.2,
         )
     # No matter whether the inner call timed out or the outer
     # wait_for did, the read_timeout_seconds we set MUST have been
@@ -258,6 +265,8 @@ async def test_get_callable_function_propagates_configured_timeout(
 
     # Explicit override at call-site still wins.
     fn2 = await client.get_callable_function(
-        "ping", wrap_tool_result=True, execution_timeout=3.0,
+        "ping",
+        wrap_tool_result=True,
+        execution_timeout=3.0,
     )
     assert _secs(fn2.timeout) == 3.0

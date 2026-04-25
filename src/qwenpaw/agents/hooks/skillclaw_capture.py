@@ -61,8 +61,10 @@ class SkillClawCaptureHook:
         workspace_dir: str | Path = "",
         channel_name: str = "all",
     ) -> None:
-        resolved = Path(records_dir).expanduser() if records_dir else (
-            Path.home() / ".skillclaw" / "records"
+        resolved = (
+            Path(records_dir).expanduser()
+            if records_dir
+            else (Path.home() / ".skillclaw" / "records")
         )
         resolved.mkdir(parents=True, exist_ok=True)
         self._path = resolved / "conversations.jsonl"
@@ -175,10 +177,12 @@ class SkillClawCaptureHook:
             return []
         try:
             from ...agents.skills_manager import resolve_effective_skills
+
             return list(
                 resolve_effective_skills(
-                    self._workspace_dir, self._channel_name,
-                )
+                    self._workspace_dir,
+                    self._channel_name,
+                ),
             )
         except Exception:  # pylint: disable=broad-exception-caught
             return []
@@ -197,7 +201,9 @@ class SkillClawCaptureHook:
             headers["Authorization"] = f"Bearer {self._ingest_api_key}"
         try:
             r = await self._client.post(
-                self._ingest_url, json=record, headers=headers,
+                self._ingest_url,
+                json=record,
+                headers=headers,
             )
             if 200 <= r.status_code < 300:
                 return True
@@ -236,11 +242,14 @@ def _extract_skill_name_from_path(path: str) -> str | None:
     ``skills/`` / ``local-share/qwenpaw/skills/``.  Returns ``None``
     when the path doesn't look like a skill path at all.
     """
-    if not isinstance(path, str) or not any(p in path for p in _SKILL_PATH_PATTERNS):
+    if not isinstance(path, str) or not any(
+        p in path for p in _SKILL_PATH_PATTERNS
+    ):
         return None
     # Try most specific markers first.
     for marker in (
-        "/skill_pool/", "/local-share/qwenpaw/skills/",
+        "/skill_pool/",
+        "/local-share/qwenpaw/skills/",
     ):
         if marker in path:
             tail = path.split(marker, 1)[1]
@@ -255,7 +264,9 @@ def _extract_skill_name_from_path(path: str) -> str | None:
     return None
 
 
-def _scan_messages_for_skill_io(messages: list[Any]) -> tuple[list[str], list[str]]:
+def _scan_messages_for_skill_io(
+    messages: list[Any],
+) -> tuple[list[str], list[str]]:
     """Walk every assistant tool-use block in ``messages`` and bucket
     skill-touching ones into ``read_skills`` / ``modified_skills``.
 
@@ -286,7 +297,10 @@ def _scan_messages_for_skill_io(messages: list[Any]) -> tuple[list[str], list[st
             path = ""
             if isinstance(inp, dict):
                 path = str(
-                    inp.get("path") or inp.get("file_path") or inp.get("file") or ""
+                    inp.get("path")
+                    or inp.get("file_path")
+                    or inp.get("file")
+                    or "",
                 )
             skill = _extract_skill_name_from_path(path)
             if not skill:

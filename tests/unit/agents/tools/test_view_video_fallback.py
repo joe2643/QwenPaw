@@ -163,26 +163,41 @@ async def test_primary_supports_video_bypasses_fallback(
     # When the primary model handles video natively, view_video
     # must return the VideoBlock untouched — no fallback call.
     fake = _FakeChatModel()
-    with patch.object(vm, "_check_multimodal_support", return_value=True), \
-         patch.object(
-             vm, "_resolve_fallback_video_model",
-             return_value=(fake, "gemini", "gemini-2.5-pro"),
-         ):
+    with patch.object(
+        vm,
+        "_check_multimodal_support",
+        return_value=True,
+    ), patch.object(
+        vm,
+        "_resolve_fallback_video_model",
+        return_value=(fake, "gemini", "gemini-2.5-pro"),
+    ):
         resp = await view_video(str(tmp_video))
     # VideoBlock present; no fallback header text.
     types = [b.get("type") for b in resp.content]
     assert "video" in types
-    assert fake.last_messages is None, \
-        "fallback model should not have been called"
+    assert (
+        fake.last_messages is None
+    ), "fallback model should not have been called"
 
 
 @pytest.mark.asyncio
 async def test_no_fallback_configured_yields_generic_hint(
     tmp_video: Path,
 ) -> None:
-    with patch.object(vm, "_check_multimodal_support", return_value=False), \
-         patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
-         patch.object(vm, "_resolve_fallback_video_model", return_value=None):
+    with patch.object(
+        vm,
+        "_check_multimodal_support",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_probe_multimodal_if_needed",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_resolve_fallback_video_model",
+        return_value=None,
+    ):
         resp = await view_video(str(tmp_video))
     # The generic hint contains the telltale "does not appear to support"
     # phrasing from _get_multimodal_fallback_hint.
@@ -201,9 +216,19 @@ async def test_no_fallback_keeps_videoblock_for_user_display(
     # Large`` observed on Claude OAuth now lives in the message
     # normalizer (per-media-type strip with path-preserving
     # placeholder) — not in view_video itself.
-    with patch.object(vm, "_check_multimodal_support", return_value=False), \
-         patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
-         patch.object(vm, "_resolve_fallback_video_model", return_value=None):
+    with patch.object(
+        vm,
+        "_check_multimodal_support",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_probe_multimodal_if_needed",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_resolve_fallback_video_model",
+        return_value=None,
+    ):
         resp = await view_video(str(tmp_video))
     block_types = [b.get("type") for b in resp.content]
     assert "video" in block_types
@@ -219,12 +244,19 @@ async def test_delegates_with_user_prompt(
 ) -> None:
     fake = _FakeChatModel(description="Detailed description here.")
     user_prompt = "Count how many people appear in this clip."
-    with patch.object(vm, "_check_multimodal_support", return_value=False), \
-         patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
-         patch.object(
-             vm, "_resolve_fallback_video_model",
-             return_value=(fake, "gemini", "gemini-2.5-pro"),
-         ):
+    with patch.object(
+        vm,
+        "_check_multimodal_support",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_probe_multimodal_if_needed",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_resolve_fallback_video_model",
+        return_value=(fake, "gemini", "gemini-2.5-pro"),
+    ):
         resp = await view_video(str(tmp_video), prompt=user_prompt)
 
     # Fallback was called exactly once.
@@ -253,12 +285,19 @@ async def test_missing_prompt_uses_default(
     tmp_video: Path,
 ) -> None:
     fake = _FakeChatModel()
-    with patch.object(vm, "_check_multimodal_support", return_value=False), \
-         patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
-         patch.object(
-             vm, "_resolve_fallback_video_model",
-             return_value=(fake, "gemini", "gemini-2.5-pro"),
-         ):
+    with patch.object(
+        vm,
+        "_check_multimodal_support",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_probe_multimodal_if_needed",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_resolve_fallback_video_model",
+        return_value=(fake, "gemini", "gemini-2.5-pro"),
+    ):
         await view_video(str(tmp_video))
 
     assert fake.last_messages is not None
@@ -273,12 +312,19 @@ async def test_empty_prompt_falls_back_to_default(
 ) -> None:
     # Whitespace-only prompt → treat as missing; use default.
     fake = _FakeChatModel()
-    with patch.object(vm, "_check_multimodal_support", return_value=False), \
-         patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
-         patch.object(
-             vm, "_resolve_fallback_video_model",
-             return_value=(fake, "gemini", "gemini-2.5-pro"),
-         ):
+    with patch.object(
+        vm,
+        "_check_multimodal_support",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_probe_multimodal_if_needed",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_resolve_fallback_video_model",
+        return_value=(fake, "gemini", "gemini-2.5-pro"),
+    ):
         await view_video(str(tmp_video), prompt="   ")
     assert fake.last_messages[0]["content"][1]["text"] == (
         _DEFAULT_VIDEO_FALLBACK_PROMPT
@@ -292,12 +338,19 @@ async def test_fallback_model_failure_falls_back_to_hint(
     # Fallback crashes mid-call → user still gets a useful response,
     # not an exception.
     fake = _FakeChatModel(fail=True)
-    with patch.object(vm, "_check_multimodal_support", return_value=False), \
-         patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
-         patch.object(
-             vm, "_resolve_fallback_video_model",
-             return_value=(fake, "gemini", "gemini-2.5-pro"),
-         ):
+    with patch.object(
+        vm,
+        "_check_multimodal_support",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_probe_multimodal_if_needed",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_resolve_fallback_video_model",
+        return_value=(fake, "gemini", "gemini-2.5-pro"),
+    ):
         resp = await view_video(str(tmp_video))
     texts = [
         b.get("text", "") for b in resp.content if b.get("type") == "text"
@@ -316,12 +369,19 @@ async def test_fallback_empty_response_treated_as_failure(
     # description to the caller — treat it as a failure and show the
     # generic hint instead.
     fake = _FakeChatModel(description="   ")
-    with patch.object(vm, "_check_multimodal_support", return_value=False), \
-         patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
-         patch.object(
-             vm, "_resolve_fallback_video_model",
-             return_value=(fake, "gemini", "gemini-2.5-pro"),
-         ):
+    with patch.object(
+        vm,
+        "_check_multimodal_support",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_probe_multimodal_if_needed",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_resolve_fallback_video_model",
+        return_value=(fake, "gemini", "gemini-2.5-pro"),
+    ):
         resp = await view_video(str(tmp_video))
     texts = [
         b.get("text", "") for b in resp.content if b.get("type") == "text"
@@ -334,12 +394,19 @@ async def test_url_video_uses_url_source(
     tmp_video: Path,  # unused; fixture kept for symmetry
 ) -> None:
     fake = _FakeChatModel()
-    with patch.object(vm, "_check_multimodal_support", return_value=False), \
-         patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
-         patch.object(
-             vm, "_resolve_fallback_video_model",
-             return_value=(fake, "gemini", "gemini-2.5-pro"),
-         ):
+    with patch.object(
+        vm,
+        "_check_multimodal_support",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_probe_multimodal_if_needed",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_resolve_fallback_video_model",
+        return_value=(fake, "gemini", "gemini-2.5-pro"),
+    ):
         await view_video("https://example.com/clip.mp4")
     # The VideoBlock carried into the fallback request should point
     # at the original URL, not a downloaded path.
@@ -378,16 +445,30 @@ async def test_qwen_family_gets_signed_url_and_video_url_shape(
 
     import httpx as _real_httpx
 
-    with patch.object(vm, "_check_multimodal_support", return_value=False), \
-         patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
-         patch.object(
-             vm, "_resolve_fallback_video_model",
-             return_value=(
-                 fake, "bailian-via-skillclaw", "qwen3.6-plus",
-             ),
-         ), \
-         patch("qwenpaw.app.channels.media_utils.resolve_media_url", _fake_sign), \
-         patch.object(_real_httpx, "AsyncClient", lambda *a, **kw: http):
+    with patch.object(
+        vm,
+        "_check_multimodal_support",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_probe_multimodal_if_needed",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_resolve_fallback_video_model",
+        return_value=(
+            fake,
+            "bailian-via-skillclaw",
+            "qwen3.6-plus",
+        ),
+    ), patch(
+        "qwenpaw.app.channels.media_utils.resolve_media_url",
+        _fake_sign,
+    ), patch.object(
+        _real_httpx,
+        "AsyncClient",
+        lambda *a, **kw: http,
+    ):
         resp = await view_video(str(tmp_video), prompt="what happens?")
 
     # HTTPX post was the actual upstream call (bypassing agentscope).
@@ -409,7 +490,9 @@ async def test_qwen_family_gets_signed_url_and_video_url_shape(
     # URL composed correctly: base_url + /chat/completions.
     assert http.last_call["url"].endswith("/chat/completions")
     # Response text reached the ToolResponse.
-    texts = [b.get("text", "") for b in resp.content if b.get("type") == "text"]
+    texts = [
+        b.get("text", "") for b in resp.content if b.get("type") == "text"
+    ]
     assert any("video description text" in t for t in texts)
 
 
@@ -429,14 +512,26 @@ async def test_qwen_family_http_url_reaches_upstream_unchanged(
 
     import httpx as _real_httpx
 
-    with patch.object(vm, "_check_multimodal_support", return_value=False), \
-         patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
-         patch.object(
-             vm, "_resolve_fallback_video_model",
-             return_value=(fake, "bailian", "qwen3.6-plus"),
-         ), \
-         patch("qwenpaw.app.channels.media_utils.resolve_media_url", _passthrough), \
-         patch.object(_real_httpx, "AsyncClient", lambda *a, **kw: http):
+    with patch.object(
+        vm,
+        "_check_multimodal_support",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_probe_multimodal_if_needed",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_resolve_fallback_video_model",
+        return_value=(fake, "bailian", "qwen3.6-plus"),
+    ), patch(
+        "qwenpaw.app.channels.media_utils.resolve_media_url",
+        _passthrough,
+    ), patch.object(
+        _real_httpx,
+        "AsyncClient",
+        lambda *a, **kw: http,
+    ):
         await view_video("https://ex.com/clip.mp4", prompt="p")
 
     body = http.last_call["json"]
@@ -462,19 +557,30 @@ async def test_qwen_family_sign_failure_yields_generic_hint(
         # that as "can't send to cloud" and bails.
         return path
 
-    with patch.object(vm, "_check_multimodal_support", return_value=False), \
-         patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
-         patch.object(
-             vm, "_resolve_fallback_video_model",
-             return_value=(fake, "aliyun-codingplan", "qwen3.6-plus"),
-         ), \
-         patch("qwenpaw.app.channels.media_utils.resolve_media_url", _fake_sign):
+    with patch.object(
+        vm,
+        "_check_multimodal_support",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_probe_multimodal_if_needed",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_resolve_fallback_video_model",
+        return_value=(fake, "aliyun-codingplan", "qwen3.6-plus"),
+    ), patch(
+        "qwenpaw.app.channels.media_utils.resolve_media_url",
+        _fake_sign,
+    ):
         resp = await view_video(str(tmp_video))
 
     # Fallback NOT called (no messages recorded).
     assert fake.last_messages is None
     # Placeholder hint surfaces instead.
-    texts = [b.get("text", "") for b in resp.content if b.get("type") == "text"]
+    texts = [
+        b.get("text", "") for b in resp.content if b.get("type") == "text"
+    ]
     assert any("multimodal" in t.lower() for t in texts)
 
 
@@ -496,13 +602,22 @@ async def test_non_qwen_family_signs_then_passes_through_block(
         sign_called["n"] += 1
         return signed_url
 
-    with patch.object(vm, "_check_multimodal_support", return_value=False), \
-         patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
-         patch.object(
-             vm, "_resolve_fallback_video_model",
-             return_value=(fake, "deepseek", "deepseek-vl"),
-         ), \
-         patch("qwenpaw.app.channels.media_utils.resolve_media_url", _fake_sign):
+    with patch.object(
+        vm,
+        "_check_multimodal_support",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_probe_multimodal_if_needed",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_resolve_fallback_video_model",
+        return_value=(fake, "deepseek", "deepseek-vl"),
+    ), patch(
+        "qwenpaw.app.channels.media_utils.resolve_media_url",
+        _fake_sign,
+    ):
         await view_video(str(tmp_video))
 
     # Media server is asked to sign exactly once.
@@ -527,13 +642,22 @@ async def test_non_qwen_family_unreachable_signer_preserves_path(
     async def _passthrough(path: str):
         return path
 
-    with patch.object(vm, "_check_multimodal_support", return_value=False), \
-         patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
-         patch.object(
-             vm, "_resolve_fallback_video_model",
-             return_value=(fake, "gemini", "gemini-2.5-pro"),
-         ), \
-         patch("qwenpaw.app.channels.media_utils.resolve_media_url", _passthrough):
+    with patch.object(
+        vm,
+        "_check_multimodal_support",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_probe_multimodal_if_needed",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_resolve_fallback_video_model",
+        return_value=(fake, "gemini", "gemini-2.5-pro"),
+    ), patch(
+        "qwenpaw.app.channels.media_utils.resolve_media_url",
+        _passthrough,
+    ):
         await view_video(str(tmp_video))
 
     video_block = fake.last_messages[0]["content"][0]
@@ -554,7 +678,7 @@ class TestFormatRejectionDetection:
 
     def test_only_mp4_marker_matches(self):
         assert vm._is_format_rejection(
-            'invalid video format, only mp4/wmv/mov/avi are supported',
+            "invalid video format, only mp4/wmv/mov/avi are supported",
         )
 
     def test_other_400_does_not_match(self):
@@ -601,8 +725,12 @@ async def test_qwen_400_corrupted_triggers_transcode_then_retry(
     # Two responses: 400 corrupted, then 200 with text.
     rejection = _FakeHttpxResponse(
         status_code=400,
-        body={"error": {"message": "Multimodal data is corrupted "
-                                    "or cannot be processed."}},
+        body={
+            "error": {
+                "message": "Multimodal data is corrupted "
+                "or cannot be processed.",
+            },
+        },
     )
     rejection.text = (
         '{"error":{"message":"Multimodal data is corrupted '
@@ -611,9 +739,11 @@ async def test_qwen_400_corrupted_triggers_transcode_then_retry(
     success = _FakeHttpxResponse(
         status_code=200,
         body={
-            "choices": [{
-                "message": {"content": "After transcode: a cat yawns."},
-            }],
+            "choices": [
+                {
+                    "message": {"content": "After transcode: a cat yawns."},
+                },
+            ],
         },
     )
     fake_http = _SequencedFakeHttpxClient([rejection, success])
@@ -636,28 +766,41 @@ async def test_qwen_400_corrupted_triggers_transcode_then_retry(
         out = str(Path(path).with_name(Path(path).stem + ".h264.mp4"))
         return out
 
-    with patch.object(vm, "_check_multimodal_support", return_value=False), \
-         patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
-         patch.object(
-             vm, "_resolve_fallback_video_model",
-             return_value=(fake_chat, "mimo", "mimo-v2.5"),
-         ), \
-         patch.object(vm, "_transcode_to_h264_mp4", _fake_transcode), \
-         patch("qwenpaw.app.channels.media_utils.resolve_media_url", _fake_sign), \
-         patch("httpx.AsyncClient", return_value=fake_http):
+    with patch.object(
+        vm,
+        "_check_multimodal_support",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_probe_multimodal_if_needed",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_resolve_fallback_video_model",
+        return_value=(fake_chat, "mimo", "mimo-v2.5"),
+    ), patch.object(
+        vm,
+        "_transcode_to_h264_mp4",
+        _fake_transcode,
+    ), patch(
+        "qwenpaw.app.channels.media_utils.resolve_media_url",
+        _fake_sign,
+    ), patch(
+        "httpx.AsyncClient",
+        return_value=fake_http,
+    ):
         resp = await view_video(str(tmp_video))
 
     # Two POSTs: the rejected one and the retry.
-    assert len(fake_http.calls) == 2, (
-        f"expected 2 mimo POSTs, got {len(fake_http.calls)}"
-    )
+    assert (
+        len(fake_http.calls) == 2
+    ), f"expected 2 mimo POSTs, got {len(fake_http.calls)}"
     # Transcode fired exactly once with the local source.
     assert transcode_calls == [str(tmp_video)]
     # The second POST's video_url points at the *transcoded* file.
-    second_url = (
-        fake_http.calls[1]["json"]["messages"][0]["content"][0]
-        ["video_url"]["url"]
-    )
+    second_url = fake_http.calls[1]["json"]["messages"][0]["content"][0][
+        "video_url"
+    ]["url"]
     assert "h264.mp4" in second_url
     # Final text comes from the successful retry, not the rejection.
     text = "".join(
@@ -678,9 +821,7 @@ async def test_describe_video_via_fallback_skips_transcode_for_remote_source():
         status_code=400,
         body={"error": {"message": "Multimodal data is corrupted"}},
     )
-    rejection.text = (
-        '{"error":{"message":"Multimodal data is corrupted"}}'
-    )
+    rejection.text = '{"error":{"message":"Multimodal data is corrupted"}}'
     fake_http = _SequencedFakeHttpxClient([rejection])
     transcode_called = {"n": 0}
 
@@ -696,12 +837,14 @@ async def test_describe_video_via_fallback_skips_transcode_for_remote_source():
         "source": {"url": "https://example.com/video.mp4"},
     }
 
-    with patch.object(vm, "_transcode_to_h264_mp4", _fake_transcode), \
-         patch("qwenpaw.app.channels.media_utils.resolve_media_url",
-               _passthrough), \
-         patch("httpx.AsyncClient", return_value=fake_http):
+    with patch.object(vm, "_transcode_to_h264_mp4", _fake_transcode), patch(
+        "qwenpaw.app.channels.media_utils.resolve_media_url",
+        _passthrough,
+    ), patch("httpx.AsyncClient", return_value=fake_http):
         result = await vm._describe_video_via_fallback(
-            remote_block, "describe", (fake_chat, "mimo", "mimo-v2.5"),
+            remote_block,
+            "describe",
+            (fake_chat, "mimo", "mimo-v2.5"),
         )
 
     assert result is None
@@ -732,15 +875,29 @@ async def test_qwen_other_400_does_not_transcode(
     async def _fake_sign(path: str):
         return "https://media.example/sig"
 
-    with patch.object(vm, "_check_multimodal_support", return_value=False), \
-         patch.object(vm, "_probe_multimodal_if_needed", return_value=False), \
-         patch.object(
-             vm, "_resolve_fallback_video_model",
-             return_value=(fake_chat, "mimo", "mimo-v2.5"),
-         ), \
-         patch.object(vm, "_transcode_to_h264_mp4", _fake_transcode), \
-         patch("qwenpaw.app.channels.media_utils.resolve_media_url", _fake_sign), \
-         patch("httpx.AsyncClient", return_value=fake_http):
+    with patch.object(
+        vm,
+        "_check_multimodal_support",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_probe_multimodal_if_needed",
+        return_value=False,
+    ), patch.object(
+        vm,
+        "_resolve_fallback_video_model",
+        return_value=(fake_chat, "mimo", "mimo-v2.5"),
+    ), patch.object(
+        vm,
+        "_transcode_to_h264_mp4",
+        _fake_transcode,
+    ), patch(
+        "qwenpaw.app.channels.media_utils.resolve_media_url",
+        _fake_sign,
+    ), patch(
+        "httpx.AsyncClient",
+        return_value=fake_http,
+    ):
         await view_video(str(tmp_video))
 
     assert len(fake_http.calls) == 1
@@ -765,7 +922,9 @@ class TestTranscodeToH264Mp4:
         # tries to run it the test would still pass on systems with
         # ffmpeg installed but for the wrong reason.  Instead we
         # patch create_subprocess_exec to fail loudly so we'd notice.
-        with patch("asyncio.create_subprocess_exec",
-                   side_effect=AssertionError("ffmpeg should not run")):
+        with patch(
+            "asyncio.create_subprocess_exec",
+            side_effect=AssertionError("ffmpeg should not run"),
+        ):
             result = await vm._transcode_to_h264_mp4(str(src))
         assert result == str(out)

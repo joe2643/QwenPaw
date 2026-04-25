@@ -13,8 +13,7 @@ export interface SkillClawCaptureConfig {
 
 export const skillclawCaptureApi = {
   /** Read the active agent's SkillClaw capture config. */
-  getConfig: () =>
-    request<SkillClawCaptureConfig>("/config/skillclaw-capture"),
+  getConfig: () => request<SkillClawCaptureConfig>("/config/skillclaw-capture"),
 
   /** Save + hot-reload the active agent's SkillClaw capture config. */
   updateConfig: (data: Partial<SkillClawCaptureConfig>) =>

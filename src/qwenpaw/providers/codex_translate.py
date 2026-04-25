@@ -107,10 +107,12 @@ def content_to_responses_items(content: Any) -> list[dict]:
                 mime = source.get("media_type") or "image/png"
                 data = source.get("data", "")
                 if data:
-                    out.append({
-                        "type": "input_image",
-                        "image_url": f"data:{mime};base64,{data}",
-                    })
+                    out.append(
+                        {
+                            "type": "input_image",
+                            "image_url": f"data:{mime};base64,{data}",
+                        },
+                    )
             elif source.get("type") == "url":
                 u = source.get("url", "")
                 if u:
@@ -137,39 +139,48 @@ def convert_messages_to_responses_input(
             continue
 
         if role == "user":
-            items.append({
-                "type": "message",
-                "role": "user",
-                "content": content_to_responses_items(content),
-            })
+            items.append(
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": content_to_responses_items(content),
+                },
+            )
             continue
 
         if role == "assistant":
             text = content_to_plain_text(content)
             if text:
-                items.append({
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [
-                        {"type": "output_text", "text": text},
-                    ],
-                })
+                items.append(
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": text},
+                        ],
+                    },
+                )
             for tc in msg.get("tool_calls") or []:
                 fn = tc.get("function") or {}
-                items.append({
-                    "type": "function_call",
-                    "call_id": tc.get("id") or f"call_{uuid.uuid4().hex[:12]}",
-                    "name": fn.get("name", ""),
-                    "arguments": fn.get("arguments", "") or "",
-                })
+                items.append(
+                    {
+                        "type": "function_call",
+                        "call_id": tc.get("id")
+                        or f"call_{uuid.uuid4().hex[:12]}",
+                        "name": fn.get("name", ""),
+                        "arguments": fn.get("arguments", "") or "",
+                    },
+                )
             continue
 
         if role == "tool":
-            items.append({
-                "type": "function_call_output",
-                "call_id": msg.get("tool_call_id", ""),
-                "output": content_to_plain_text(content),
-            })
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": msg.get("tool_call_id", ""),
+                    "output": content_to_plain_text(content),
+                },
+            )
             continue
 
     instructions = "\n\n".join(p for p in instructions_parts if p.strip())
@@ -188,15 +199,19 @@ def convert_tools(tools: list[dict] | None) -> list[dict] | None:
             out.append(t)
             continue
         fn = t.get("function") or {}
-        out.append({
-            "type": "function",
-            "name": fn.get("name", ""),
-            "description": fn.get("description", ""),
-            "parameters": fn.get("parameters") or {
-                "type": "object", "properties": {},
+        out.append(
+            {
+                "type": "function",
+                "name": fn.get("name", ""),
+                "description": fn.get("description", ""),
+                "parameters": fn.get("parameters")
+                or {
+                    "type": "object",
+                    "properties": {},
+                },
+                "strict": False,
             },
-            "strict": False,
-        })
+        )
     return out
 
 
@@ -330,11 +345,13 @@ def _chat_chunk(
         "object": "chat.completion.chunk",
         "created": state.created,
         "model": state.model,
-        "choices": [{
-            "index": 0,
-            "delta": delta,
-            "finish_reason": finish_reason,
-        }],
+        "choices": [
+            {
+                "index": 0,
+                "delta": delta,
+                "finish_reason": finish_reason,
+            },
+        ],
     }
 
 
@@ -391,7 +408,9 @@ async def translate_responses_events_to_chat_chunks(
             if item_type == "function_call":
                 idx = len(state.tool_calls)
                 item_id = item.get("id", "")
-                call_id = item.get("call_id") or f"call_{uuid.uuid4().hex[:12]}"
+                call_id = (
+                    item.get("call_id") or f"call_{uuid.uuid4().hex[:12]}"
+                )
                 name = item.get("name", "")
                 state.tool_calls[idx] = {
                     "id": call_id,
@@ -400,14 +419,19 @@ async def translate_responses_events_to_chat_chunks(
                 }
                 if item_id:
                     state.item_id_to_index[item_id] = idx
-                yield _chat_chunk(state, {
-                    "tool_calls": [{
-                        "index": idx,
-                        "id": call_id,
-                        "type": "function",
-                        "function": {"name": name, "arguments": ""},
-                    }],
-                })
+                yield _chat_chunk(
+                    state,
+                    {
+                        "tool_calls": [
+                            {
+                                "index": idx,
+                                "id": call_id,
+                                "type": "function",
+                                "function": {"name": name, "arguments": ""},
+                            },
+                        ],
+                    },
+                )
             continue
 
         if ev_type == "response.output_item.done":
@@ -423,12 +447,17 @@ async def translate_responses_events_to_chat_chunks(
             delta_args = ev.get("delta", "") or ""
             state.tool_calls[idx]["args"] += delta_args
             if delta_args:
-                yield _chat_chunk(state, {
-                    "tool_calls": [{
-                        "index": idx,
-                        "function": {"arguments": delta_args},
-                    }],
-                })
+                yield _chat_chunk(
+                    state,
+                    {
+                        "tool_calls": [
+                            {
+                                "index": idx,
+                                "function": {"arguments": delta_args},
+                            },
+                        ],
+                    },
+                )
             continue
 
         if ev_type == "response.function_call_arguments.done":
@@ -443,9 +472,7 @@ async def translate_responses_events_to_chat_chunks(
                     (i.get("type") == "function_call")
                     for i in (resp.get("output") or [])
                 )
-                state.finish_reason = (
-                    "tool_calls" if has_tool_call else "stop"
-                )
+                state.finish_reason = "tool_calls" if has_tool_call else "stop"
             break
 
         if ev_type == "response.failed":
@@ -506,16 +533,18 @@ async def collect_as_chat_completion(
             if item_type == "function_call":
                 item_id = item.get("id", "")
                 idx = len(tool_calls)
-                tool_calls.append({
-                    "index": idx,
-                    "id": item.get("call_id")
-                    or f"call_{uuid.uuid4().hex[:12]}",
-                    "type": "function",
-                    "function": {
-                        "name": item.get("name", ""),
-                        "arguments": "",
+                tool_calls.append(
+                    {
+                        "index": idx,
+                        "id": item.get("call_id")
+                        or f"call_{uuid.uuid4().hex[:12]}",
+                        "type": "function",
+                        "function": {
+                            "name": item.get("name", ""),
+                            "arguments": "",
+                        },
                     },
-                })
+                )
                 state.item_id_to_index[item_id] = idx
             continue
 
@@ -527,9 +556,13 @@ async def collect_as_chat_completion(
             idx = state.item_id_to_index.get(ev.get("item_id", ""))
             if idx is None:
                 continue
-            tool_calls[idx]["function"]["arguments"] += ev.get(
-                "delta", "",
-            ) or ""
+            tool_calls[idx]["function"]["arguments"] += (
+                ev.get(
+                    "delta",
+                    "",
+                )
+                or ""
+            )
             continue
 
         if t == "response.completed":
@@ -539,9 +572,7 @@ async def collect_as_chat_completion(
                 (i.get("type") == "function_call")
                 for i in (resp.get("output") or [])
             )
-            state.finish_reason = (
-                "tool_calls" if has_tool_call else "stop"
-            )
+            state.finish_reason = "tool_calls" if has_tool_call else "stop"
             break
 
         if t == "response.failed":
@@ -567,11 +598,13 @@ async def collect_as_chat_completion(
         "object": "chat.completion",
         "created": state.created,
         "model": state.model,
-        "choices": [{
-            "index": 0,
-            "message": message,
-            "finish_reason": state.finish_reason or "stop",
-        }],
+        "choices": [
+            {
+                "index": 0,
+                "message": message,
+                "finish_reason": state.finish_reason or "stop",
+            },
+        ],
     }
     if state.final_usage:
         body["usage"] = {

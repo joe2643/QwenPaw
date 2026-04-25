@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Tests for BaseChannel shared helpers."""
 
 from qwenpaw.app.channels.base import BaseChannel
@@ -48,7 +49,10 @@ class TestExtractQueryFromPayload:
         c = _new_channel()
         payload = {
             "content_parts": [
-                {"type": "text", "text": "=== UNTRUSTED history ===\n=== end ==="},
+                {
+                    "type": "text",
+                    "text": "=== UNTRUSTED history ===\n=== end ===",
+                },
                 {"type": "text", "text": "[Replying to Bob: hey]"},
                 {"type": "text", "text": "/clear"},
             ],

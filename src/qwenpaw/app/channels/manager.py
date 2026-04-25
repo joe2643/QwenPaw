@@ -742,7 +742,8 @@ class ChannelManager:
                             f"Failed to stop old channel: "
                             f"{old_channel.channel}",
                         )
-                    self.channels.pop(old_index)
+                    if old_index is not None:
+                        self.channels.pop(old_index)
 
             if getattr(new_channel, "uses_manager_queue", True):
                 new_channel.set_enqueue(

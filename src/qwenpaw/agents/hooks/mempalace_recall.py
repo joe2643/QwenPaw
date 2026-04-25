@@ -61,7 +61,11 @@ class MemPalaceRecallHook:
         self.max_results = max_results
         self._seen_hashes: set[str] = set()
 
-    async def __call__(self, agent, kwargs: dict[str, Any]) -> dict[str, Any] | None:
+    async def __call__(
+        self,
+        agent,
+        kwargs: dict[str, Any],
+    ) -> dict[str, Any] | None:
         try:
             _mp_log("HOOK CALLED")
             messages = await agent.memory.get_memory()
@@ -76,7 +80,7 @@ class MemPalaceRecallHook:
                 role = getattr(msg, "role", None)
                 if role == "user":
                     last_user_text = _extract_text(
-                        getattr(msg, "content", "")
+                        getattr(msg, "content", ""),
                     ).strip()
                     last_user_msg = msg
                     break
@@ -94,7 +98,9 @@ class MemPalaceRecallHook:
                 _mp_log("SKIP: already injected")
                 return None
 
-            msg_hash = hashlib.md5(last_user_text[:200].encode()).hexdigest()[:12]
+            msg_hash = hashlib.md5(last_user_text[:200].encode()).hexdigest()[
+                :12
+            ]
             if msg_hash in self._seen_hashes:
                 _mp_log(f"SKIP: dedup hash={msg_hash}")
                 return None
@@ -102,12 +108,18 @@ class MemPalaceRecallHook:
             query = last_user_text[:200].strip()
             _mp_log(f"SEARCHING: query={query[:80]!r}")
 
-            result = mcp_call("mempalace_search", {
-                "query": query,
-                "limit": self.max_results * 2,  # over-fetch to compensate for wing_general filter
-            })
+            result = mcp_call(
+                "mempalace_search",
+                {
+                    "query": query,
+                    "limit": self.max_results
+                    * 2,  # over-fetch to compensate for wing_general filter
+                },
+            )
 
-            _mp_log(f"MCP result keys={list(result.keys()) if isinstance(result, dict) else type(result)}, preview={str(result)[:200]}")
+            _mp_log(
+                f"MCP result keys={list(result.keys()) if isinstance(result, dict) else type(result)}, preview={str(result)[:200]}",
+            )
 
             results_list = result.get("results", [])
             if not results_list:
@@ -126,7 +138,10 @@ class MemPalaceRecallHook:
                 # Skip wing_general — mostly unclassified raw messages
                 if item.get("wing") == "wing_general":
                     continue
-                content = item.get("content", item.get("text", item.get("document", "")))
+                content = item.get(
+                    "content",
+                    item.get("text", item.get("document", "")),
+                )
                 wing = item.get("wing", "?")
                 room = item.get("room", "?")
                 snippet = content.strip().replace("\n", " ")
@@ -140,20 +155,26 @@ class MemPalaceRecallHook:
                 included += 1
 
             if included == 0:
-                _mp_log(f"SKIP: {len(results_list)} results but all below similarity {MIN_SIMILARITY}")
+                _mp_log(
+                    f"SKIP: {len(results_list)} results but all below similarity {MIN_SIMILARITY}",
+                )
                 return None
 
             context_text = "\n".join(context_lines)
 
             from ..utils.message_processing import prepend_to_message_content
+
             prepend_to_message_content(last_user_msg, context_text)
 
             self._seen_hashes.add(msg_hash)
 
-            _mp_log(f"INJECTED {included} results (top_sim={results_list[0].get('similarity', 0):.2f}) for query={query[:60]!r}")
+            _mp_log(
+                f"INJECTED {included} results (top_sim={results_list[0].get('similarity', 0):.2f}) for query={query[:60]!r}",
+            )
             return None
 
         except Exception as e:
             import traceback
+
             _mp_log(f"ERROR: {e}\n{traceback.format_exc()}", "ERROR")
             return None

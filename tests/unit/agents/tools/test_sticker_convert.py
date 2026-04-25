@@ -19,23 +19,40 @@ def _png(path: Path, *, size=(1024, 1024), colour=(255, 0, 0, 255)) -> Path:
     return path
 
 
-def test_prepare_sticker_webp_outputs_512_square_webp(tmp_path) -> None:
+def test_prepare_sticker_webp_default_outputs_512_square_png(tmp_path) -> None:
+    """Default ``output_format="png"`` produces a 512×512 PNG.
+    PNG is what every Signal client renders correctly; user-uploaded
+    WebP triggers a voice-message rendering bug on Signal Android
+    (see sticker_convert module docstring)."""
     src = _png(tmp_path / "src.png", size=(800, 600))
     out = prepare_sticker_webp(src)
+    with Image.open(out) as im:
+        assert im.size == (512, 512)
+        assert im.format == "PNG"
+
+
+def test_prepare_sticker_webp_outputs_webp_when_requested(tmp_path) -> None:
+    """``output_format="webp"`` keeps WhatsApp's send-as-sticker
+    filename convention working for callers targeting that channel."""
+    src = _png(tmp_path / "src.png", size=(800, 600))
+    out = prepare_sticker_webp(src, output_format="webp")
     with Image.open(out) as im:
         assert im.size == (512, 512)
         assert im.format == "WEBP"
 
 
-def test_prepare_sticker_webp_default_output_path_is_sticker_webp(
+def test_prepare_sticker_webp_default_output_path_is_sticker_png(
     tmp_path,
 ) -> None:
-    """Default suffix must be ``.sticker.webp`` so WhatsApp's
-    filename-based send-as-sticker rule picks it up."""
+    """Default suffix is ``.sticker.png`` (Signal-friendly).  Only
+    ``output_format="webp"`` produces ``.sticker.webp`` for
+    WhatsApp's filename-based send-as-sticker rule."""
     src = _png(tmp_path / "pic.png")
     out = prepare_sticker_webp(src)
-    assert out.name == "pic.sticker.webp"
+    assert out.name == "pic.sticker.png"
     assert out.parent == src.parent
+    out_webp = prepare_sticker_webp(src, output_format="webp")
+    assert out_webp.name == "pic.sticker.webp"
 
 
 def test_prepare_sticker_webp_explicit_output_path(tmp_path) -> None:
@@ -107,12 +124,14 @@ def test_prepare_sticker_webp_raises_for_unreadable(tmp_path) -> None:
     src = tmp_path / "junk.png"
     src.write_bytes(b"not an image")
     from PIL import UnidentifiedImageError
+
     with pytest.raises(UnidentifiedImageError):
         prepare_sticker_webp(src)
 
 
 def test_prepare_sticker_webp_raises_conversion_error_when_oversize(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ) -> None:
     """Simulate the pathological case where even quality=35 stays
     above the 300 KB ceiling — must raise

@@ -85,7 +85,8 @@ _SIGNED_URL_RE = re.compile(
 
 
 def _prune_expired_signed_urls(
-    body: dict, now_ts: int | None = None,
+    body: dict,
+    now_ts: int | None = None,
 ) -> int:
     """In-place strip every ``input_image`` whose URL carries an
     expired ``exp=`` query param, replacing it with a text
@@ -95,6 +96,7 @@ def _prune_expired_signed_urls(
     dead.
     """
     import time
+
     cutoff = now_ts if now_ts is not None else int(time.time())
     pruned = 0
     placeholder = (
@@ -114,10 +116,12 @@ def _prune_expired_signed_urls(
             ):
                 m = _SIGNED_URL_RE.fullmatch(c["image_url"])
                 if m and int(m.group(1)) < cutoff:
-                    new_content.append({
-                        "type": "input_text",
-                        "text": placeholder,
-                    })
+                    new_content.append(
+                        {
+                            "type": "input_text",
+                            "text": placeholder,
+                        },
+                    )
                     pruned += 1
                     continue
             new_content.append(c)
@@ -126,7 +130,8 @@ def _prune_expired_signed_urls(
 
 
 def _strip_unfetchable_image_from_body(
-    body: dict, bad_url: str,
+    body: dict,
+    bad_url: str,
 ) -> bool:
     """Mutate ``body`` in place to remove every ``input_image`` item
     whose URL matches ``bad_url``.  Replaces each removed image with
@@ -255,14 +260,16 @@ class CodexOAuthChatModel(OpenAIChatModel):
                             _raise_for_upstream_status(upstream)
                         except httpx.HTTPStatusError as e:
                             err_body = (await upstream.aread()).decode(
-                                "utf-8", errors="replace",
+                                "utf-8",
+                                errors="replace",
                             )
                             bad_url = _extract_unfetchable_url(err_body)
                             if (
                                 attempts_left > 0
                                 and bad_url
                                 and _strip_unfetchable_image_from_body(
-                                    responses_body, bad_url,
+                                    responses_body,
+                                    bad_url,
                                 )
                             ):
                                 logger.warning(
@@ -283,7 +290,8 @@ class CodexOAuthChatModel(OpenAIChatModel):
                                 response=e.response,
                             ) from e
                         chat_body = await collect_as_chat_completion(
-                            upstream, state,
+                            upstream,
+                            state,
                         )
                         break
             return ChatCompletion.model_validate(chat_body)
@@ -390,7 +398,8 @@ class _CodexOAuthAsyncStream:
                     self._retry_attempts_left > 0
                     and bad_url
                     and _strip_unfetchable_image_from_body(
-                        self._upstream_body, bad_url,
+                        self._upstream_body,
+                        bad_url,
                     )
                 ):
                     self._retry_attempts_left -= 1
@@ -409,7 +418,8 @@ class _CodexOAuthAsyncStream:
                     response=response,
                 )
             self._iter = translate_responses_events_to_chat_chunks(
-                self._upstream, self._state,
+                self._upstream,
+                self._state,
             )
 
         assert self._iter is not None

@@ -71,10 +71,7 @@ CLAUDE_CLI_VERSION = "2.1.90"
 # CLI.  Missing either one → 401.  Other betas (interleaved-thinking,
 # prompt-caching-scope, context-management) are feature-gates we stay
 # out of unless a caller opts in.
-CLAUDE_BASE_BETAS = (
-    "claude-code-20250219,"
-    "oauth-2025-04-20"
-)
+CLAUDE_BASE_BETAS = "claude-code-20250219," "oauth-2025-04-20"
 
 # Refresh the access_token this many seconds BEFORE ``expiresAt`` so an
 # in-flight request never races the expiration edge.
@@ -141,7 +138,11 @@ class ClaudeAuth:
         access = oauth.get("accessToken")
         refresh = oauth.get("refreshToken")
         expires_at = oauth.get("expiresAt")
-        if not access or not refresh or not isinstance(expires_at, (int, float)):
+        if (
+            not access
+            or not refresh
+            or not isinstance(expires_at, (int, float))
+        ):
             raise ValueError(
                 f"Claude Code credentials file {self._path} is missing "
                 "accessToken / refreshToken / expiresAt under "
@@ -300,7 +301,11 @@ async def _smoke() -> None:
     creds = await auth.ensure_fresh()
     headers = await auth.auth_headers()
     masked = {
-        k: (v[:12] + "..." + v[-6:] if k == "Authorization" and len(v) > 30 else v)
+        k: (
+            v[:12] + "..." + v[-6:]
+            if k == "Authorization" and len(v) > 30
+            else v
+        )
         for k, v in headers.items()
     }
     print(f"credentials_path: {creds.credentials_path}")
@@ -311,6 +316,5 @@ async def _smoke() -> None:
 
 
 if __name__ == "__main__":
-    import asyncio
     logging.basicConfig(level=logging.INFO)
     asyncio.run(_smoke())

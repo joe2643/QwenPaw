@@ -112,7 +112,8 @@ def _assert_request_time_stripped(formatter_class) -> None:
     tr_output = normalized[2].content[0]["output"]
     if isinstance(tr_output, list):
         assert not any(
-            isinstance(o, dict) and o.get("type") in {"image", "video", "audio"}
+            isinstance(o, dict)
+            and o.get("type") in {"image", "video", "audio"}
             for o in tr_output
         )
     else:

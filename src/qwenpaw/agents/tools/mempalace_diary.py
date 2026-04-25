@@ -41,23 +41,33 @@ def mempalace_diary_write(
     """
     try:
         import sys
-        sys.path.insert(0, str(Path.home() / '.local' / 'lib' / 'python3.13' / 'site-packages'))
+
+        sys.path.insert(
+            0,
+            str(
+                Path.home()
+                / ".local"
+                / "lib"
+                / "python3.13"
+                / "site-packages",
+            ),
+        )
         from mempalace.chroma_helper import get_collection
         from mempalace.mcp_server import _config
-        
+
         # Determine wing (match official logic)
         if wing is None:
             wing = "agents"
-        
+
         room = agent_name.lower().replace(" ", "_")
         now = datetime.now()
-        
+
         # Get collection (with correct embedding)
         col = get_collection(palace_path=_config.palace_path)
-        
+
         # Create unique ID (match official format)
         entry_id = f"diary_{wing}_{now.strftime('%Y%m%d_%H%M%S')}_{hashlib.md5(entry[:50].encode()).hexdigest()[:8]}"
-        
+
         # Write to ChromaDB with full metadata
         col.add(
             ids=[entry_id],
@@ -73,12 +83,12 @@ def mempalace_diary_write(
                     "filed_at": now.isoformat(),
                     "date": now.strftime("%Y-%m-%d"),
                     "added_by": "mempalace_diary_write",
-                }
+                },
             ],
         )
-        
+
         logger.info(f"MemPalace Diary: {entry_id} → {wing}/diary/{topic}")
-        
+
         return {
             "success": True,
             "entry_id": entry_id,
@@ -87,7 +97,7 @@ def mempalace_diary_write(
             "wing": wing,
             "timestamp": now.isoformat(),
         }
-        
+
     except Exception as e:
         logger.error(f"Failed to write MemPalace diary: {e}")
         return {

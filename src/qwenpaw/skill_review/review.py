@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 # Data model
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class SkillProposal:
     name: str
@@ -73,8 +74,6 @@ def _load_user_context(workspace_dir: Path, max_chars: int = 2000) -> str:
     return text
 
 
-
-
 def _fetch_mempalace_context(wal_content: str, max_chars: int = 1500) -> str:
     """Query MemPalace for session-relevant context to inject into review prompt.
 
@@ -84,6 +83,7 @@ def _fetch_mempalace_context(wal_content: str, max_chars: int = 1500) -> str:
     try:
         # Import MemPalace searcher directly (same Python env, no HTTP needed)
         from mempalace.searcher import search_memories
+
         palace_path = str(Path.home() / ".mempalace" / "palace")
     except ImportError:
         return ""
@@ -177,6 +177,7 @@ Update 現有 skill（name 必須係 existing_skills 入面已有嘅）：
 # WAL reader
 # ---------------------------------------------------------------------------
 
+
 def _read_wal(workspace_dir: Path, max_entries: int = 200) -> str:
     """Read and format recent WAL entries for the review prompt."""
     wal_file = workspace_dir / ".session_wal.jsonl"
@@ -218,15 +219,19 @@ def _read_wal(workspace_dir: Path, max_entries: int = 200) -> str:
 # Skill listing (for dedup)
 # ---------------------------------------------------------------------------
 
+
 def _get_existing_skills(workspace_dir: Path) -> str:
     """Return a human-readable list of existing skill names + descriptions."""
     try:
         from qwenpaw.agents.skills_manager import SkillService
+
         svc = SkillService(workspace_dir)
         skills = svc.list_all_skills()
         if not skills:
             return "(no existing skills)"
-        return "\n".join(f"- {s.name}: {getattr(s, 'description', '')}" for s in skills)
+        return "\n".join(
+            f"- {s.name}: {getattr(s, 'description', '')}" for s in skills
+        )
     except Exception as e:
         logger.warning("Could not list skills: %s", e)
         return "(could not load existing skills)"
@@ -235,6 +240,7 @@ def _get_existing_skills(workspace_dir: Path) -> str:
 # ---------------------------------------------------------------------------
 # API config loader
 # ---------------------------------------------------------------------------
+
 
 def _load_api_config() -> tuple[str, str]:
     """Load and decrypt DashScope API key from bailian.json.
@@ -246,7 +252,9 @@ def _load_api_config() -> tuple[str, str]:
         FileNotFoundError: if bailian.json is missing
         ValueError: if api_key or base_url is empty after decryption
     """
-    secret_path = Path.home() / ".copaw.secret" / "providers" / "custom" / "bailian.json"
+    secret_path = (
+        Path.home() / ".copaw.secret" / "providers" / "custom" / "bailian.json"
+    )
     cfg = json.loads(secret_path.read_text())
     api_key = cfg.get("api_key", "")
     base_url = cfg.get("base_url", "").rstrip("/")
@@ -255,8 +263,10 @@ def _load_api_config() -> tuple[str, str]:
         # Try QwenPaw's decrypt() first (requires master key in keyring/file)
         try:
             import sys
+
             sys.path.insert(0, str(Path(__file__).parent.parent.parent))
             from qwenpaw.security.secret_store import decrypt
+
             api_key = decrypt(api_key)
         except Exception:
             pass
@@ -268,6 +278,7 @@ def _load_api_config() -> tuple[str, str]:
                 try:
                     import base64
                     from cryptography.fernet import Fernet
+
                     key_bytes = bytes.fromhex(key_file.read_text().strip())
                     fernet = Fernet(base64.urlsafe_b64encode(key_bytes))
                     api_key = fernet.decrypt(api_key[4:].encode()).decode()
@@ -275,7 +286,9 @@ def _load_api_config() -> tuple[str, str]:
                     raise ValueError(f"Cannot decrypt API key: {e}") from e
 
     if not api_key or api_key.startswith("ENC:"):
-        raise ValueError("api_key empty or still encrypted after decryption attempts")
+        raise ValueError(
+            "api_key empty or still encrypted after decryption attempts",
+        )
     if not base_url:
         raise ValueError("base_url missing in bailian.json")
 
@@ -286,9 +299,16 @@ def _load_api_config() -> tuple[str, str]:
 # LLM call
 # ---------------------------------------------------------------------------
 
-def _call_llm(prompt: str, api_key: str, base_url: str, timeout: int = 120) -> str:
+
+def _call_llm(
+    prompt: str,
+    api_key: str,
+    base_url: str,
+    timeout: int = 120,
+) -> str:
     """Call qwen3.6-plus with thinking enabled for higher-quality skill proposals."""
     import requests
+
     resp = requests.post(
         f"{base_url}/chat/completions",
         headers={
@@ -316,8 +336,12 @@ def _call_llm(prompt: str, api_key: str, base_url: str, timeout: int = 120) -> s
 # Notification
 # ---------------------------------------------------------------------------
 
+
 def _send_notification(
-    skill_name: str, description: str, agent: str, action: str = "create"
+    skill_name: str,
+    description: str,
+    agent: str,
+    action: str = "create",
 ) -> bool:
     """Push a Cantonese WhatsApp alert via `copaw channels send`.
 
@@ -339,34 +363,55 @@ def _send_notification(
             f"如果唔滿意，去 ~/.qwenpaw/workspaces/{agent}/skills.json 將 enabled 改做 false"
         )
     cmd = [
-        "qwenpaw", "channels", "send",
-        "--agent-id", agent,
-        "--channel", NOTIFICATION_CHANNEL,
-        "--target-user", NOTIFICATION_TARGET_USER,
-        "--target-session", NOTIFICATION_TARGET_SESSION,
-        "--text", message,
+        "qwenpaw",
+        "channels",
+        "send",
+        "--agent-id",
+        agent,
+        "--channel",
+        NOTIFICATION_CHANNEL,
+        "--target-user",
+        NOTIFICATION_TARGET_USER,
+        "--target-session",
+        NOTIFICATION_TARGET_SESSION,
+        "--text",
+        message,
     ]
     try:
-        result = subprocess.run(cmd, timeout=30, capture_output=True, text=True)
+        result = subprocess.run(
+            cmd,
+            timeout=30,
+            capture_output=True,
+            text=True,
+        )
         if result.returncode != 0:
             logger.warning(
                 "skill_review: notification failed (exit %d): %s",
-                result.returncode, result.stderr[:200],
+                result.returncode,
+                result.stderr[:200],
             )
             return False
         logger.info("skill_review: notification sent for '%s'", skill_name)
         return True
     except subprocess.TimeoutExpired:
-        logger.warning("skill_review: notification timed out for '%s'", skill_name)
+        logger.warning(
+            "skill_review: notification timed out for '%s'",
+            skill_name,
+        )
         return False
     except Exception as e:
-        logger.warning("skill_review: notification error for '%s': %s", skill_name, e)
+        logger.warning(
+            "skill_review: notification error for '%s': %s",
+            skill_name,
+            e,
+        )
         return False
 
 
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
+
 
 def run_once(
     agent_name: str,
@@ -388,8 +433,12 @@ def run_once(
         List of SkillProposal objects (empty if nothing worthy found).
     """
     workspace_dir = Path(workspace_dir).expanduser()
-    logger.info("skill_review start: agent=%s workspace=%s dry_run=%s",
-                agent_name, workspace_dir, dry_run)
+    logger.info(
+        "skill_review start: agent=%s workspace=%s dry_run=%s",
+        agent_name,
+        workspace_dir,
+        dry_run,
+    )
 
     # 1. Read WAL
     wal_content = _read_wal(workspace_dir)
@@ -403,16 +452,12 @@ def run_once(
     # 3. Build prompt
     # Load user profile context (fail-open)
     user_ctx = _load_user_context(workspace_dir)
-    user_context_block = (
-        f"## User Context\n{user_ctx}\n\n"
-        if user_ctx else ""
-    )
+    user_context_block = f"## User Context\n{user_ctx}\n\n" if user_ctx else ""
 
     # Load MemPalace context (fail-open)
     mem_ctx = _fetch_mempalace_context(wal_content)
     memory_context_block = (
-        f"## Related Memory (from MemPalace)\n{mem_ctx}\n\n"
-        if mem_ctx else ""
+        f"## Related Memory (from MemPalace)\n{mem_ctx}\n\n" if mem_ctx else ""
     )
 
     prompt = SKILL_REVIEW_PROMPT.format(
@@ -438,7 +483,11 @@ def run_once(
         logger.error("skill_review: LLM call failed: %s", e)
         return []
     elapsed = time.time() - t0
-    logger.info("skill_review: LLM done in %.1fs, response=%d chars", elapsed, len(response))
+    logger.info(
+        "skill_review: LLM done in %.1fs, response=%d chars",
+        elapsed,
+        len(response),
+    )
 
     # 6. Parse JSON response
     try:
@@ -451,7 +500,11 @@ def run_once(
             text = text.strip()
         result = json.loads(text)
     except Exception as e:
-        logger.error("skill_review: JSON parse failed: %s, preview=%r", e, response[:100])
+        logger.error(
+            "skill_review: JSON parse failed: %s, preview=%r",
+            e,
+            response[:100],
+        )
         return []
 
     if not result.get("propose", False):
@@ -466,13 +519,21 @@ def run_once(
     )
 
     if not proposal.name or not proposal.skill_md:
-        logger.warning("skill_review: proposal missing name or skill_md — skipping")
+        logger.warning(
+            "skill_review: proposal missing name or skill_md — skipping",
+        )
         return []
 
-    logger.info("skill_review: proposed '%s': %s", proposal.name, proposal.description)
+    logger.info(
+        "skill_review: proposed '%s': %s",
+        proposal.name,
+        proposal.description,
+    )
 
     if dry_run:
-        logger.info("skill_review: dry_run=True — skipping create_skill and notification")
+        logger.info(
+            "skill_review: dry_run=True — skipping create_skill and notification",
+        )
         return [proposal]
 
     # 7. Create or update skill.
@@ -483,7 +544,12 @@ def run_once(
     is_update = proposal.action == "update"
     try:
         from qwenpaw.agents.skills_manager import SkillService
+
         svc = SkillService(workspace_dir)
+        # pylint: disable=unexpected-keyword-arg
+        # ``overwrite`` is consumed by a SkillService variant in the
+        # downstream agentscope-runtime fork; static analysis doesn't
+        # see it on this clone's signature.
         created_name = svc.create_skill(
             name=proposal.name,
             content=proposal.skill_md,
@@ -493,7 +559,11 @@ def run_once(
         )
         if created_name:
             action_label = "updated" if is_update else "created (auto-enabled)"
-            logger.info("skill_review: %s skill '%s'", action_label, created_name)
+            logger.info(
+                "skill_review: %s skill '%s'",
+                action_label,
+                created_name,
+            )
         else:
             logger.info(
                 "skill_review: skill '%s' already exists — skipped (LLM should use action:update)",

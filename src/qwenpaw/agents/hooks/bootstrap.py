@@ -198,7 +198,8 @@ class BootstrapHook:
                 _ctx = getattr(agent, "_request_context", None) or {}
                 _sid = _ctx.get("session_id") or None
                 crash_report = SessionWAL.get_crash_report(
-                    self.working_dir, session_id=_sid,
+                    self.working_dir,
+                    session_id=_sid,
                 )
                 if crash_report:
                     logger.warning(f"WAL crash detected: {crash_report[:200]}")

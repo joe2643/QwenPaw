@@ -174,12 +174,14 @@ class SafeJSONSession(SessionBase):
         if os.path.exists(session_save_path):
             try:
                 import shutil
+
                 shutil.copy2(session_save_path, prev_path)
             except Exception as e:
                 logger.warning(
                     "save_session_state: failed to copy %s → .prev "
                     "(backup will be stale on next load): %s",
-                    session_save_path, e,
+                    session_save_path,
+                    e,
                 )
 
         # Step 3: atomic swap tmp → primary
@@ -215,17 +217,21 @@ class SafeJSONSession(SessionBase):
             return
         try:
             import shutil
+
             shutil.copy2(prev_path, session_save_path)
             logger.warning(
                 "Session file %s was missing; recovered from %s "
                 "— some tail turns since the last rotation may "
                 "be lost.",
-                session_save_path, prev_path,
+                session_save_path,
+                prev_path,
             )
         except Exception as e:
             logger.error(
                 "failed to recover %s from %s: %s",
-                session_save_path, prev_path, e,
+                session_save_path,
+                prev_path,
+                e,
             )
 
     async def load_session_state(
@@ -348,11 +354,13 @@ class SafeJSONSession(SessionBase):
         if os.path.exists(session_save_path):
             try:
                 import shutil
+
                 shutil.copy2(session_save_path, prev_path)
             except Exception as e:
                 logger.warning(
                     "update_session_state: failed to copy %s → .prev: %s",
-                    session_save_path, e,
+                    session_save_path,
+                    e,
                 )
 
         os.replace(tmp_path, session_save_path)

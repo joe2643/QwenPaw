@@ -23,12 +23,15 @@ async def test_load_missing_file_returns_empty_schema(tmp_path) -> None:
 
 
 async def test_upsert_pack_persists_and_stamps_times(tmp_path) -> None:
-    entry = await upsert_pack(tmp_path, {
-        "pack_id": "PACK1",
-        "pack_key": "KEY1",
-        "title": "Crabs",
-        "source": "uploaded",
-    })
+    entry = await upsert_pack(
+        tmp_path,
+        {
+            "pack_id": "PACK1",
+            "pack_key": "KEY1",
+            "title": "Crabs",
+            "source": "uploaded",
+        },
+    )
     # ``upsert_pack`` returns the persisted entry with time-stamps
     # layered in.
     assert entry["pack_id"] == "PACK1"
@@ -43,13 +46,21 @@ async def test_upsert_pack_persists_and_stamps_times(tmp_path) -> None:
 
 
 async def test_upsert_second_time_preserves_created_at(tmp_path) -> None:
-    first = await upsert_pack(tmp_path, {
-        "pack_id": "P", "title": "v1",
-    })
+    first = await upsert_pack(
+        tmp_path,
+        {
+            "pack_id": "P",
+            "title": "v1",
+        },
+    )
     await asyncio.sleep(1.01)  # seconds precision in iso timestamps
-    second = await upsert_pack(tmp_path, {
-        "pack_id": "P", "title": "v2",
-    })
+    second = await upsert_pack(
+        tmp_path,
+        {
+            "pack_id": "P",
+            "title": "v2",
+        },
+    )
     assert second["created_at"] == first["created_at"]
     assert second["updated_at"] > first["updated_at"]
     assert second["title"] == "v2"
@@ -90,6 +101,7 @@ async def test_get_pack_returns_copy_not_reference(tmp_path) -> None:
 async def test_concurrent_upserts_serialise(tmp_path) -> None:
     """Two upserts racing on the same pack_id must both land —
     asyncio.Lock serialises the read-modify-write."""
+
     async def _task(title):
         await upsert_pack(tmp_path, {"pack_id": "P", "title": title})
 
@@ -106,7 +118,10 @@ async def test_malformed_file_is_treated_as_empty(tmp_path) -> None:
     """A corrupted ``sticker_packs.json`` shouldn't blow up the
     tools — the next upsert silently rebuilds from scratch.
     Better UX than "tools all fail until you rm the file"."""
-    (tmp_path / "sticker_packs.json").write_text("{ not json", encoding="utf-8")
+    (tmp_path / "sticker_packs.json").write_text(
+        "{ not json",
+        encoding="utf-8",
+    )
     data = await load_registry(tmp_path)
     assert data == {"schema_version": 1, "packs": {}}
     # And a subsequent write recovers cleanly.

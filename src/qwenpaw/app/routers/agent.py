@@ -581,9 +581,7 @@ async def put_fallback_video_model(
     else:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "provider_id and model must both be set or both be null"
-            ),
+            detail=("provider_id and model must both be set or both be null"),
         )
 
     save_agent_config(workspace.agent_id, agent_config)

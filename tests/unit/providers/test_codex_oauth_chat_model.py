@@ -43,7 +43,10 @@ class _FakeAuth:
     ``auth_headers``, ``base_url``.
     """
 
-    def __init__(self, base_url: str = "https://chatgpt.com/backend-api") -> None:
+    def __init__(
+        self,
+        base_url: str = "https://chatgpt.com/backend-api",
+    ) -> None:
         self.base_url = base_url
         self.ensure_fresh_calls = 0
         self.auth_headers_calls = 0
@@ -91,7 +94,9 @@ class TestCodexOAuthChatModelInit:
         # anyway).
         auth = _FakeAuth()
         model = CodexOAuthChatModel(
-            auth=auth, model_name="gpt-5.4", api_key=None,
+            auth=auth,
+            model_name="gpt-5.4",
+            api_key=None,
         )
         # The sentinel is internal; what matters is construction
         # succeeded and the wrapper is installed.
@@ -100,7 +105,9 @@ class TestCodexOAuthChatModelInit:
     def test_seeds_api_key_sentinel_when_empty_string(self) -> None:
         auth = _FakeAuth()
         model = CodexOAuthChatModel(
-            auth=auth, model_name="gpt-5.4", api_key="",
+            auth=auth,
+            model_name="gpt-5.4",
+            api_key="",
         )
         assert callable(model.client.chat.completions.create)
 
@@ -111,7 +118,9 @@ class TestCodexOAuthChatModelInit:
         # error.
         auth = _FakeAuth()
         model = CodexOAuthChatModel(
-            auth=auth, model_name="gpt-5.4", api_key="sk-explicit",
+            auth=auth,
+            model_name="gpt-5.4",
+            api_key="sk-explicit",
         )
         assert callable(model.client.chat.completions.create)
 
@@ -175,7 +184,8 @@ class TestWrappedCreate:
         assert "stream_options" not in result._upstream_body
 
     def test_non_streaming_drains_upstream(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Pin httpx.AsyncClient → fake that yields a single
         # ``response.completed`` event with final content.
@@ -209,7 +219,8 @@ class TestWrappedCreate:
 
 class TestCodexOAuthAsyncStream:
     def test_yields_chat_completion_chunks(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         sse_body = (
             b"event: response.output_text.delta\n"
@@ -244,13 +255,16 @@ class TestCodexOAuthAsyncStream:
         assert adapter._iter is None
 
     def test_http_error_on_first_iteration_surfaces(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Upstream returns 401 → adapter must raise a clear
         # HTTPStatusError (callers up the stack rely on this to
         # distinguish auth problems from transport problems).
         _install_fake_httpx(
-            monkeypatch, status_code=401, body=b'{"error":"expired"}',
+            monkeypatch,
+            status_code=401,
+            body=b'{"error":"expired"}',
         )
 
         adapter = _CodexOAuthAsyncStream(
@@ -271,7 +285,8 @@ class TestCodexOAuthAsyncStream:
         assert adapter._client is None
 
     def test_aenter_aexit_contract(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Some callers wrap the adapter in ``async with`` — make sure
         # we don't blow up even if they never iterate.
@@ -339,7 +354,7 @@ class TestExtractUnfetchableUrl:
     def test_extracts_url_from_json_wrapped_error(self) -> None:
         body = (
             '{"error":{"message":"Error while downloading '
-            'https://media.example/m?sig=xyz. Upstream status '
+            "https://media.example/m?sig=xyz. Upstream status "
             'code: 403.","type":"invalid_request_error"}}'
         )
         url = _extract_unfetchable_url(body)
@@ -360,20 +375,27 @@ class TestExtractUnfetchableUrl:
 class TestStripUnfetchableImageFromBody:
     def test_strips_matching_image_url_and_returns_true(self) -> None:
         body = {
-            "input": [{
-                "type": "message",
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": "describe"},
-                    {"type": "input_image",
-                     "image_url": "https://x.example/a"},
-                    {"type": "input_image",
-                     "image_url": "https://x.example/b"},
-                ],
-            }],
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "describe"},
+                        {
+                            "type": "input_image",
+                            "image_url": "https://x.example/a",
+                        },
+                        {
+                            "type": "input_image",
+                            "image_url": "https://x.example/b",
+                        },
+                    ],
+                },
+            ],
         }
         stripped = _strip_unfetchable_image_from_body(
-            body, "https://x.example/a",
+            body,
+            "https://x.example/a",
         )
         assert stripped is True
         content = body["input"][0]["content"]
@@ -386,18 +408,23 @@ class TestStripUnfetchableImageFromBody:
 
     def test_no_match_returns_false_and_leaves_body_alone(self) -> None:
         body = {
-            "input": [{
-                "type": "message",
-                "role": "user",
-                "content": [
-                    {"type": "input_image",
-                     "image_url": "https://x.example/a"},
-                ],
-            }],
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "image_url": "https://x.example/a",
+                        },
+                    ],
+                },
+            ],
         }
         snapshot = json.loads(json.dumps(body))
         stripped = _strip_unfetchable_image_from_body(
-            body, "https://different.example/z",
+            body,
+            "https://different.example/z",
         )
         assert stripped is False
         assert body == snapshot
@@ -405,12 +432,20 @@ class TestStripUnfetchableImageFromBody:
     def test_strips_across_multiple_input_entries(self) -> None:
         body = {
             "input": [
-                {"type": "message", "role": "user", "content": [
-                    {"type": "input_image", "image_url": "https://bad"},
-                ]},
-                {"type": "message", "role": "user", "content": [
-                    {"type": "input_image", "image_url": "https://bad"},
-                ]},
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_image", "image_url": "https://bad"},
+                    ],
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_image", "image_url": "https://bad"},
+                    ],
+                },
             ],
         }
         assert _strip_unfetchable_image_from_body(body, "https://bad")
@@ -426,16 +461,23 @@ class TestPruneExpiredSignedUrls:
     def _signed(self, exp: int, sig: str = "deadbeef") -> str:
         # Mirrors media_server's URL shape closely enough for the
         # regex in _prune_expired_signed_urls to match.
-        return (
-            f"https://media.example/media?t=tok&exp={exp}&sig={sig}"
-        )
+        return f"https://media.example/media?t=tok&exp={exp}&sig={sig}"
 
     def test_prunes_single_expired_url(self) -> None:
-        body = {"input": [{
-            "type": "message", "role": "user", "content": [
-                {"type": "input_image", "image_url": self._signed(100)},
+        body = {
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "image_url": self._signed(100),
+                        },
+                    ],
+                },
             ],
-        }]}
+        }
         # ``now_ts`` past the URL's exp ⇒ pruned.
         pruned = _prune_expired_signed_urls(body, now_ts=200)
         assert pruned == 1
@@ -444,11 +486,20 @@ class TestPruneExpiredSignedUrls:
         assert "no longer fetchable" in c["text"]
 
     def test_keeps_unexpired_url(self) -> None:
-        body = {"input": [{
-            "type": "message", "role": "user", "content": [
-                {"type": "input_image", "image_url": self._signed(500)},
+        body = {
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "image_url": self._signed(500),
+                        },
+                    ],
+                },
             ],
-        }]}
+        }
         pruned = _prune_expired_signed_urls(body, now_ts=100)
         assert pruned == 0
         assert body["input"][0]["content"][0]["type"] == "input_image"
@@ -456,27 +507,45 @@ class TestPruneExpiredSignedUrls:
     def test_ignores_3rd_party_urls_with_exp_param(self) -> None:
         # Real third-party URL using an exp= query param but
         # without our HMAC sig= — must NOT match.
-        body = {"input": [{
-            "type": "message", "role": "user", "content": [
-                {"type": "input_image",
-                 "image_url": "https://other.example/x?exp=1&token=abc"},
+        body = {
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "image_url": "https://other.example/x?exp=1&token=abc",
+                        },
+                    ],
+                },
             ],
-        }]}
+        }
         pruned = _prune_expired_signed_urls(body, now_ts=10**9)
         assert pruned == 0
 
     def test_prunes_multiple_expired_in_one_pass(self) -> None:
-        body = {"input": [
-            {"type": "message", "role": "user", "content": [
-                {"type": "input_image", "image_url": self._signed(10)},
-                {"type": "input_image", "image_url": self._signed(20)},
-                {"type": "input_text", "text": "describe"},
-            ]},
-            {"type": "message", "role": "assistant", "content": []},
-            {"type": "message", "role": "user", "content": [
-                {"type": "input_image", "image_url": self._signed(30)},
-            ]},
-        ]}
+        body = {
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_image", "image_url": self._signed(10)},
+                        {"type": "input_image", "image_url": self._signed(20)},
+                        {"type": "input_text", "text": "describe"},
+                    ],
+                },
+                {"type": "message", "role": "assistant", "content": []},
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_image", "image_url": self._signed(30)},
+                    ],
+                },
+            ],
+        }
         pruned = _prune_expired_signed_urls(body, now_ts=100)
         assert pruned == 3
 
@@ -518,7 +587,8 @@ class TestReasoningEffortEndToEnd:
     """
 
     @pytest.mark.parametrize(
-        "effort", ["none", "low", "medium", "high", "xhigh"],
+        "effort",
+        ["none", "low", "medium", "high", "xhigh"],
     )
     def test_effort_reaches_upstream_body(
         self,
@@ -531,31 +601,44 @@ class TestReasoningEffortEndToEnd:
             def __init__(self) -> None:
                 self.status_code = 200
                 self.request = httpx.Request("POST", "https://example/fake")
+
             async def __aenter__(self) -> "_Stream":
                 return self
+
             async def __aexit__(self, *_exc: Any) -> None:
                 return None
+
             async def aiter_lines(self):
                 if False:
                     yield ""
+
             async def aread(self) -> bytes:
                 return b""
 
         class _FakeClient:
             def __init__(self, *_a: Any, **_kw: Any) -> None:
                 pass
+
             async def __aenter__(self) -> "_FakeClient":
                 return self
+
             async def __aexit__(self, *_exc: Any) -> None:
                 return None
+
             def stream(
-                self, method: str, url: str, *, json: dict, headers: dict,
+                self,
+                method: str,
+                url: str,
+                *,
+                json: dict,
+                headers: dict,
             ) -> _Stream:
                 captured["method"] = method
                 captured["url"] = url
                 captured["json"] = json
                 captured["headers"] = headers
                 return _Stream()
+
             async def aclose(self) -> None:
                 return None
 
@@ -595,7 +678,8 @@ class TestReasoningEffortEndToEnd:
         assert "stream_options" not in body
 
     def test_effort_omitted_defaults_to_low(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # When the user leaves the picker empty (no
         # ``reasoning_effort`` in generate_kwargs), the wrapper must
@@ -606,28 +690,41 @@ class TestReasoningEffortEndToEnd:
             def __init__(self) -> None:
                 self.status_code = 200
                 self.request = httpx.Request("POST", "https://example/fake")
+
             async def __aenter__(self) -> "_Stream":
                 return self
+
             async def __aexit__(self, *_exc: Any) -> None:
                 return None
+
             async def aiter_lines(self):
                 if False:
                     yield ""
+
             async def aread(self) -> bytes:
                 return b""
 
         class _FakeClient:
             def __init__(self, *_a: Any, **_kw: Any) -> None:
                 pass
+
             async def __aenter__(self) -> "_FakeClient":
                 return self
+
             async def __aexit__(self, *_exc: Any) -> None:
                 return None
+
             def stream(
-                self, method: str, url: str, *, json: dict, headers: dict,
+                self,
+                method: str,
+                url: str,
+                *,
+                json: dict,
+                headers: dict,
             ) -> _Stream:
                 captured["json"] = json
                 return _Stream()
+
             async def aclose(self) -> None:
                 return None
 
@@ -655,7 +752,8 @@ class TestReasoningEffortEndToEnd:
         assert captured["json"].get("reasoning") == {"effort": "low"}
 
     def test_subsequent_call_picks_up_new_effort(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Regression guard for a cache-the-kwargs bug — changing the
         # effort in the UI must affect the NEXT call, not just
@@ -666,28 +764,41 @@ class TestReasoningEffortEndToEnd:
             def __init__(self) -> None:
                 self.status_code = 200
                 self.request = httpx.Request("POST", "https://example/fake")
+
             async def __aenter__(self) -> "_Stream":
                 return self
+
             async def __aexit__(self, *_exc: Any) -> None:
                 return None
+
             async def aiter_lines(self):
                 if False:
                     yield ""
+
             async def aread(self) -> bytes:
                 return b""
 
         class _FakeClient:
             def __init__(self, *_a: Any, **_kw: Any) -> None:
                 pass
+
             async def __aenter__(self) -> "_FakeClient":
                 return self
+
             async def __aexit__(self, *_exc: Any) -> None:
                 return None
+
             def stream(
-                self, method: str, url: str, *, json: dict, headers: dict,
+                self,
+                method: str,
+                url: str,
+                *,
+                json: dict,
+                headers: dict,
             ) -> _Stream:
                 captured_bodies.append(json)
                 return _Stream()
+
             async def aclose(self) -> None:
                 return None
 
@@ -754,7 +865,8 @@ class TestClientVersion:
         )
 
     def test_env_override_takes_precedence(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Ops knob: flipping QWENPAW_CODEX_CLIENT_VERSION must
         # propagate without a code change.
@@ -762,6 +874,7 @@ class TestClientVersion:
         # Re-import with the new env visible.
         import importlib
         import qwenpaw.providers.codex_auth as ca
+
         importlib.reload(ca)
         try:
             assert ca.CODEX_CLIENT_VERSION == "9.9.9"
@@ -775,7 +888,8 @@ class TestListModels:
     sends the right params, and returns the ``models`` array."""
 
     def test_hits_codex_models_endpoint_with_client_version(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from qwenpaw.providers.codex_auth import CodexAuth
 
@@ -783,6 +897,7 @@ class TestListModels:
 
         class _Resp:
             status_code = 200
+
             def json(self) -> dict:
                 return {
                     "models": [
@@ -790,18 +905,25 @@ class TestListModels:
                         {"slug": "gpt-oss-120b", "visibility": "hide"},
                     ],
                 }
+
             def raise_for_status(self) -> None:
                 return None
 
         class _FakeClient:
             def __init__(self, *_a: Any, **_kw: Any) -> None:
                 pass
+
             async def __aenter__(self) -> "_FakeClient":
                 return self
+
             async def __aexit__(self, *_exc: Any) -> None:
                 return None
+
             async def get(
-                self, url: str, headers: dict, params: dict,
+                self,
+                url: str,
+                headers: dict,
+                params: dict,
             ) -> _Resp:
                 captured["url"] = url
                 captured["params"] = params
@@ -809,13 +931,16 @@ class TestListModels:
                 return _Resp()
 
         monkeypatch.setattr(
-            "qwenpaw.providers.codex_auth.httpx.AsyncClient", _FakeClient,
+            "qwenpaw.providers.codex_auth.httpx.AsyncClient",
+            _FakeClient,
         )
 
         auth = CodexAuth.__new__(CodexAuth)  # skip __init__
         auth._creds = None
+
         async def _fake_headers() -> dict:
             return {"Authorization": "Bearer x"}
+
         auth.auth_headers = _fake_headers  # type: ignore[attr-defined]
         type(auth).base_url = property(lambda _self: "https://fake/b")
 
@@ -836,7 +961,8 @@ class TestFetchModelsCodexOAuth:
     falls back to an empty list on errors."""
 
     def test_filters_hidden_models_and_keeps_listed(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from qwenpaw.providers.openai_provider import OpenAIProvider
 
@@ -853,7 +979,10 @@ class TestFetchModelsCodexOAuth:
 
         class _FakeAuthForDiscovery:
             async def list_models(
-                self, *, client_version: str = "x", timeout: float = 10,
+                self,
+                *,
+                client_version: str = "x",
+                timeout: float = 10,
             ) -> list[dict]:
                 return [
                     {
@@ -875,7 +1004,8 @@ class TestFetchModelsCodexOAuth:
                 ]
 
         monkeypatch.setattr(
-            provider, "_get_codex_oauth",
+            provider,
+            "_get_codex_oauth",
             lambda: _FakeAuthForDiscovery(),
         )
 
@@ -886,7 +1016,8 @@ class TestFetchModelsCodexOAuth:
         assert models[0].probe_source == "codex-oauth-catalog"
 
     def test_discovery_failure_returns_empty_not_raise(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Discovery is best-effort — the UI must keep the user's
         # previously-saved models when the network is down, not blank
@@ -906,12 +1037,17 @@ class TestFetchModelsCodexOAuth:
 
         class _BrokenAuth:
             async def list_models(
-                self, *, client_version: str = "x", timeout: float = 10,
+                self,
+                *,
+                client_version: str = "x",
+                timeout: float = 10,
             ) -> list[dict]:
                 raise httpx.ConnectError("backend down")
 
         monkeypatch.setattr(
-            provider, "_get_codex_oauth", lambda: _BrokenAuth(),
+            provider,
+            "_get_codex_oauth",
+            lambda: _BrokenAuth(),
         )
 
         models = asyncio.run(provider.fetch_models())
@@ -953,7 +1089,8 @@ def _install_fake_httpx(
 
         async def aiter_lines(self):
             for line in self._payload.decode(
-                "utf-8", errors="replace",
+                "utf-8",
+                errors="replace",
             ).splitlines():
                 yield line
 

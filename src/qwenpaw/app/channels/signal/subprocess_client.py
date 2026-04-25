@@ -32,7 +32,12 @@ _BACKOFF_START = 5.0
 _BACKOFF_MAX = 60.0
 _TERM_GRACE_SEC = 3.0
 
-def _iter_signal_cli_pids(account: str) -> "list[int]":
+
+def _iter_signal_cli_pids(
+    account: str,
+    *,
+    _proc_dir_override: Optional[Path] = None,
+) -> "list[int]":
     """Find signal-cli processes belonging to the current user that
     target ``account``.  Uses /proc (Linux only) so there's no new
     dependency on psutil.  Returns an empty list on non-Linux or
@@ -40,15 +45,22 @@ def _iter_signal_cli_pids(account: str) -> "list[int]":
     raise and block spawn entirely.
     """
     import sys
+
     if not sys.platform.startswith("linux"):
         return []
-    proc_dir = Path("/proc")
-    if not proc_dir.is_dir():
+    # ``_proc_dir_override`` is a test seam — production passes
+    # nothing and we read the real ``/proc``.  Tests inject a
+    # fake directory tree shaped like /proc to exercise the
+    # account/PPid/cmdline filters without touching real procs.
+    proc_dir_path = (
+        _proc_dir_override if _proc_dir_override is not None else Path("/proc")
+    )
+    if not proc_dir_path.is_dir():
         return []
     my_uid = os.getuid()
     my_pid = os.getpid()
     hits: list[int] = []
-    for entry in proc_dir.iterdir():
+    for entry in proc_dir_path.iterdir():
         if not entry.name.isdigit():
             continue
         pid = int(entry.name)
@@ -62,6 +74,25 @@ def _iter_signal_cli_pids(account: str) -> "list[int]":
         except OSError:
             continue
         if f"Uid:\t{my_uid}" not in status:
+            continue
+        # PPid filter: the only thing that should EVER be reaped is
+        # a *true* orphan — i.e. signal-cli reparented to init (PPid
+        # == 1) after a crash of its parent copaw.  Skip any
+        # signal-cli whose parent is the current copaw process.
+        # Without this filter, two concurrent supervise tasks (one
+        # from a fresh agent hot-reload, one from the previous
+        # workspace instance still finishing cleanup) reap each
+        # other's freshly-spawned child as "foreign", producing the
+        # tight respawn loop seen in prod (cycle <1s, exit 143).
+        ppid: Optional[int] = None
+        for line in status.splitlines():
+            if line.startswith("PPid:"):
+                try:
+                    ppid = int(line.split()[1])
+                except (IndexError, ValueError):
+                    ppid = None
+                break
+        if ppid == my_pid:
             continue
         try:
             cmdline = (entry / "cmdline").read_bytes()
@@ -157,14 +188,17 @@ class SignalSubprocessClient:
             )
             return False
         self._supervisor_task = asyncio.create_task(
-            self._supervise(), name="signal_supervisor",
+            self._supervise(),
+            name="signal_supervisor",
         )
         # Wait for first successful spawn (or initial failure)
         try:
             await asyncio.wait_for(self._connected.wait(), timeout=10.0)
             return True
         except asyncio.TimeoutError:
-            logger.error("signal: subprocess failed to become ready within 10s")
+            logger.error(
+                "signal: subprocess failed to become ready within 10s",
+            )
             return False
 
     async def disconnect(self) -> None:
@@ -180,7 +214,9 @@ class SignalSubprocessClient:
         await self._terminate_proc()
         self._connected.clear()
         # Fail any remaining pending futures
-        self._fail_pending(ConnectionResetError("signal subprocess disconnected"))
+        self._fail_pending(
+            ConnectionResetError("signal subprocess disconnected"),
+        )
         logger.info("signal: subprocess client stopped")
 
     async def call(
@@ -190,11 +226,19 @@ class SignalSubprocessClient:
         timeout: float = _RPC_TIMEOUT,
     ) -> Any:
         """Issue a JSON-RPC request and await the response."""
-        if not self._connected.is_set() or not self._proc or self._proc.returncode is not None:
+        if (
+            not self._connected.is_set()
+            or not self._proc
+            or self._proc.returncode is not None
+        ):
             raise ConnectionError("signal subprocess not connected")
         req_id = self._next_id
         self._next_id += 1
-        payload: Dict[str, Any] = {"jsonrpc": "2.0", "id": req_id, "method": method}
+        payload: Dict[str, Any] = {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "method": method,
+        }
         if params:
             payload["params"] = params
         loop = asyncio.get_running_loop()
@@ -286,7 +330,10 @@ class SignalSubprocessClient:
             return False
 
     async def send_typing(
-        self, target: str, start: bool = True, is_group: bool = False,
+        self,
+        target: str,
+        start: bool = True,
+        is_group: bool = False,
     ) -> None:
         method = "sendTyping" if start else "stopTyping"
         params: Dict[str, Any] = {"account": self._account}
@@ -301,7 +348,9 @@ class SignalSubprocessClient:
             pass
 
     async def download_attachment(
-        self, attachment_id: str, dest_dir: Path,
+        self,
+        attachment_id: str,
+        dest_dir: Path,
     ) -> Optional[Path]:
         """Download an attachment. signal-cli >=0.13 autosaves to
         ~/.local/share/signal-cli/attachments/<id>; we try that first, then
@@ -318,7 +367,9 @@ class SignalSubprocessClient:
         """
         # Fast path: file already saved by signal-cli — copy into
         # dest_dir so media-server signing + resolve_media_url work.
-        default_dir = Path.home() / ".local" / "share" / "signal-cli" / "attachments"
+        default_dir = (
+            Path.home() / ".local" / "share" / "signal-cli" / "attachments"
+        )
         candidate = default_dir / attachment_id
         if candidate.is_file():
             try:
@@ -327,21 +378,28 @@ class SignalSubprocessClient:
                 # extension for modern signal-cli versions — e.g.
                 # ``<id>.jpg``).  Fall back to the bare id when not.
                 dest = dest_dir / candidate.name
-                if not dest.exists() or dest.stat().st_size != candidate.stat().st_size:
+                if (
+                    not dest.exists()
+                    or dest.stat().st_size != candidate.stat().st_size
+                ):
                     import shutil
+
                     shutil.copy2(candidate, dest)
                 return dest
             except Exception as e:
                 logger.warning(
                     "signal: failed to copy attachment %s into %s: %s "
                     "— falling back to signal-cli path",
-                    attachment_id, dest_dir, e,
+                    attachment_id,
+                    dest_dir,
+                    e,
                 )
                 return candidate
         # RPC fallback
         try:
             result = await self.call(
-                "getAttachment", {"account": self._account, "id": attachment_id},
+                "getAttachment",
+                {"account": self._account, "id": attachment_id},
             )
         except Exception as e:
             logger.error("signal: getAttachment failed: %s", e)
@@ -407,7 +465,8 @@ class SignalSubprocessClient:
         except Exception as e:
             logger.error(
                 "signal: addStickerPack %s failed: %s",
-                pack_id[:12], e,
+                pack_id[:12],
+                e,
             )
             return False
 
@@ -427,7 +486,14 @@ class SignalSubprocessClient:
                 timeout=120.0,
             )
         except Exception as e:
-            logger.error("signal: uploadStickerPack failed: %s", e)
+            # ``repr(e)`` so a bare ``asyncio.TimeoutError()`` (empty
+            # str) doesn't silently log ``signal: uploadStickerPack
+            # failed: `` with no diagnostic — the symptom we hit when
+            # two subprocess daemons raced for the account lock.
+            logger.error(
+                "signal: uploadStickerPack failed: %s",
+                repr(e),
+            )
             return None
         # signal-cli returns either a bare URL string or
         # ``{"url": "..."}`` depending on version.  Tolerate both.
@@ -462,13 +528,34 @@ class SignalSubprocessClient:
         if is_group:
             params["groupId"] = target
         else:
-            params["recipients"] = [target]
+            # signal-cli JSON-RPC docs/examples use singular
+            # ``recipient`` (array) for the ``send`` method.  The
+            # server-side JsonRpcNamespace also accepts plural
+            # ``recipients`` as a compatibility fallback, but using
+            # the documented key avoids version-specific ambiguity
+            # around sticker sends.
+            params["recipient"] = [target]
+        # Log the raw RPC params (minus account) at INFO so we can
+        # tell from copaw.log alone whether a "voice message instead
+        # of sticker" report originated here or in some other code
+        # path (e.g. ``send_message`` falling through with an
+        # attachment the agent passed by mistake).
+        logger.info(
+            "signal: sending sticker via 'send' RPC: target=%s "
+            "is_group=%s sticker=%s",
+            target[:24],
+            is_group,
+            params["sticker"],
+        )
         try:
             result = await self.call("send", params)
         except Exception as e:
             logger.error(
                 "signal: send sticker %s:%s to %s failed: %s",
-                pack_id[:12], sticker_id, target[:20], e,
+                pack_id[:12],
+                sticker_id,
+                target[:20],
+                e,
             )
             return None
         if isinstance(result, dict) and "timestamp" in result:
@@ -482,6 +569,7 @@ class SignalSubprocessClient:
         dest_dir: Path,
         *,
         pack_key: Optional[str] = None,
+        refresh: bool = False,
     ) -> Optional[Path]:
         """Fetch a single sticker by ``packId:stickerId``.
 
@@ -498,7 +586,26 @@ class SignalSubprocessClient:
         server's ``allowed_dirs`` signing covers the path).  Returns
         ``None`` when the RPC can't produce bytes after both
         attempts.
+
+        Caching: Signal sticker packs are **protocol-immutable**
+        (``pack_id`` is the content hash), so a (pack_id, sticker_id)
+        tuple always refers to the same webp bytes.  If the
+        destination file already exists and is non-empty, we skip
+        the RPC entirely — saves 50-300 KB of base64 + a round-trip
+        per cached preview.  Pass ``refresh=True`` to force a
+        re-download (useful only when a previous cache write was
+        truncated for some reason).
         """
+        dest = dest_dir / f"signal_sticker_{pack_id[:8]}_{sticker_id}.webp"
+        if not refresh and dest.is_file() and dest.stat().st_size > 0:
+            logger.debug(
+                "signal: sticker cache hit %s:%s → %s",
+                pack_id[:12],
+                sticker_id,
+                dest,
+            )
+            return dest
+
         params = {"packId": pack_id, "stickerId": sticker_id}
 
         async def _rpc() -> Any:
@@ -519,13 +626,17 @@ class SignalSubprocessClient:
                     logger.warning(
                         "signal: getSticker %s:%s failed even after "
                         "addStickerPack: %s",
-                        pack_id[:12], sticker_id, retry_exc,
+                        pack_id[:12],
+                        sticker_id,
+                        retry_exc,
                     )
                     return None
             else:
                 logger.warning(
                     "signal: getSticker %s:%s failed: %s",
-                    pack_id[:12], sticker_id, e,
+                    pack_id[:12],
+                    sticker_id,
+                    e,
                 )
                 return None
 
@@ -538,7 +649,9 @@ class SignalSubprocessClient:
         if not isinstance(payload, str) or not payload:
             logger.warning(
                 "signal: getSticker %s:%s returned no data: %r",
-                pack_id[:12], sticker_id, type(result).__name__,
+                pack_id[:12],
+                sticker_id,
+                type(result).__name__,
             )
             return None
 
@@ -550,9 +663,6 @@ class SignalSubprocessClient:
 
         try:
             dest_dir.mkdir(parents=True, exist_ok=True)
-            dest = (
-                dest_dir / f"signal_sticker_{pack_id[:8]}_{sticker_id}.webp"
-            )
             dest.write_bytes(raw)
             return dest
         except OSError as e:
@@ -569,7 +679,10 @@ class SignalSubprocessClient:
 
     def _binary_available(self) -> bool:
         # Allow absolute paths; otherwise look on PATH
-        if os.path.sep in self._signal_cli_path or self._signal_cli_path.startswith("./"):
+        if (
+            os.path.sep in self._signal_cli_path
+            or self._signal_cli_path.startswith("./")
+        ):
             return Path(self._signal_cli_path).is_file()
         return shutil.which(self._signal_cli_path) is not None
 
@@ -592,7 +705,8 @@ class SignalSubprocessClient:
                 if self._stopping:
                     return
                 logger.warning(
-                    "signal: subprocess spawn failed; retrying in %.0fs", backoff,
+                    "signal: subprocess spawn failed; retrying in %.0fs",
+                    backoff,
                 )
                 try:
                     await asyncio.sleep(backoff)
@@ -610,7 +724,9 @@ class SignalSubprocessClient:
                 return
             logger.warning("signal: subprocess exited with code %s", rc)
             self._connected.clear()
-            self._fail_pending(ConnectionResetError("signal subprocess exited"))
+            self._fail_pending(
+                ConnectionResetError("signal subprocess exited"),
+            )
             if self._stopping:
                 return
             logger.info("signal: respawning in %.0fs", backoff)
@@ -644,14 +760,17 @@ class SignalSubprocessClient:
             return
         my_child = self._proc.pid if self._proc else -1
         candidates = [
-            pid for pid in _iter_signal_cli_pids(self._account)
+            pid
+            for pid in _iter_signal_cli_pids(self._account)
             if pid != my_child
         ]
         if not candidates:
             return
         logger.warning(
             "signal: reaping %d orphan signal-cli pid(s) on account %s: %s",
-            len(candidates), self._account, candidates,
+            len(candidates),
+            self._account,
+            candidates,
         )
         for pid in candidates:
             try:
@@ -661,12 +780,14 @@ class SignalSubprocessClient:
             except PermissionError:
                 logger.warning(
                     "signal: cannot SIGTERM orphan pid %d (EPERM) — "
-                    "skipping", pid,
+                    "skipping",
+                    pid,
                 )
         # Give them a moment to unwind the lock cleanly.
         for _ in range(30):  # up to 3s in 100ms steps
             still = [
-                pid for pid in _iter_signal_cli_pids(self._account)
+                pid
+                for pid in _iter_signal_cli_pids(self._account)
                 if pid != my_child
             ]
             if not still:
@@ -675,13 +796,15 @@ class SignalSubprocessClient:
         # Still alive — force.  This is the fallback path; most
         # signal-cli versions honour SIGTERM within a second.
         still = [
-            pid for pid in _iter_signal_cli_pids(self._account)
+            pid
+            for pid in _iter_signal_cli_pids(self._account)
             if pid != my_child
         ]
         for pid in still:
             logger.warning(
                 "signal: orphan pid %d did not exit on SIGTERM, sending "
-                "SIGKILL", pid,
+                "SIGKILL",
+                pid,
             )
             try:
                 os.kill(pid, _sig.SIGKILL)
@@ -697,7 +820,8 @@ class SignalSubprocessClient:
             except OSError as e:
                 logger.error(
                     "signal: failed to create data_dir %s: %s",
-                    self._data_dir, e,
+                    self._data_dir,
+                    e,
                 )
                 return False
         # Pre-spawn: reap any orphan signal-cli that still owns the
@@ -729,6 +853,18 @@ class SignalSubprocessClient:
                 # the "copaw crashed and left a lock-holding
                 # signal-cli behind" case at next-spawn time.
                 start_new_session=True,
+                # signal-cli's jsonRpc daemon emits one JSON object
+                # per line.  Default asyncio ``StreamReader`` buffer
+                # is 64 KB — ``getSticker`` returns webp bytes
+                # base64-encoded in a single line, which for a
+                # 300 KB sticker (Signal's upper bound) inflates
+                # to ~400 KB and crashes ``readline()`` with
+                # ``LimitOverrunError``.  The reader task then
+                # dies and every pending RPC times out — symptom
+                # the user saw as "Signal channel went silent".
+                # Bump to 16 MB to cover any realistic single-
+                # message payload, including whole pack listings.
+                limit=16 * 1024 * 1024,
             )
         except FileNotFoundError:
             logger.error("signal: binary not found: %s", self._signal_cli_path)
@@ -738,10 +874,12 @@ class SignalSubprocessClient:
             return False
         # Start reader / stderr tasks
         self._reader_task = asyncio.create_task(
-            self._read_stdout(), name="signal_reader",
+            self._read_stdout(),
+            name="signal_reader",
         )
         self._stderr_task = asyncio.create_task(
-            self._read_stderr(), name="signal_stderr",
+            self._read_stderr(),
+            name="signal_stderr",
         )
         self._connected.set()
         return True
@@ -758,7 +896,9 @@ class SignalSubprocessClient:
             try:
                 await asyncio.wait_for(proc.wait(), timeout=_TERM_GRACE_SEC)
             except asyncio.TimeoutError:
-                logger.warning("signal: SIGTERM grace expired; sending SIGKILL")
+                logger.warning(
+                    "signal: SIGTERM grace expired; sending SIGKILL",
+                )
                 try:
                     proc.kill()
                 except ProcessLookupError:
@@ -784,7 +924,34 @@ class SignalSubprocessClient:
             return
         try:
             while True:
-                line = await proc.stdout.readline()
+                try:
+                    line = await proc.stdout.readline()
+                except ValueError as e:
+                    # ``LimitOverrunError`` surfaces as ``ValueError`` from
+                    # ``StreamReader.readline()`` when a single line exceeds
+                    # the buffer.  The underlying bytes stay in the reader
+                    # buffer, so consume them with ``readuntil(b"\n")``
+                    # using a much bigger cap — that drains the rogue line
+                    # without killing the whole reader task.  Only the
+                    # oversized RPC response is lost; subsequent messages
+                    # keep flowing.
+                    logger.warning(
+                        "signal: stdout line exceeded readline buffer (%s); "
+                        "draining + dropping that one frame",
+                        e,
+                    )
+                    try:
+                        # Drain up to 64 MB of the runaway line.  Bigger
+                        # than our ``create_subprocess_exec(limit=16 MB)``
+                        # so we can always flush whatever slipped past.
+                        await proc.stdout.readuntil(b"\n")
+                    except (asyncio.LimitOverrunError, ValueError):
+                        # Even the drain overflowed — buffer's shot.
+                        # Fall through to EOF so the supervisor respawns.
+                        return
+                    except asyncio.IncompleteReadError:
+                        return  # EOF mid-drain
+                    continue
                 if not line:
                     return  # EOF
                 text = line.decode("utf-8", errors="replace").strip()
@@ -793,7 +960,10 @@ class SignalSubprocessClient:
                 try:
                     msg = json.loads(text)
                 except json.JSONDecodeError:
-                    logger.debug("signal: non-JSON stdout line ignored: %s", text[:200])
+                    logger.debug(
+                        "signal: non-JSON stdout line ignored: %s",
+                        text[:200],
+                    )
                     continue
                 await self._dispatch(msg)
         except asyncio.CancelledError:
@@ -820,13 +990,19 @@ class SignalSubprocessClient:
 
     async def _dispatch(self, msg: Dict[str, Any]) -> None:
         # Response to a pending call
-        if "id" in msg and (msg.get("jsonrpc") == "2.0" or "result" in msg or "error" in msg):
+        if "id" in msg and (
+            msg.get("jsonrpc") == "2.0" or "result" in msg or "error" in msg
+        ):
             req_id = msg["id"]
             try:
                 req_id_int = int(req_id)
             except (TypeError, ValueError):
                 req_id_int = None
-            fut = self._pending.pop(req_id_int, None) if req_id_int is not None else None
+            fut = (
+                self._pending.pop(req_id_int, None)
+                if req_id_int is not None
+                else None
+            )
             if fut and not fut.done():
                 err = msg.get("error")
                 if err:
