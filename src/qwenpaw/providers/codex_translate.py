@@ -295,6 +295,7 @@ class StreamState:
         "finish_reason",
         "emitted_role",
         "final_usage",
+        "active_item_type",
     )
 
     def __init__(self, model: str) -> None:
@@ -309,6 +310,13 @@ class StreamState:
         self.finish_reason: str | None = None
         self.emitted_role = False
         self.final_usage: dict[str, Any] | None = None
+        # Type of the currently-streaming output item ("message",
+        # "reasoning", "function_call", ...).  Tracked so we only
+        # forward text deltas that belong to a user-facing message
+        # — reasoning summary text emitted by Codex/gpt-5.x for
+        # OAuth users gets dropped instead of leaking to the
+        # downstream channel.
+        self.active_item_type: str | None = None
 
 
 def _chat_chunk(
@@ -358,17 +366,29 @@ async def translate_responses_events_to_chat_chunks(
 
         ev_type = ev.get("type", "")
 
-        # Text deltas
+        # Text deltas — only forward when the active item is a
+        # user-facing ``message``.  Without this gate, reasoning
+        # summary text emitted by Codex/gpt-5.x leaks straight to
+        # the downstream channel as if it were the assistant's
+        # reply (observed 2026-04-25: scratch-style fragments like
+        # "Need view_video maybe returns note?" surfaced in
+        # WhatsApp).  When ``active_item_type`` is None we fall
+        # back to forwarding so older models that omit the
+        # ``output_item.added`` envelope still work.
         if ev_type == "response.output_text.delta":
+            if state.active_item_type not in (None, "message"):
+                continue
             delta_text = ev.get("delta", "") or ""
             if delta_text:
                 yield _chat_chunk(state, {"content": delta_text})
             continue
 
-        # Tool-call item announced
+        # Item lifecycle
         if ev_type == "response.output_item.added":
             item = ev.get("item") or {}
-            if item.get("type") == "function_call":
+            item_type = item.get("type", "")
+            state.active_item_type = item_type
+            if item_type == "function_call":
                 idx = len(state.tool_calls)
                 item_id = item.get("id", "")
                 call_id = item.get("call_id") or f"call_{uuid.uuid4().hex[:12]}"
@@ -388,6 +408,10 @@ async def translate_responses_events_to_chat_chunks(
                         "function": {"name": name, "arguments": ""},
                     }],
                 })
+            continue
+
+        if ev_type == "response.output_item.done":
+            state.active_item_type = None
             continue
 
         # Tool-call argument deltas
@@ -466,13 +490,20 @@ async def collect_as_chat_completion(
 
         t = ev.get("type", "")
 
+        # Same active-item gate as the streaming path: skip text
+        # deltas that belong to a reasoning item so they never end
+        # up in the chat.completion ``content``.
         if t == "response.output_text.delta":
+            if state.active_item_type not in (None, "message"):
+                continue
             content_parts.append(ev.get("delta", "") or "")
             continue
 
         if t == "response.output_item.added":
             item = ev.get("item") or {}
-            if item.get("type") == "function_call":
+            item_type = item.get("type", "")
+            state.active_item_type = item_type
+            if item_type == "function_call":
                 item_id = item.get("id", "")
                 idx = len(tool_calls)
                 tool_calls.append({
@@ -486,6 +517,10 @@ async def collect_as_chat_completion(
                     },
                 })
                 state.item_id_to_index[item_id] = idx
+            continue
+
+        if t == "response.output_item.done":
+            state.active_item_type = None
             continue
 
         if t == "response.function_call_arguments.delta":

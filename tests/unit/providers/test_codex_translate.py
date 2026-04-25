@@ -503,6 +503,103 @@ class TestTranslateResponsesEvents:
         assert "hi" in contents
 
 
+class TestReasoningTextLeak:
+    """Codex/gpt-5.x for OAuth users emits the reasoning summary
+    inside the same ``response.output_text.delta`` event stream as
+    the user-facing reply.  Without an active-item gate those
+    fragments leaked straight into the assistant ``content`` and
+    surfaced in WhatsApp/Signal as scratch-style text.  These tests
+    pin down the gate."""
+
+    @pytest.mark.asyncio
+    async def test_reasoning_item_text_is_dropped_in_stream(self):
+        state = StreamState(model="gpt-5.5")
+        upstream = _FakeUpstream([
+            # Reasoning item announced first, its text deltas must
+            # not surface as ``content``.
+            _sse({
+                "type": "response.output_item.added",
+                "item": {"id": "rs_1", "type": "reasoning"},
+            }),
+            _sse({"type": "response.output_text.delta",
+                  "delta": "Need analyze new video."}),
+            _sse({"type": "response.output_text.delta",
+                  "delta": " Let's try maybe MIMO."}),
+            _sse({"type": "response.output_item.done"}),
+            # Then the real assistant message.
+            _sse({
+                "type": "response.output_item.added",
+                "item": {"id": "msg_1", "type": "message"},
+            }),
+            _sse({"type": "response.output_text.delta",
+                  "delta": "Hello user!"}),
+            _sse({"type": "response.output_item.done"}),
+            _sse({"type": "response.completed",
+                  "response": {"output": []}}),
+        ])
+        chunks = []
+        async for c in translate_responses_events_to_chat_chunks(
+            upstream, state,
+        ):
+            chunks.append(c)
+
+        # Concatenate every ``content`` delta — only the message
+        # text should be present.
+        text = "".join(
+            c["choices"][0]["delta"].get("content", "")
+            for c in chunks
+        )
+        assert text == "Hello user!"
+        assert "Need analyze" not in text
+        assert "MIMO" not in text
+
+    @pytest.mark.asyncio
+    async def test_reasoning_item_text_is_dropped_in_collect(self):
+        state = StreamState(model="gpt-5.5")
+        upstream = _FakeUpstream([
+            _sse({
+                "type": "response.output_item.added",
+                "item": {"id": "rs_1", "type": "reasoning"},
+            }),
+            _sse({"type": "response.output_text.delta",
+                  "delta": "scratch reasoning"}),
+            _sse({"type": "response.output_item.done"}),
+            _sse({
+                "type": "response.output_item.added",
+                "item": {"id": "msg_1", "type": "message"},
+            }),
+            _sse({"type": "response.output_text.delta",
+                  "delta": "user-facing"}),
+            _sse({"type": "response.output_item.done"}),
+            _sse({"type": "response.completed",
+                  "response": {"output": []}}),
+        ])
+        body = await collect_as_chat_completion(upstream, state)
+        msg = body["choices"][0]["message"]
+        assert msg["content"] == "user-facing"
+
+    @pytest.mark.asyncio
+    async def test_text_without_item_envelope_still_forwarded(self):
+        # Older models that omit ``output_item.added`` should keep
+        # working — the gate falls back to None == passthrough.
+        state = StreamState(model="gpt-5.4")
+        upstream = _FakeUpstream([
+            _sse({"type": "response.output_text.delta", "delta": "ok"}),
+            _sse({"type": "response.completed",
+                  "response": {"output": []}}),
+        ])
+        chunks = []
+        async for c in translate_responses_events_to_chat_chunks(
+            upstream, state,
+        ):
+            chunks.append(c)
+        text = "".join(
+            c["choices"][0]["delta"].get("content", "")
+            for c in chunks
+        )
+        assert text == "ok"
+
+
 # ---------------------------------------------------------------- #
 # Non-streaming drain                                              #
 # ---------------------------------------------------------------- #
