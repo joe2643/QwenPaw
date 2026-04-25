@@ -1692,6 +1692,20 @@ class SignalChannel(BaseChannel):
                 status = getattr(event, "status", None)
 
                 if obj == "message" and status == RunStatus.Completed:
+                    # Drop REASONING-type messages from the
+                    # channel send (Codex commentary, Claude
+                    # thinking, Qwen / Mimo / DeepSeek
+                    # ``reasoning_content``).  Console UI still
+                    # receives the SSE yield above for thinking-
+                    # pane rendering.
+                    from agentscope_runtime.engine.schemas.agent_schemas import (  # noqa: E501
+                        MessageType,
+                    )
+                    if (
+                        getattr(event, "type", None)
+                        == MessageType.REASONING
+                    ):
+                        continue
                     logger.info(
                         "signal: message_completed, sending to %s",
                         to_handle,

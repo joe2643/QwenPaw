@@ -2620,13 +2620,28 @@ class WhatsAppChannel(BaseChannel):
                 status = getattr(event, "status", None)
 
                 if obj == "message" and status == RunStatus.Completed:
-                    await self.on_event_message_completed(
-                        request,
-                        to_handle,
-                        event,
-                        send_meta,
+                    # ``MessageType.REASONING`` events carry the
+                    # model's thinking blocks (Codex commentary,
+                    # Claude ``<think>``, Qwen / Mimo /
+                    # DeepSeek ``reasoning_content``).  Console
+                    # UI still receives them via the SSE yield
+                    # above, but channels suppress so users don't
+                    # see scratch reasoning land alongside the
+                    # actual reply.
+                    from agentscope_runtime.engine.schemas.agent_schemas import (  # noqa: E501
+                        MessageType,
                     )
-                    message_completed = True
+                    if (
+                        getattr(event, "type", None)
+                        != MessageType.REASONING
+                    ):
+                        await self.on_event_message_completed(
+                            request,
+                            to_handle,
+                            event,
+                            send_meta,
+                        )
+                        message_completed = True
 
                 # Fallback text collection
                 for part in getattr(event, "content", []) or []:
