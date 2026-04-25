@@ -27,7 +27,17 @@ logger = logging.getLogger(__name__)
 _MEDIA_SERVER_URL_ENV = "QWENPAW_MEDIA_SERVER_URL"
 _MEDIA_SERVER_DEFAULT = "http://127.0.0.1:8089"
 _MEDIA_SECRET_ENV = "QWENPAW_MEDIA_SECRET"
-_DEFAULT_SIGN_TTL_S = 3600
+# Default sign TTL: 24 hours.  Signed URLs end up in the assistant's
+# conversation history, so any request that replays that history
+# (server-side stores like ChatGPT's Responses API, or our own re-
+# send paths) re-fetches the same URL on later turns.  A 1-hour TTL
+# was too short — Codex would 403 on URLs from earlier in the same
+# day's chat.  HMAC-protected, so longer expiry isn't a public
+# exposure: only callers with the URL can fetch.  Tunable via the
+# ``QWENPAW_MEDIA_TTL_S`` env var for tighter / looser policies.
+_DEFAULT_SIGN_TTL_S = int(
+    os.environ.get("QWENPAW_MEDIA_TTL_S") or "86400",
+)
 
 
 def _media_server_base() -> str:
