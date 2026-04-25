@@ -526,12 +526,21 @@ class BaseChannel(ABC):
                     ):
                         continue
                 if obj == "message" and status == RunStatus.Completed:
-                    await self.on_event_message_completed(
-                        request,
-                        to_handle,
-                        event,
-                        send_meta,
-                    )
+                    # Suppress preamble text from tool-using turns —
+                    # ``runner.utils`` promotes that text from
+                    # ``MESSAGE`` to ``REASONING`` so we can drop it
+                    # here without losing visibility on the Console
+                    # UI (the SSE ``yield`` above already shipped the
+                    # event upstream).  Final reply messages keep
+                    # ``MESSAGE`` and reach the channel as before.
+                    msg_type = getattr(event, "type", MessageType.MESSAGE)
+                    if msg_type != MessageType.REASONING:
+                        await self.on_event_message_completed(
+                            request,
+                            to_handle,
+                            event,
+                            send_meta,
+                        )
                 elif obj == "response":
                     last_response = event
                     await self.on_event_response(request, event)
@@ -903,12 +912,21 @@ class BaseChannel(ABC):
                     ):
                         continue
                 if obj == "message" and status == RunStatus.Completed:
-                    await self.on_event_message_completed(
-                        request,
-                        to_handle,
-                        event,
-                        send_meta,
-                    )
+                    # Suppress preamble text from tool-using turns —
+                    # ``runner.utils`` promotes that text from
+                    # ``MESSAGE`` to ``REASONING`` so we can drop it
+                    # here without losing visibility on the Console
+                    # UI (the SSE ``yield`` above already shipped the
+                    # event upstream).  Final reply messages keep
+                    # ``MESSAGE`` and reach the channel as before.
+                    msg_type = getattr(event, "type", MessageType.MESSAGE)
+                    if msg_type != MessageType.REASONING:
+                        await self.on_event_message_completed(
+                            request,
+                            to_handle,
+                            event,
+                            send_meta,
+                        )
                 elif obj == "response":
                     last_response = event
                     await self.on_event_response(request, event)

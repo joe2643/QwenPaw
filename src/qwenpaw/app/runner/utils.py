@@ -29,6 +29,42 @@ from ...config import load_config
 logger = logging.getLogger(__name__)
 
 
+def _active_provider_is_codex_oauth() -> bool:
+    """Return True when the current request's agent is wired to
+    the Codex OAuth provider.
+
+    Used by :func:`agentscope_msg_to_message` to scope its
+    "promote tool-use preamble to REASONING" behaviour: the
+    scratch-style preamble pattern is specific to gpt-5.x via
+    Codex OAuth and shouldn't change rendering for Claude or
+    Qwen-family agents (their preambles are intentional polite
+    acknowledgements that users want to see).
+
+    Best-effort: returns False on any lookup failure so we never
+    accidentally suppress channel output for an agent we can't
+    classify.
+    """
+    try:
+        # Local imports keep this module importable in test
+        # contexts that don't bring up the agent registry.
+        from ..agent_context import get_current_agent_id
+        from ...config.config import load_agent_config
+
+        agent_id = get_current_agent_id()
+        if not agent_id:
+            return False
+        agent_cfg = load_agent_config(agent_id)
+        active = getattr(agent_cfg, "active_model", None)
+        if active is None:
+            return False
+        return (
+            (getattr(active, "provider_id", "") or "").lower()
+            == "codex-oauth"
+        )
+    except Exception:
+        return False
+
+
 def build_env_context(
     session_id: Optional[str] = None,
     user_id: Optional[str] = None,
@@ -350,6 +386,36 @@ def agentscope_msg_to_message(
         current_message = None
         current_type = None
 
+        # Pre-scan: when the SAME assistant Msg carries both
+        # ``text`` and ``tool_use`` blocks, the text is preamble
+        # ("Need view_video maybe…", scratch-style planning that
+        # gpt-5.x sometimes emits before invoking a tool).  We
+        # promote that text from ``MESSAGE`` to ``REASONING`` so
+        # channels (WhatsApp / Signal / Telegram / etc) can
+        # suppress it as thinking, while the Console UI keeps
+        # rendering it because it consumes raw SSE events.
+        # Text that arrives *after* a tool_use in the same Msg —
+        # rare but possible — is treated as final reply text
+        # (kept as MESSAGE) by resetting the flag once we cross
+        # the tool_use boundary.
+        #
+        # Scoped to the ``codex-oauth`` provider only: Claude and
+        # Qwen-family models also emit "I'll check that" preambles
+        # before tool calls, but those are intentional polite
+        # acknowledgements that users want to see.  The scratch-
+        # style preamble is specific to gpt-5.x via the Codex OAuth
+        # path.  We re-evaluate the gate per-conversion (not
+        # per-process) so a runtime ``/model`` switch takes effect
+        # on the next inbound message.
+        msg_has_tool_use = any(
+            isinstance(b, dict) and b.get("type") == "tool_use"
+            for b in msg.content
+        )
+        promote_preamble = (
+            msg_has_tool_use and _active_provider_is_codex_oauth()
+        )
+        seen_tool_use = False
+
         for block in msg.content:
             if isinstance(block, dict):
                 btype = block.get("type", "text")
@@ -357,15 +423,24 @@ def agentscope_msg_to_message(
                 continue
 
             if btype == "text":
-                if current_type != MessageType.MESSAGE:
+                # Preamble = text BEFORE the first tool_use of a
+                # tool-using Msg, gated on codex-oauth (see comment
+                # above).  Final reply text (after a tool_use, or
+                # when the Msg has none) stays MESSAGE.
+                target_type = (
+                    MessageType.REASONING
+                    if (promote_preamble and not seen_tool_use)
+                    else MessageType.MESSAGE
+                )
+                if current_type != target_type:
                     if current_message:
                         results.append(current_message.completed())
                     current_message = Message(
-                        type=MessageType.MESSAGE,
+                        type=target_type,
                         role=role,
                     )
                     current_message.metadata = metadata
-                    current_type = MessageType.MESSAGE
+                    current_type = target_type
 
                 text_content = TextContent(
                     delta=False,
@@ -393,6 +468,7 @@ def agentscope_msg_to_message(
                 current_message.add_content(new_content=text_content)
 
             elif btype == "tool_use":
+                seen_tool_use = True
                 if current_message:
                     results.append(current_message.completed())
 
