@@ -552,6 +552,38 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
             except ImportError as e:
                 logger.warning(f"Session WAL hooks not available: {e}")
 
+        # SkillClaw session capture — port of the upstream proxy's
+        # record-writer into a ``pre_reasoning`` hook so evolve_server
+        # can feed on CoPaw sessions without us running the proxy.
+        sc_cfg = getattr(self._agent_config, "skillclaw_capture", None)
+        if sc_cfg and sc_cfg.enabled:
+            try:
+                from .hooks.skillclaw_capture import SkillClawCaptureHook
+                _sc_session_id = self._request_context.get(
+                    "session_id", "default",
+                )
+                sc_hook = SkillClawCaptureHook(
+                    records_dir=sc_cfg.records_dir,
+                    session_id=_sc_session_id,
+                    session_id_prefix=sc_cfg.session_id_prefix,
+                    mode=sc_cfg.mode,
+                    ingest_url=sc_cfg.ingest_url,
+                    ingest_api_key=sc_cfg.ingest_api_key,
+                )
+                self.register_instance_hook(
+                    hook_type="pre_reasoning",
+                    hook_name="skillclaw_capture",
+                    hook=sc_hook.__call__,
+                )
+                logger.info(
+                    "SkillClaw capture hook registered (session=%s, "
+                    "records=%s)",
+                    sc_hook._session_id,
+                    sc_hook._path,
+                )
+            except ImportError as e:
+                logger.warning("SkillClaw capture hook not available: %s", e)
+
     def rebuild_sys_prompt(self) -> None:
         """Rebuild and replace the system prompt.
 

@@ -1406,6 +1406,55 @@ async def update_mempalace_config(request: Request, body: dict = Body(...)):
     return new_cfg.model_dump()
 
 
+@router.get("/skillclaw-capture", tags=["config"])
+async def get_skillclaw_capture_config(request: Request):
+    """Return per-agent SkillClaw capture-hook configuration."""
+    from ..agent_context import get_current_agent_id
+    from qwenpaw.config.config import load_agent_config
+
+    agent_id = get_current_agent_id() or "default"
+    try:
+        cfg = load_agent_config(agent_id)
+        sc = getattr(cfg, "skillclaw_capture", None)
+        return sc.model_dump() if sc else {
+            "enabled": False,
+            "records_dir": "",
+            "session_id_prefix": "",
+        }
+    except Exception:
+        return {
+            "enabled": False,
+            "records_dir": "",
+            "session_id_prefix": "",
+        }
+
+
+@router.put("/skillclaw-capture", tags=["config"])
+async def update_skillclaw_capture_config(
+    request: Request, body: dict = Body(...),
+):
+    """Update SkillClaw capture-hook configuration for the active agent.
+    Triggers an async hot-reload so the running agent registers (or
+    drops) the hook on its next instantiation."""
+    from ..agent_context import get_current_agent_id
+    from qwenpaw.config.config import (
+        load_agent_config,
+        save_agent_config,
+        SkillClawCaptureConfig,
+    )
+
+    agent_id = get_current_agent_id() or "default"
+    try:
+        new_cfg = SkillClawCaptureConfig(**body)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    cfg = load_agent_config(agent_id)
+    cfg.skillclaw_capture = new_cfg
+    save_agent_config(agent_id, cfg)
+    schedule_agent_reload(request, agent_id)
+    return new_cfg.model_dump()
+
+
 # ── Signal link flow (signal-cli subprocess pairing) ──────────────────────
 # Ported from PR #3508 (feat/signal-channel) for testing on dev.
 

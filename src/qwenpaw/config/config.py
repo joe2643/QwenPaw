@@ -1087,6 +1087,77 @@ class MemPalaceHooksConfig(BaseModel):
     bg_save_on_new: bool = True
     session_wal: bool = True
     l2_recall: bool = True
+
+
+class SkillClawCaptureConfig(BaseModel):
+    """In-process SkillClaw session-capture configuration.
+
+    When enabled, a ``pre_reasoning`` hook publishes every turn to
+    SkillClaw in the schema its ``evolve_server`` summarizer expects —
+    bypassing the SkillClaw client proxy.  Two transports:
+
+    * ``mode="file"`` (default, no SkillClaw process required)
+      appends each record to ``{records_dir}/conversations.jsonl``.
+      Tightly couples us to SkillClaw's storage layout — any
+      upstream change to file location or schema can silently
+      break ingest.
+
+    * ``mode="http"`` POSTs to a SkillClaw server's
+      ``/v1/sessions/ingest`` endpoint.  Decouples us from internal
+      storage details — only the HTTP contract has to hold.  Allows
+      cross-host deployment (CoPaw and SkillClaw on different
+      machines).  Falls back to file mode on transport error so
+      capture is best-effort, not load-bearing on the agent loop.
+    """
+
+    enabled: bool = False
+    mode: Literal["file", "http"] = Field(
+        default="file",
+        description=(
+            "Transport for captured records.  'file' = local jsonl "
+            "append (no SkillClaw server needed).  'http' = POST to "
+            "a SkillClaw ingest endpoint (single API contract instead "
+            "of internal storage coupling)."
+        ),
+    )
+    records_dir: str = Field(
+        default="",
+        description=(
+            "(file mode) Where to append conversations.jsonl.  Empty "
+            "string resolves to ``~/.skillclaw/records`` to match the "
+            "SkillClaw proxy default, so evolve_server picks it up with "
+            "no extra config.  Also used as fallback path when http "
+            "mode fails."
+        ),
+    )
+    ingest_url: str = Field(
+        default="",
+        description=(
+            "(http mode) Full URL of SkillClaw's "
+            "``/v1/sessions/ingest`` endpoint, e.g. "
+            "``http://localhost:8787/v1/sessions/ingest``.  Empty in "
+            "file mode."
+        ),
+    )
+    ingest_api_key: str = Field(
+        default="",
+        description=(
+            "(http mode) Optional bearer token if the SkillClaw "
+            "server enforces auth.  Sent as ``Authorization: Bearer "
+            "<key>``."
+        ),
+    )
+    session_id_prefix: str = Field(
+        default="",
+        description=(
+            "Optional prefix tagged onto every captured session_id — "
+            "useful when multiple CoPaw agents share the same records "
+            "dir and you want evolve_server to be able to tell them "
+            "apart without touching the summarizer pipeline."
+        ),
+    )
+
+
 class PlanConfig(BaseModel):
     """Plan mode configuration (stored in agent.json)."""
 
@@ -1181,6 +1252,10 @@ class AgentProfileConfig(BaseModel):
     mempalace: MemPalaceHooksConfig = Field(
         default_factory=MemPalaceHooksConfig,
         description="MemPalace integration configuration",
+    )
+    skillclaw_capture: SkillClawCaptureConfig = Field(
+        default_factory=SkillClawCaptureConfig,
+        description="SkillClaw session-capture hook configuration",
     )
     acp: Optional[ACPConfig] = Field(
         default=None,
