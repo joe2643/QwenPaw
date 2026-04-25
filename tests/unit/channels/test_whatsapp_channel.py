@@ -1686,3 +1686,273 @@ class TestSendMediaStickerConvention:
         ch._client.send_sticker.assert_not_awaited()
         ch._client.send_image.assert_not_awaited()
 
+
+
+# ===================================================================
+# TestAlbumCollation — multi-image album buffer + flush
+# ===================================================================
+
+
+def _make_album_message(expected_images: int, expected_videos: int = 0,
+                        with_quote: bool = False):
+    """Build a fake WAMessage whose top-level field is ``albumMessage``.
+
+    When ``with_quote=True`` the album header carries a fake
+    contextInfo+quotedMessage so the buffer captures a reply block.
+    """
+    album = MagicMock()
+    album.expectedImageCount = expected_images
+    album.expectedVideoCount = expected_videos
+    if with_quote:
+        ctx = MagicMock()
+        ctx.HasField = lambda name: name == "quotedMessage"
+        ctx.participant = "alice@s.whatsapp.net"
+        ctx.stanzaId = "stanza_album_quote"
+        quoted = MagicMock()
+        quoted.conversation = "earlier reply target"
+        quoted.HasField = lambda name: False
+        ctx.quotedMessage = quoted
+        album.contextInfo = ctx
+    return _make_proto_message(albumMessage=album)
+
+
+def _make_image_child(caption: str = ""):
+    """Fake follow-up imageMessage child of an album.  Only the
+    ``imageMessage`` field is present so ``_extract_message_content``
+    builds a single ImageContent + optional text caption."""
+    img = MagicMock()
+    img.caption = caption
+    img.contextInfo = MagicMock()  # absent quotedMessage
+    img.contextInfo.HasField = lambda name: False
+    return _make_proto_message(imageMessage=img)
+
+
+async def _drive_inbound(channel, msg, msg_id="m1", sender="alice",
+                          chat="group@g.us", body="", parts=None,
+                          quote_parts=None, paths=None, is_group=True):
+    """Invoke the album collation gate the same way ``_on_message``
+    does.  Returns the gate's bool decision so tests can assert
+    'buffered vs fall-through'.  We bypass the rest of the
+    extraction pipeline to keep the surface narrow."""
+    return await channel._handle_album_inbound(
+        client=MagicMock(),
+        message=MagicMock(Info=MagicMock(ID=msg_id)),
+        msg=msg,
+        msg_id=msg_id,
+        sender_jid=sender,
+        chat_jid=chat,
+        is_group=is_group,
+        timestamp=0,
+        sender_str=sender,
+        chat_str=chat,
+        body=body,
+        content_parts=parts or [],
+        quote_parts=quote_parts or [],
+        media_local_paths=paths or [],
+    )
+
+
+@pytest.mark.asyncio
+class TestAlbumCollation:
+    """Three-image album: header + 3 children should flush exactly
+    once with all three images bundled into a single dispatch."""
+
+    async def test_header_alone_buffers_and_returns_true(self):
+        ch = _make_channel()
+        msg = _make_album_message(expected_images=3)
+        result = await _drive_inbound(ch, msg)
+        # Header buffered → caller should return early (True).
+        assert result is True
+        key = ("group@g.us", "alice")
+        assert key in ch._album_buffers
+        assert ch._album_buffers[key].expected == 3
+        assert len(ch._album_buffers[key].gathered_parts) == 0
+        # Cancel the timeout to avoid leaks during teardown.
+        ch._album_buffers[key].timeout_task.cancel()
+
+    async def test_complete_album_flushes_via_dispatch(self):
+        ch = _make_channel()
+        # Patch the dispatch helper so we can observe what got
+        # called without firing the rest of the pipeline.
+        ch._dispatch_inbound_message = AsyncMock()
+
+        # Header (3 images expected)
+        await _drive_inbound(ch, _make_album_message(3))
+        # 3 children
+        for i in range(3):
+            child = _make_image_child(caption=("hello" if i == 0 else ""))
+            buffered = await _drive_inbound(
+                ch, child, msg_id=f"c{i}",
+                parts=[ImageContent(
+                    type=ContentType.IMAGE,
+                    image_url=f"/tmp/img{i}.jpg",
+                )],
+                paths=[f"/tmp/img{i}.jpg"],
+                body=("hello" if i == 0 else ""),
+            )
+            assert buffered is True
+
+        # Dispatch fired exactly once with merged payload.
+        ch._dispatch_inbound_message.assert_awaited_once()
+        kwargs = ch._dispatch_inbound_message.await_args.kwargs
+        assert len(kwargs["content_parts"]) == 3
+        assert all(isinstance(p, ImageContent) for p in kwargs["content_parts"])
+        assert kwargs["media_local_paths"] == [
+            "/tmp/img0.jpg", "/tmp/img1.jpg", "/tmp/img2.jpg",
+        ]
+        assert "hello" in kwargs["body"]
+        # Buffer cleared after flush.
+        assert ("group@g.us", "alice") not in ch._album_buffers
+
+    async def test_album_with_reply_preserves_quote_on_flush(self):
+        ch = _make_channel()
+        ch._dispatch_inbound_message = AsyncMock()
+
+        # Header carries quote_parts (reply context).
+        quote = TextContent(
+            type=ContentType.TEXT,
+            text="=== UNTRUSTED reply-to ===\nFrom: bob",
+        )
+        await _drive_inbound(
+            ch, _make_album_message(2),
+            quote_parts=[quote],
+        )
+        # Two image children
+        for i in range(2):
+            await _drive_inbound(
+                ch, _make_image_child(),
+                msg_id=f"c{i}",
+                parts=[ImageContent(
+                    type=ContentType.IMAGE,
+                    image_url=f"/tmp/img{i}.jpg",
+                )],
+            )
+
+        kwargs = ch._dispatch_inbound_message.await_args.kwargs
+        # Quote prepended ahead of all images on the merged turn.
+        assert kwargs["content_parts"][0] is quote
+        assert all(
+            isinstance(p, ImageContent)
+            for p in kwargs["content_parts"][1:]
+        )
+
+    async def test_concurrent_albums_from_different_senders_isolated(self):
+        ch = _make_channel()
+        ch._dispatch_inbound_message = AsyncMock()
+
+        # Two albums interleaved from different senders
+        await _drive_inbound(ch, _make_album_message(2), sender="alice")
+        await _drive_inbound(ch, _make_album_message(2), sender="bob")
+        await _drive_inbound(
+            ch, _make_image_child(), sender="alice", msg_id="a1",
+            parts=[ImageContent(type=ContentType.IMAGE, image_url="/t/a1.jpg")],
+        )
+        await _drive_inbound(
+            ch, _make_image_child(), sender="bob", msg_id="b1",
+            parts=[ImageContent(type=ContentType.IMAGE, image_url="/t/b1.jpg")],
+        )
+        await _drive_inbound(
+            ch, _make_image_child(), sender="alice", msg_id="a2",
+            parts=[ImageContent(type=ContentType.IMAGE, image_url="/t/a2.jpg")],
+        )
+        # Alice's album now complete → first dispatch fires.
+        await _drive_inbound(
+            ch, _make_image_child(), sender="bob", msg_id="b2",
+            parts=[ImageContent(type=ContentType.IMAGE, image_url="/t/b2.jpg")],
+        )
+        # Bob's album now complete → second dispatch fires.
+
+        assert ch._dispatch_inbound_message.await_count == 2
+        # Inspect both calls — each only contains its own sender's images.
+        calls = [c.kwargs for c in ch._dispatch_inbound_message.await_args_list]
+        a_call = next(c for c in calls if c["sender_str"] == "alice")
+        b_call = next(c for c in calls if c["sender_str"] == "bob")
+        a_urls = [p.image_url for p in a_call["content_parts"]]
+        b_urls = [p.image_url for p in b_call["content_parts"]]
+        assert a_urls == ["/t/a1.jpg", "/t/a2.jpg"]
+        assert b_urls == ["/t/b1.jpg", "/t/b2.jpg"]
+
+    async def test_non_album_message_falls_through(self):
+        """Plain text from a sender with no open album buffer must
+        return False so normal dispatch proceeds."""
+        ch = _make_channel()
+        plain = _make_proto_message(conversation="hello")
+        result = await _drive_inbound(ch, plain)
+        assert result is False
+        assert not ch._album_buffers
+
+    async def test_text_during_open_album_falls_through(self):
+        """Pure text from a sender mid-album is user-initiated and
+        must not be swallowed as a child — text falls through to
+        normal dispatch even while the buffer is open."""
+        ch = _make_channel()
+        await _drive_inbound(ch, _make_album_message(3))  # buffer open
+        plain = _make_proto_message(conversation="oh wait nvm")
+        result = await _drive_inbound(
+            ch, plain,
+            parts=[TextContent(type=ContentType.TEXT, text="oh wait nvm")],
+        )
+        assert result is False
+        # Buffer untouched (still pending the 3 expected children).
+        key = ("group@g.us", "alice")
+        assert key in ch._album_buffers
+        ch._album_buffers[key].timeout_task.cancel()
+
+    async def test_timeout_flushes_partial_album(self):
+        """If only part of the album arrives before the timeout
+        fires, flush whatever we've collected — better partial
+        than a perpetually-stuck buffer."""
+        import asyncio as _asyncio
+        ch = _make_channel()
+        ch._dispatch_inbound_message = AsyncMock()
+        # Compress the timeout so the test runs fast.
+        ch._album_timeout_s = 0.1
+
+        await _drive_inbound(ch, _make_album_message(3))
+        # Only one child arrives.
+        await _drive_inbound(
+            ch, _make_image_child(), msg_id="c0",
+            parts=[ImageContent(
+                type=ContentType.IMAGE, image_url="/tmp/i0.jpg",
+            )],
+        )
+        # Wait past the timeout to let the flush task run.
+        await _asyncio.sleep(0.3)
+
+        ch._dispatch_inbound_message.assert_awaited_once()
+        kwargs = ch._dispatch_inbound_message.await_args.kwargs
+        # Partial flush — only the one image we managed to capture.
+        assert len(kwargs["content_parts"]) == 1
+        assert ("group@g.us", "alice") not in ch._album_buffers
+
+    async def test_new_album_replaces_pending_one(self):
+        """A fresh album header from the same sender before the
+        previous album finished cancels the old buffer (the only
+        sane interpretation: the previous send was lost / aborted)."""
+        import asyncio as _asyncio
+        ch = _make_channel()
+        ch._dispatch_inbound_message = AsyncMock()
+
+        await _drive_inbound(ch, _make_album_message(3))
+        first = ch._album_buffers[("group@g.us", "alice")]
+        await _drive_inbound(ch, _make_album_message(2))
+        second = ch._album_buffers[("group@g.us", "alice")]
+
+        # Yield once so the cancelled task transitions out of the
+        # "cancelling" intermediate state into ``cancelled()``.
+        await _asyncio.sleep(0)
+
+        assert first is not second
+        assert second.expected == 2
+        assert first.timeout_task.cancelled() or first.timeout_task.done()
+        second.timeout_task.cancel()
+
+    async def test_zero_count_album_falls_through(self):
+        """A degenerate album with no expected children isn't
+        worth buffering — fall through and let the normal
+        ``if not content_parts`` guard drop it."""
+        ch = _make_channel()
+        msg = _make_album_message(expected_images=0, expected_videos=0)
+        result = await _drive_inbound(ch, msg)
+        assert result is False
+        assert not ch._album_buffers

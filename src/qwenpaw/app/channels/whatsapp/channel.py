@@ -41,6 +41,75 @@ from ..base import (
 
 logger = logging.getLogger(__name__)
 
+
+class _WhatsAppAlbumBuffer:
+    """In-progress album collation state.
+
+    WhatsApp's album protocol delivers an ``albumMessage`` header
+    that announces ``expectedImageCount`` + ``expectedVideoCount``,
+    then the children arrive as independent
+    ``imageMessage`` / ``videoMessage`` payloads from the same
+    sender within roughly one second.  No formal album_id ties
+    children to the header — we collate on (chat, sender) plus a
+    short timeout.
+
+    The header's ``content_parts`` is empty (the album body itself
+    carries no media) but it can carry the reply context (quote
+    parts).  We stash everything on this buffer and flush when the
+    expected count is reached or the timer fires, whichever is
+    earlier — partial flushes are better than dropping a child if
+    one delivery is lost.
+    """
+
+    __slots__ = (
+        "header_msg_id",
+        "header_msg",
+        "header_timestamp",
+        "quote_parts",
+        "expected",
+        "gathered_parts",
+        "gathered_paths",
+        "gathered_body_parts",
+        "timeout_task",
+        "flushed",
+    )
+
+    def __init__(
+        self,
+        header_msg_id: str,
+        header_msg: Any,
+        header_timestamp: Any,
+        quote_parts: List[Any],
+        expected: int,
+    ) -> None:
+        self.header_msg_id = header_msg_id
+        self.header_msg = header_msg
+        self.header_timestamp = header_timestamp
+        self.quote_parts: List[Any] = quote_parts
+        self.expected: int = expected
+        self.gathered_parts: List[Any] = []
+        self.gathered_paths: List[str] = []
+        # Captions arrive on the children, not the album header —
+        # join them in arrival order so the agent sees the user's
+        # caption alongside the media.
+        self.gathered_body_parts: List[str] = []
+        self.timeout_task: Optional[asyncio.Task] = None
+        self.flushed: bool = False
+
+    def is_complete(self) -> bool:
+        """``True`` when the expected number of children have arrived
+        — ready for an immediate flush without waiting for timeout.
+        Counted by media parts (image / video) only; text-only parts
+        from a caption don't count toward the album quota."""
+        if self.expected <= 0:
+            return False
+        media_count = sum(
+            1 for p in self.gathered_parts
+            if isinstance(p, (ImageContent, VideoContent))
+        )
+        return media_count >= self.expected
+
+
 WHATSAPP_MAX_TEXT_LENGTH = 4096
 from ....constant import WORKING_DIR
 _MEDIA_DIR = WORKING_DIR / "media" / "whatsapp"
@@ -184,6 +253,26 @@ class WhatsAppChannel(BaseChannel):
         # paths back to the dispatch loop for group-history storage. Reset
         # at the top of each _extract_message_content call.
         self._last_extracted_media_paths: List[str] = []
+
+        # Album buffers: keyed by (chat_jid_str, sender_jid_str).
+        # WhatsApp encodes a multi-image / multi-video send as an
+        # ``albumMessage`` header (with ``expectedImageCount`` /
+        # ``expectedVideoCount``) followed by N independent
+        # ``imageMessage`` / ``videoMessage`` payloads from the same
+        # sender within ~1 s.  No formal album_id ties children to
+        # the header, so we collate by (sender, chat) plus a short
+        # timeout, dispatch one combined Msg to the agent instead of
+        # N fragmented turns + one silently-dropped header.
+        self._album_buffers: Dict[
+            tuple[str, str], "_WhatsAppAlbumBuffer",
+        ] = {}
+        # Time window after the album header during which arriving
+        # imageMessage/videoMessage from the same (sender, chat) are
+        # treated as album children.  WhatsApp normally delivers all
+        # children within < 1 s; 5 s gives plenty of slack for
+        # network jitter without risking accidental collation of a
+        # genuinely-fresh next message.
+        self._album_timeout_s: float = 5.0
 
         if self.enabled and not NEONIZE_AVAILABLE:
             logger.error("whatsapp: neonize not installed, channel disabled")
@@ -901,9 +990,87 @@ class WhatsAppChannel(BaseChannel):
             if quote_parts:
                 content_parts = quote_parts + content_parts
 
+            # Album collation hook ───────────────────────────────
+            # WhatsApp's multi-image / multi-video send arrives as
+            # (1) an ``albumMessage`` header with empty media body
+            # and (2) N independent ``imageMessage`` /
+            # ``videoMessage`` payloads from the same sender within
+            # ~1 s.  Collate them into a single user turn so the
+            # agent sees the album as one message rather than N
+            # fragmented turns + a silently-dropped header (the
+            # header has no media → ``content_parts`` empty → the
+            # check below would ``return`` on it).  See
+            # ``_handle_album_inbound`` for the buffer mechanics.
+            if await self._handle_album_inbound(
+                client=client,
+                message=message,
+                msg=msg,
+                msg_id=msg_id,
+                sender_jid=sender_jid,
+                chat_jid=chat_jid,
+                is_group=is_group,
+                timestamp=timestamp,
+                sender_str=sender_str,
+                chat_str=chat_str,
+                body=body,
+                content_parts=content_parts,
+                quote_parts=quote_parts,
+                media_local_paths=media_local_paths,
+            ):
+                # Buffered (header or pending child) — dispatch
+                # will fire from ``_flush_album`` when complete.
+                return
+
             if not content_parts:
                 return
 
+            await self._dispatch_inbound_message(
+                client=client,
+                message=message,
+                msg=msg,
+                msg_id=msg_id,
+                sender_jid=sender_jid,
+                chat_jid=chat_jid,
+                is_group=is_group,
+                timestamp=timestamp,
+                sender_str=sender_str,
+                chat_str=chat_str,
+                body=body,
+                content_parts=content_parts,
+                media_local_paths=media_local_paths,
+                info=info,
+            )
+
+        except Exception:
+            logger.exception("whatsapp: error processing message")
+
+    async def _dispatch_inbound_message(
+        self,
+        *,
+        client,
+        message,
+        msg,
+        msg_id: str,
+        sender_jid,
+        chat_jid,
+        is_group: bool,
+        timestamp: Any,
+        sender_str: str,
+        chat_str: str,
+        body: str,
+        content_parts: List[Any],
+        media_local_paths: List[str],
+        info,
+    ) -> None:
+        """Dispatch an inbound message that's already been
+        extracted, quote-merged, and (for albums) collated.
+
+        Pulled out of ``_on_message`` so the album-flush path can
+        reuse it after gathering N children — both code paths
+        share the access-control, mention-gate, group-history,
+        envelope, channel_meta, and queue-enqueue logic below.
+        """
+        try:
             # Access control (sync checks: group allowlist)
             if not self._check_access(is_group, chat_str, sender_str, sender_jid, client, msg, body):
                 return
@@ -1204,6 +1371,187 @@ class WhatsAppChannel(BaseChannel):
 
         except Exception:
             logger.exception("whatsapp: error processing message")
+
+    async def _handle_album_inbound(
+        self,
+        *,
+        client,
+        message,
+        msg,
+        msg_id: str,
+        sender_jid,
+        chat_jid,
+        is_group: bool,
+        timestamp: Any,
+        sender_str: str,
+        chat_str: str,
+        body: str,
+        content_parts: List[Any],
+        quote_parts: List[Any],
+        media_local_paths: List[str],
+    ) -> bool:
+        """Album-collation gate.  Returns ``True`` when the inbound
+        was buffered (album header or pending child) and the caller
+        should NOT continue with normal dispatch — the flush will
+        fire from ``_flush_album`` once all children arrive (or the
+        timeout fires).  Returns ``False`` for ordinary messages
+        that should fall through to normal dispatch.
+        """
+        key = (chat_str, sender_str)
+
+        # 1. Album header — start a buffer and arm the timeout.
+        if msg.HasField("albumMessage"):
+            album = msg.albumMessage
+            expected = (
+                int(getattr(album, "expectedImageCount", 0))
+                + int(getattr(album, "expectedVideoCount", 0))
+            )
+            # Empty album (no expected media) — nothing to wait
+            # for; let it fall through and get dropped by the
+            # ``if not content_parts`` guard.
+            if expected <= 0:
+                return False
+
+            # Cancel any prior buffer for the same key (a fresh
+            # album header before the previous one finished is a
+            # signal that the previous album was lost or aborted).
+            existing = self._album_buffers.pop(key, None)
+            if existing and existing.timeout_task and not existing.timeout_task.done():
+                existing.timeout_task.cancel()
+
+            buf = _WhatsAppAlbumBuffer(
+                header_msg_id=msg_id,
+                header_msg=message,
+                header_timestamp=timestamp,
+                quote_parts=list(quote_parts or []),
+                expected=expected,
+            )
+            self._album_buffers[key] = buf
+
+            async def _on_timeout(b: _WhatsAppAlbumBuffer = buf, k=key) -> None:
+                try:
+                    await asyncio.sleep(self._album_timeout_s)
+                    if (
+                        not b.flushed
+                        and self._album_buffers.get(k) is b
+                    ):
+                        logger.info(
+                            "whatsapp: album timeout (key=%s, gathered=%d/%d) "
+                            "— flushing partial",
+                            k, len(b.gathered_parts), b.expected,
+                        )
+                        await self._flush_album(
+                            buffer=b,
+                            client=client,
+                            chat_jid=chat_jid,
+                            sender_jid=sender_jid,
+                            is_group=is_group,
+                            sender_str=sender_str,
+                            chat_str=chat_str,
+                        )
+                except asyncio.CancelledError:
+                    pass
+
+            buf.timeout_task = asyncio.create_task(
+                _on_timeout(),
+                name=f"wa-album-flush-{chat_str}",
+            )
+            logger.info(
+                "whatsapp: album header buffered (key=%s, expected=%d, "
+                "has_quote=%s)",
+                key, expected, bool(quote_parts),
+            )
+            return True
+
+        # 2. Possible child of an in-flight album.
+        buf = self._album_buffers.get(key)
+        if buf is None or buf.flushed:
+            return False
+
+        # Only image/video parts count as album children.  Pure-
+        # text or audio messages from the same sender mid-album
+        # are user-initiated and shouldn't be silently swallowed
+        # — let them dispatch normally.
+        media_parts = [
+            p for p in content_parts
+            if isinstance(p, (ImageContent, VideoContent))
+        ]
+        if not media_parts:
+            return False
+
+        buf.gathered_parts.extend(media_parts)
+        buf.gathered_paths.extend(media_local_paths)
+        if body:
+            buf.gathered_body_parts.append(body)
+
+        if buf.is_complete():
+            if buf.timeout_task and not buf.timeout_task.done():
+                buf.timeout_task.cancel()
+            await self._flush_album(
+                buffer=buf,
+                client=client,
+                chat_jid=chat_jid,
+                sender_jid=sender_jid,
+                is_group=is_group,
+                sender_str=sender_str,
+                chat_str=chat_str,
+            )
+        return True
+
+    async def _flush_album(
+        self,
+        *,
+        buffer: "_WhatsAppAlbumBuffer",
+        client,
+        chat_jid,
+        sender_jid,
+        is_group: bool,
+        sender_str: str,
+        chat_str: str,
+    ) -> None:
+        """Emit one combined inbound for everything we've collected
+        so far on ``buffer`` and clear the buffer.  Idempotent: a
+        second call (e.g. timeout firing right after a count-driven
+        flush) is a no-op."""
+        if buffer.flushed:
+            return
+        buffer.flushed = True
+        # Drop the buffer from the dict so a follow-up media
+        # message starts a fresh, separate dispatch instead of
+        # being swallowed as a "child" of the just-flushed album.
+        key = (chat_str, sender_str)
+        if self._album_buffers.get(key) is buffer:
+            del self._album_buffers[key]
+
+        merged_body = " ".join(b for b in buffer.gathered_body_parts if b).strip()
+        merged_content = list(buffer.quote_parts) + list(buffer.gathered_parts)
+
+        # Header info objects for routing — info comes from the
+        # original albumMessage proto; sender/chat already passed
+        # in as args so we don't need to re-resolve.
+        header_message = buffer.header_msg
+        info = header_message.Info
+        try:
+            await self._dispatch_inbound_message(
+                client=client,
+                message=header_message,
+                msg=header_message.Message,
+                msg_id=buffer.header_msg_id,
+                sender_jid=sender_jid,
+                chat_jid=chat_jid,
+                is_group=is_group,
+                timestamp=buffer.header_timestamp,
+                sender_str=sender_str,
+                chat_str=chat_str,
+                body=merged_body,
+                content_parts=merged_content,
+                media_local_paths=buffer.gathered_paths,
+                info=info,
+            )
+        except Exception:
+            logger.exception(
+                "whatsapp: album flush dispatch failed (key=%s)", key,
+            )
 
     def _is_bot_mentioned(self, msg, body: str) -> bool:
         """Check if bot is mentioned in message or message is a reply to bot."""
