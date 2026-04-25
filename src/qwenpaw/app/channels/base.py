@@ -664,13 +664,19 @@ class BaseChannel(ABC):
                     last_response = event
                     await self.on_event_response(request, event)
                 else:
-                    # Anything else (function_call,
-                    # function_call_output, mcp, plan, etc.) means
-                    # the previous MESSAGE was preamble.  Yield its
-                    # SSE re-tagged as REASONING so the Console UI
-                    # can render it in its thinking pane, then drop
-                    # the channel-send.
-                    if pending_message_send is not None:
+                    # Only an OUTGOING tool *call* (not a tool
+                    # *output* / result) confirms the previous
+                    # MESSAGE was preamble.  Tool outputs may carry
+                    # a media-bearing MESSAGE synthesised by
+                    # ``runner.utils._build_media_message_from_block``
+                    # — dropping that as preamble would silently
+                    # eat the user's image / sticker / video.
+                    is_tool_call = msg_type in (
+                        "function_call",
+                        "plugin_call",
+                        "mcp_call",
+                    )
+                    if pending_message_send is not None and is_tool_call:
                         prior_event, _ = pending_message_send
                         yield _yield_sse_as_reasoning(prior_event)
                         logger.info(

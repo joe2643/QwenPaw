@@ -2725,11 +2725,25 @@ class WhatsAppChannel(BaseChannel):
                         message_completed = True
                         pending_message_send = None
                 else:
-                    # Anything else (function_call,
-                    # function_call_output, mcp, plan...) →
-                    # previous MESSAGE was preamble.  Re-yield
-                    # SSE as REASONING so Console UI sees thinking.
-                    if pending_message_send is not None:
+                    # Only an OUTGOING tool *call* (not a tool
+                    # result) confirms that the previous MESSAGE
+                    # was preamble.  Tool *outputs* (PLUGIN_CALL_
+                    # OUTPUT, FUNCTION_CALL_OUTPUT, MCP_TOOL_CALL_
+                    # OUTPUT) come AFTER a tool finished — and
+                    # ``runner.utils._build_media_message_from_block``
+                    # synthesises a separate MESSAGE event for any
+                    # media inside the result (e.g. ``send_file_to_user``
+                    # returning an ImageBlock).  Treating that
+                    # output as "tool call follows" would silently
+                    # drop the media-bearing MESSAGE → user gets no
+                    # sticker / image even though the agent claims
+                    # success.  Bug observed 2026-04-25 22:16:57.
+                    is_tool_call = msg_type in (
+                        "function_call",
+                        "plugin_call",
+                        "mcp_call",
+                    )
+                    if pending_message_send is not None and is_tool_call:
                         prior_event, _ = pending_message_send
                         yield _retype_as_reasoning_sse(prior_event)
                         logger.info(

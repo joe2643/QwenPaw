@@ -1787,7 +1787,17 @@ class SignalChannel(BaseChannel):
                         message_completed = True
                         pending_message_send = None
                 else:
-                    if pending_message_send is not None:
+                    # Only outgoing tool *calls* signal preamble —
+                    # tool outputs come AFTER the call and may
+                    # carry a media-bearing MESSAGE that we MUST
+                    # NOT drop.  See WhatsApp channel for the
+                    # full rationale (same bug pattern).
+                    is_tool_call = msg_type in (
+                        "function_call",
+                        "plugin_call",
+                        "mcp_call",
+                    )
+                    if pending_message_send is not None and is_tool_call:
                         prior_event, _ = pending_message_send
                         yield _retype_as_reasoning_sse(prior_event)
                         logger.info(
