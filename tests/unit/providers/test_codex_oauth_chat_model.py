@@ -23,7 +23,9 @@ from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from qwenpaw.providers.codex_oauth_model import (
     CodexOAuthChatModel,
     _CodexOAuthAsyncStream,
+    _MAX_STRIP_RETRIES,
     _extract_unfetchable_url,
+    _prune_expired_signed_urls,
     _raise_for_upstream_status,
     _strip_unfetchable_image_from_body,
 )
@@ -414,6 +416,81 @@ class TestStripUnfetchableImageFromBody:
         assert _strip_unfetchable_image_from_body(body, "https://bad")
         for entry in body["input"]:
             assert entry["content"][0]["type"] == "input_text"
+
+
+class TestPruneExpiredSignedUrls:
+    """Pre-flight scrubbing of already-expired signed URLs.  Saves
+    a ChatGPT round-trip per dead URL when conversation history
+    has aged past TTL."""
+
+    def _signed(self, exp: int, sig: str = "deadbeef") -> str:
+        # Mirrors media_server's URL shape closely enough for the
+        # regex in _prune_expired_signed_urls to match.
+        return (
+            f"https://media.example/media?t=tok&exp={exp}&sig={sig}"
+        )
+
+    def test_prunes_single_expired_url(self) -> None:
+        body = {"input": [{
+            "type": "message", "role": "user", "content": [
+                {"type": "input_image", "image_url": self._signed(100)},
+            ],
+        }]}
+        # ``now_ts`` past the URL's exp ⇒ pruned.
+        pruned = _prune_expired_signed_urls(body, now_ts=200)
+        assert pruned == 1
+        c = body["input"][0]["content"][0]
+        assert c["type"] == "input_text"
+        assert "no longer fetchable" in c["text"]
+
+    def test_keeps_unexpired_url(self) -> None:
+        body = {"input": [{
+            "type": "message", "role": "user", "content": [
+                {"type": "input_image", "image_url": self._signed(500)},
+            ],
+        }]}
+        pruned = _prune_expired_signed_urls(body, now_ts=100)
+        assert pruned == 0
+        assert body["input"][0]["content"][0]["type"] == "input_image"
+
+    def test_ignores_3rd_party_urls_with_exp_param(self) -> None:
+        # Real third-party URL using an exp= query param but
+        # without our HMAC sig= — must NOT match.
+        body = {"input": [{
+            "type": "message", "role": "user", "content": [
+                {"type": "input_image",
+                 "image_url": "https://other.example/x?exp=1&token=abc"},
+            ],
+        }]}
+        pruned = _prune_expired_signed_urls(body, now_ts=10**9)
+        assert pruned == 0
+
+    def test_prunes_multiple_expired_in_one_pass(self) -> None:
+        body = {"input": [
+            {"type": "message", "role": "user", "content": [
+                {"type": "input_image", "image_url": self._signed(10)},
+                {"type": "input_image", "image_url": self._signed(20)},
+                {"type": "input_text", "text": "describe"},
+            ]},
+            {"type": "message", "role": "assistant", "content": []},
+            {"type": "message", "role": "user", "content": [
+                {"type": "input_image", "image_url": self._signed(30)},
+            ]},
+        ]}
+        pruned = _prune_expired_signed_urls(body, now_ts=100)
+        assert pruned == 3
+
+
+class TestMaxStripRetries:
+    """Sanity: the cap must be high enough for realistic
+    multi-image turns but bounded so a misclassified failure
+    can't loop forever."""
+
+    def test_cap_is_at_least_three(self) -> None:
+        assert _MAX_STRIP_RETRIES >= 3
+
+    def test_cap_is_bounded(self) -> None:
+        assert _MAX_STRIP_RETRIES <= 10
 
 
 # ---------------------------------------------------------------- #

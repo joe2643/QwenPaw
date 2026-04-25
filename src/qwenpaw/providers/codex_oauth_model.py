@@ -51,6 +51,15 @@ _UNFETCHABLE_URL_RE = re.compile(
     r"Error while downloading (https?://[^\s]+?)\. Upstream",
 )
 
+# Cap for the strip-and-retry loop — sized to cover the realistic
+# worst case of a long WhatsApp/Signal turn that included several
+# images whose signed URLs all aged past expiry, while still
+# bounding the total round-trip latency (~3-5s × N).  Beyond this
+# something is structurally wrong (model loop bug, all URLs
+# revoked, etc.) and we'd rather surface the original error than
+# pile up retries.
+_MAX_STRIP_RETRIES: int = 5
+
 
 def _extract_unfetchable_url(error_body: str) -> str | None:
     """Pull the failing image URL out of ChatGPT's 400 body, or
@@ -61,6 +70,59 @@ def _extract_unfetchable_url(error_body: str) -> str | None:
         return None
     m = _UNFETCHABLE_URL_RE.search(error_body)
     return m.group(1) if m else None
+
+
+# Detect signed URLs from our media server that are already past
+# their ``exp=`` timestamp at request time.  Cheaper than letting
+# ChatGPT round-trip and 400 — saves ~3s per stale URL.  Match
+# anchors on ``exp=<digits>&sig=<hex>`` because that combination
+# is unique to our HMAC signing scheme; we don't want to scrub
+# unrelated 3rd-party URLs that happen to carry an ``exp`` query
+# param.
+_SIGNED_URL_RE = re.compile(
+    r"https?://[^\s\"'<>]+?\?[^\s\"'<>]*?exp=(\d+)[^\s\"'<>]*?&sig=[0-9a-f]+",
+)
+
+
+def _prune_expired_signed_urls(
+    body: dict, now_ts: int | None = None,
+) -> int:
+    """In-place strip every ``input_image`` whose URL carries an
+    expired ``exp=`` query param, replacing it with a text
+    placeholder.  Returns the number of items pruned (zero on a
+    clean body).  Called once before the first POST so we don't
+    pay ChatGPT's ~3 s round-trip for URLs we already know are
+    dead.
+    """
+    import time
+    cutoff = now_ts if now_ts is not None else int(time.time())
+    pruned = 0
+    placeholder = (
+        "[image previously sent here is no longer fetchable; "
+        "ask the user to re-send if needed]"
+    )
+    for entry in body.get("input") or []:
+        content = entry.get("content")
+        if not isinstance(content, list):
+            continue
+        new_content: list[dict] = []
+        for c in content:
+            if (
+                isinstance(c, dict)
+                and c.get("type") == "input_image"
+                and isinstance(c.get("image_url"), str)
+            ):
+                m = _SIGNED_URL_RE.fullmatch(c["image_url"])
+                if m and int(m.group(1)) < cutoff:
+                    new_content.append({
+                        "type": "input_text",
+                        "text": placeholder,
+                    })
+                    pruned += 1
+                    continue
+            new_content.append(c)
+        entry["content"] = new_content
+    return pruned
 
 
 def _strip_unfetchable_image_from_body(
@@ -144,6 +206,20 @@ class CodexOAuthChatModel(OpenAIChatModel):
             call_kwargs.pop("stream_options", None)
 
             responses_body = build_responses_body(call_kwargs)
+            # Proactive sweep: drop already-expired signed URLs
+            # before the first POST so we don't burn a round-trip
+            # discovering they're dead.  The reactive strip-and-
+            # retry below still covers URLs that pass the cutoff
+            # but fail at fetch time (revoked keys, tunnel down,
+            # etc.) so this is purely a latency win, not a
+            # correctness fix.
+            pruned = _prune_expired_signed_urls(responses_body)
+            if pruned:
+                logger.info(
+                    "Codex: pruned %d expired signed URL(s) from "
+                    "request before POST",
+                    pruned,
+                )
             client_wants_stream = bool(call_kwargs.get("stream", False))
             state = StreamState(model=responses_body["model"])
 
@@ -156,12 +232,14 @@ class CodexOAuthChatModel(OpenAIChatModel):
                 )
 
             # Non-streaming: open the stream, drain it, close it.
-            # Retry once when ChatGPT bounces a request because it
-            # couldn't download an image URL we sent (most often a
-            # signed-URL TTL expiry from a stale conversation
-            # entry).  Strip the offending block, swap in a text
-            # placeholder, retry — preserves the rest of the turn.
-            attempts_left = 2
+            # Retry up to ``_MAX_STRIP_RETRIES`` times when ChatGPT
+            # bounces because it couldn't download an image URL —
+            # one stripped URL per attempt covers turns with
+            # several stale signed URLs (multi-image messages,
+            # long-history replays).  Strip the offending block,
+            # swap in a text placeholder, retry — preserves the
+            # rest of the turn.  +1 for the first (un-retried) try.
+            attempts_left = _MAX_STRIP_RETRIES + 1
             while True:
                 attempts_left -= 1
                 async with httpx.AsyncClient(
@@ -256,11 +334,13 @@ class _CodexOAuthAsyncStream:
         self._stream_ctx: Any = None
         self._upstream: httpx.Response | None = None
         self._iter: AsyncIterator[dict] | None = None
-        # Allow exactly one strip-and-retry on first open when ChatGPT
-        # 400s with "Error while downloading <url>".  Same fallback
-        # the non-streaming path uses; gate stays at one attempt to
-        # avoid retry storms when several URLs are stale.
-        self._retry_attempts_left: int = 1
+        # Allow up to ``_MAX_STRIP_RETRIES`` strip-and-retry attempts
+        # on first open when ChatGPT 400s with "Error while
+        # downloading <url>".  A turn can carry several stale URLs
+        # (multi-image messages, replays of long conversation
+        # history), so a single retry isn't enough; the cap guards
+        # against retry storms when something else is wrong.
+        self._retry_attempts_left: int = _MAX_STRIP_RETRIES
 
     def __aiter__(self) -> "_CodexOAuthAsyncStream":
         return self
