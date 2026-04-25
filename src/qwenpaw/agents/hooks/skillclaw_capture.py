@@ -58,6 +58,8 @@ class SkillClawCaptureHook:
         mode: Literal["file", "http"] = "file",
         ingest_url: str = "",
         ingest_api_key: str = "",
+        workspace_dir: str | Path = "",
+        channel_name: str = "all",
     ) -> None:
         resolved = Path(records_dir).expanduser() if records_dir else (
             Path.home() / ".skillclaw" / "records"
@@ -73,6 +75,16 @@ class SkillClawCaptureHook:
         self._mode = mode
         self._ingest_url = ingest_url
         self._ingest_api_key = ingest_api_key
+        # Skill attribution context — needed to populate
+        # ``injected_skills`` per turn so evolve_server's summarizer
+        # can compute ``_skills_referenced`` and run
+        # ``evolve_skill_from_sessions`` (otherwise sessions land in
+        # the ``NO_SKILL_KEY`` group and evolve only ever creates
+        # brand-new skills, never improves existing ones).
+        self._workspace_dir = (
+            Path(workspace_dir).expanduser() if workspace_dir else None
+        )
+        self._channel_name = channel_name or "all"
         # Lazy httpx client — created on first http POST so file-mode
         # users don't pay for connection-pool init.  Reused across
         # turns; closed when CoPaw shuts down (we hand off to httpx's
@@ -101,6 +113,11 @@ class SkillClawCaptureHook:
             messages = await agent.memory.get_memory()
             serialised = [_msg_to_openai_dict(m) for m in messages]
 
+            # Skill attribution — emit fields ``evolve_server.summarizer``
+            # uses to compute ``_skills_referenced`` per session.
+            injected = self._resolve_injected_skills()
+            read, modified = _scan_messages_for_skill_io(messages)
+
             async with self._lock:
                 self._turn += 1
                 record = {
@@ -108,6 +125,12 @@ class SkillClawCaptureHook:
                     "turn": self._turn,
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "messages": serialised,
+                    # New: skill attribution context
+                    "injected_skills": [{"skill_name": n} for n in injected],
+                    "read_skills": [{"skill_name": n} for n in read],
+                    "modified_skills": [
+                        {"skill_name": n, "action": "modify"} for n in modified
+                    ],
                 }
 
                 if self._mode == "http" and self._ingest_url:
@@ -140,6 +163,26 @@ class SkillClawCaptureHook:
             )
         return None
 
+    def _resolve_injected_skills(self) -> list[str]:
+        """Return the workspace skills enabled for this hook's channel.
+
+        Mirrors what the ReAct agent's prompt builder injects, so the
+        capture record matches the actual prompt-time skill set.
+        Lookup failures (missing workspace_dir, broken manifest) are
+        silently absorbed — the hook stays best-effort.
+        """
+        if self._workspace_dir is None:
+            return []
+        try:
+            from ...agents.skills_manager import resolve_effective_skills
+            return list(
+                resolve_effective_skills(
+                    self._workspace_dir, self._channel_name,
+                )
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+            return []
+
     async def _post_record(self, record: dict[str, Any]) -> bool:
         """POST a record to the SkillClaw ingest endpoint.  Returns
         ``True`` on success (HTTP 2xx), ``False`` on any failure so
@@ -171,6 +214,88 @@ class SkillClawCaptureHook:
                 e,
             )
             return False
+
+
+_SKILL_PATH_PATTERNS = (
+    "/.copaw/skill_pool/",
+    "/.copaw/workspaces/",
+    "/.skillclaw/skills/",
+    "/.skillclaw/local-share/",
+)
+
+
+def _extract_skill_name_from_path(path: str) -> str | None:
+    """Extract the skill name from a tool-call path argument.
+
+    Expected shapes:
+      ``~/.copaw/skill_pool/<name>/SKILL.md``
+      ``~/.copaw/workspaces/<ws>/skills/<name>/...``
+      ``~/.skillclaw/skills/<name>/...``
+
+    Returns the segment immediately following ``skill_pool/`` /
+    ``skills/`` / ``local-share/qwenpaw/skills/``.  Returns ``None``
+    when the path doesn't look like a skill path at all.
+    """
+    if not isinstance(path, str) or not any(p in path for p in _SKILL_PATH_PATTERNS):
+        return None
+    # Try most specific markers first.
+    for marker in (
+        "/skill_pool/", "/local-share/qwenpaw/skills/",
+    ):
+        if marker in path:
+            tail = path.split(marker, 1)[1]
+            seg = tail.split("/", 1)[0].strip()
+            if seg and seg not in {"skill.json", "skill_stats.json"}:
+                return seg
+    if "/skills/" in path:
+        tail = path.split("/skills/", 1)[1]
+        seg = tail.split("/", 1)[0].strip()
+        if seg and seg not in {"skill.json", "skill_stats.json"}:
+            return seg
+    return None
+
+
+def _scan_messages_for_skill_io(messages: list[Any]) -> tuple[list[str], list[str]]:
+    """Walk every assistant tool-use block in ``messages`` and bucket
+    skill-touching ones into ``read_skills`` / ``modified_skills``.
+
+    Read tools: ``read_file``, ``view_file``, ``cat`` (anything that
+    reads a SKILL.md or anything under a skill dir).
+    Write tools: ``write_file``, ``edit_file`` (mutate skill content).
+
+    Returns deduped, sorted lists.  Over-attributes by intention — a
+    cumulative scan across the message history means each turn's
+    record reports every skill the LLM has touched in the session so
+    far, but evolve_server's summarizer aggregates as a set anyway.
+    """
+    READ_TOOLS = {"read_file", "view_file", "cat", "read_skill"}
+    WRITE_TOOLS = {"write_file", "edit_file", "write_skill"}
+    read: set[str] = set()
+    modified: set[str] = set()
+    for msg in messages or []:
+        content = getattr(msg, "content", None)
+        if not isinstance(content, list):
+            continue
+        for blk in content:
+            if not isinstance(blk, dict):
+                continue
+            if blk.get("type") != "tool_use":
+                continue
+            tool_name = str(blk.get("name", "") or "").strip()
+            inp = blk.get("input") or blk.get("arguments") or {}
+            path = ""
+            if isinstance(inp, dict):
+                path = str(
+                    inp.get("path") or inp.get("file_path") or inp.get("file") or ""
+                )
+            skill = _extract_skill_name_from_path(path)
+            if not skill:
+                continue
+            if tool_name in READ_TOOLS:
+                read.add(skill)
+            elif tool_name in WRITE_TOOLS:
+                modified.add(skill)
+    return sorted(read), sorted(modified)
 
 
 def _msg_to_openai_dict(msg: Any) -> dict[str, Any]:

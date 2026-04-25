@@ -66,7 +66,11 @@ async def test_writes_one_record_per_invocation(tmp_path):
     assert r1["turn"] == 1
     assert r2["turn"] == 2
     # Schema contract the evolve_server summarizer relies on
-    assert set(r1.keys()) == {"session_id", "turn", "timestamp", "messages"}
+    assert {"session_id", "turn", "timestamp", "messages"} <= set(r1.keys())
+    # Phase-1 attribution fields are always present (may be empty)
+    for field in ("injected_skills", "read_skills", "modified_skills"):
+        assert field in r1
+        assert isinstance(r1[field], list)
     assert r1["messages"] == [
         {"role": "system", "content": "You are helpful."},
         {"role": "user", "content": "Hi"},

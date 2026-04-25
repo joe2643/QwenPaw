@@ -562,6 +562,9 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                 _sc_session_id = self._request_context.get(
                     "session_id", "default",
                 )
+                _sc_channel = self._request_context.get(
+                    "channel_name", "all",
+                )
                 sc_hook = SkillClawCaptureHook(
                     records_dir=sc_cfg.records_dir,
                     session_id=_sc_session_id,
@@ -569,6 +572,8 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                     mode=sc_cfg.mode,
                     ingest_url=sc_cfg.ingest_url,
                     ingest_api_key=sc_cfg.ingest_api_key,
+                    workspace_dir=working_dir,
+                    channel_name=_sc_channel,
                 )
                 self.register_instance_hook(
                     hook_type="pre_reasoning",

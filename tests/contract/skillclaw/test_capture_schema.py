@@ -42,6 +42,11 @@ TOLERATED_EXTRAS = {
     "response_text",
     "tool_calls",
     "next_state",
+    # Phase-1 skill-attribution fields emitted by SkillClawCaptureHook
+    # so evolve_server's summarizer can compute ``_skills_referenced``.
+    "injected_skills",
+    "read_skills",
+    "modified_skills",
 }
 
 ALLOWED_ROLES = {"user", "assistant", "system", "tool"}
