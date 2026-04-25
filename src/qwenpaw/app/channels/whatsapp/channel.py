@@ -112,6 +112,52 @@ class _WhatsAppAlbumBuffer:
 
 
 WHATSAPP_MAX_TEXT_LENGTH = 4096
+
+# Single source of truth for the timestamp string the agent sees on
+# WhatsApp inbound — render in the host's local timezone so the model
+# never has to reason across zones (whichever zone the operator runs
+# in is the one that matches their own clock).  Returns ``""`` on
+# any parse failure so the caller can substitute the raw value or
+# omit the prefix.
+def _format_local_timestamp(
+    ts,
+    style: str = "long",
+) -> str:
+    """Render ``ts`` (epoch seconds, epoch ms, str, or
+    ``datetime.datetime``) in the host's local timezone.
+
+    ``style="long"``  → ``"2026年4月25日 19:40:11 JST"`` (history block)
+    ``style="short"`` → ``"2026-04-25 19:40 JST"`` (envelope prefix)
+
+    The trailing label is whatever the system reports via
+    ``time.tzname`` for this moment (handles DST transitions
+    correctly because we resolve via ``astimezone()`` per call).
+    """
+    try:
+        if isinstance(ts, datetime.datetime):
+            # Naive datetime → assume local; aware datetime → convert.
+            dt = (
+                ts.astimezone()
+                if ts.tzinfo is not None
+                else ts.astimezone()
+            )
+        else:
+            ts_val = float(ts)
+            if ts_val > 1e12:
+                ts_val /= 1000  # epoch milliseconds → seconds
+            dt = datetime.datetime.fromtimestamp(ts_val).astimezone()
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    tz_label = dt.strftime("%Z") or ""
+    if style == "short":
+        return (
+            dt.strftime("%Y-%m-%d %H:%M ") + tz_label
+        ).rstrip()
+    return (
+        f"{dt.year}年{dt.month}月{dt.day}日 "
+        + dt.strftime("%H:%M:%S ")
+        + tz_label
+    ).rstrip()
 from ....constant import WORKING_DIR
 
 _MEDIA_DIR = WORKING_DIR / "media" / "whatsapp"
@@ -277,6 +323,17 @@ class WhatsAppChannel(BaseChannel):
         # paths back to the dispatch loop for group-history storage. Reset
         # at the top of each _extract_message_content call.
         self._last_extracted_media_paths: List[str] = []
+
+        # Inbound-media path index: ``(chat_jid_str, msg_id) ->
+        # [local_path, ...]``.  Keyed on the WhatsApp stanzaID so a
+        # later reply whose contextInfo.stanzaID points at a past
+        # album can resolve the actual image paths (the album
+        # header proto carries no media keys — children do, but
+        # WhatsApp's reply ID points at the header).  Bounded by
+        # ``_inbound_media_limit`` to cap memory; FIFO eviction.
+        self._inbound_media: Dict[tuple[str, str], list[str]] = {}
+        self._inbound_media_order: list[tuple[str, str]] = []
+        self._inbound_media_limit: int = 200
 
         # Album buffers: keyed by (chat_jid_str, sender_jid_str).
         # WhatsApp encodes a multi-image / multi-video send as an
@@ -847,7 +904,12 @@ class WhatsAppChannel(BaseChannel):
 
         return body, content_parts
 
-    async def _extract_quote_content(self, client, msg) -> List[Any]:
+    async def _extract_quote_content(
+        self,
+        client,
+        msg,
+        chat_str: str = "",
+    ) -> List[Any]:
         """Extract the content of a quoted/replied-to WhatsApp message.
 
         Returns content parts (text + media) so the agent has full context
@@ -856,6 +918,11 @@ class WhatsAppChannel(BaseChannel):
         Note: quotedMessage is a stripped-down proto — media download keys
         are usually absent, so we extract text/captions and describe media
         types rather than attempting (and failing) to download.
+
+        ``chat_str`` lets the album-quote branch reverse-lookup
+        local paths from ``self._inbound_media`` (the album header
+        carries no media keys, only an ``expectedImageCount``, so
+        without the cache we'd only know the count, not the files).
         """
         # contextInfo lives on extendedTextMessage, imageMessage, etc.
         # ``albumMessage`` is included so that replies whose quoted
@@ -1015,25 +1082,49 @@ class WhatsAppChannel(BaseChannel):
             media_types.append(f"sticker: {st_path}" if st_path else "sticker")
 
         # AlbumMessage: WhatsApp's multi-image / multi-video container.
-        # The album body itself doesn't carry the actual media — it
-        # just announces ``expectedImageCount`` / ``expectedVideoCount``
-        # and the individual items arrive as separate messages.  When
-        # the user replies to an album we can't download the items
-        # from ``quoted_msg`` (the keys live on the children, not the
-        # album), but we still surface a labelled placeholder so the
-        # agent knows the user is referring to a multi-media bundle
-        # rather than seeing an empty reply block.
+        # The album body itself doesn't carry the actual media keys —
+        # those live on the children — but we cached the children's
+        # local paths against the header's stanza ID when they came
+        # in.  Reverse-lookup that cache so the agent sees real
+        # ``image: /tmp/...`` paths it can feed to tools, falling
+        # back to the count placeholder when the cache misses
+        # (album was sent before bot was running, restart cleared
+        # the index, etc.).
         if quoted_msg.HasField("albumMessage"):
-            ai = getattr(quoted_msg.albumMessage, "expectedImageCount", 0)
-            av = getattr(quoted_msg.albumMessage, "expectedVideoCount", 0)
-            counts = []
-            if ai:
-                counts.append(f"{ai} image{'s' if ai != 1 else ''}")
-            if av:
-                counts.append(f"{av} video{'s' if av != 1 else ''}")
-            media_types.append(
-                f"album with {' + '.join(counts)}" if counts else "album",
+            cached_paths = self._lookup_inbound_media(
+                chat_str, stanza_id,
             )
+            for p in cached_paths:
+                ext = Path(p).suffix.lower()
+                if ext in {".jpg", ".jpeg", ".png", ".gif",
+                           ".webp", ".bmp"}:
+                    media_types.append(f"image: {p}")
+                    extra_parts.append(ImageContent(
+                        type=ContentType.IMAGE,
+                        image_url=await resolve_media_url(p),
+                    ))
+                elif ext in {".mp4", ".mov", ".avi", ".webm",
+                             ".mkv", ".mpeg"}:
+                    media_types.append(f"video: {p}")
+                else:
+                    media_types.append(f"file: {p}")
+            if not cached_paths:
+                # Cache miss — fall back to the count placeholder.
+                ai = getattr(
+                    quoted_msg.albumMessage, "expectedImageCount", 0,
+                )
+                av = getattr(
+                    quoted_msg.albumMessage, "expectedVideoCount", 0,
+                )
+                counts = []
+                if ai:
+                    counts.append(f"{ai} image{'s' if ai != 1 else ''}")
+                if av:
+                    counts.append(f"{av} video{'s' if av != 1 else ''}")
+                media_types.append(
+                    f"album with {' + '.join(counts)}"
+                    if counts else "album",
+                )
 
         if not quote_body and not media_types:
             return []
@@ -1047,6 +1138,51 @@ class WhatsAppChannel(BaseChannel):
             ),
         )
         return [block, *extra_parts]
+
+    def _record_inbound_media(
+        self,
+        chat_str: str,
+        msg_id: str,
+        paths: list[str],
+    ) -> None:
+        """Cache the local media paths for an inbound message so a
+        later reply (where ``contextInfo.stanzaID`` points back at
+        this msg_id) can resolve actual files instead of an opaque
+        ``"album with N images"`` placeholder.  FIFO eviction at
+        ``_inbound_media_limit`` keeps the dict bounded; we store
+        only on-disk paths to skip stale entries automatically.
+        """
+        live = [p for p in paths if p and os.path.isfile(p)]
+        if not live:
+            return
+        key = (chat_str, msg_id)
+        if key in self._inbound_media:
+            # Refresh — extend rather than overwrite in case the
+            # album header recorded a partial list and a later flush
+            # adds more children.
+            existing = self._inbound_media[key]
+            for p in live:
+                if p not in existing:
+                    existing.append(p)
+            return
+        self._inbound_media[key] = list(live)
+        self._inbound_media_order.append(key)
+        while len(self._inbound_media_order) > self._inbound_media_limit:
+            old = self._inbound_media_order.pop(0)
+            self._inbound_media.pop(old, None)
+
+    def _lookup_inbound_media(
+        self,
+        chat_str: str,
+        msg_id: str,
+    ) -> list[str]:
+        """Reverse-lookup of media for a quoted message.  Returns
+        only paths that still exist on disk.  Empty list when we
+        have no record (cache miss) or the files were cleaned up."""
+        if not msg_id:
+            return []
+        paths = self._inbound_media.get((chat_str, msg_id), [])
+        return [p for p in paths if p and os.path.isfile(p)]
 
     @staticmethod
     def _format_reply_context(
@@ -1165,10 +1301,19 @@ class WhatsAppChannel(BaseChannel):
             # populated via its scratch buffer, so we can pass them to the
             # group-history store below without being vulnerable to a
             # later message overwriting the buffer.
+            # Index by stanza ID so a later reply can reverse-lookup
+            # paths even though WhatsApp's reply contextInfo only
+            # carries the parent message's ID, not its media keys.
+            if self._last_extracted_media_paths and msg_id:
+                self._record_inbound_media(
+                    chat_str, msg_id, self._last_extracted_media_paths,
+                )
             media_local_paths = list(self._last_extracted_media_paths)
 
             # Extract quoted/replied-to message content
-            quote_parts = await self._extract_quote_content(client, msg)
+            quote_parts = await self._extract_quote_content(
+                client, msg, chat_str=chat_str,
+            )
             if quote_parts:
                 content_parts = quote_parts + content_parts
 
@@ -1387,24 +1532,13 @@ class WhatsAppChannel(BaseChannel):
                         if ts:
                             try:
                                 # Check if timestamp is in milliseconds (length > 10)
-                                ts_val = int(ts)
-                                if ts_val > 1e12:
-                                    ts_val = ts_val / 1000
-                                dt = datetime.datetime.fromtimestamp(
-                                    ts_val,
-                                    tz=datetime.timezone(
-                                        datetime.timedelta(hours=8),
-                                    ),
+                                ts_formatted = _format_local_timestamp(
+                                    ts, style="long",
                                 )
-                                # Portable format — %-m/%-d are a GNU
-                                # extension not supported on Windows; use
-                                # explicit month/day so strftime stays
-                                # pure-POSIX.
-                                ts_formatted = (
-                                    f"{dt.year}年{dt.month}月{dt.day}日 "
-                                    f"{dt.strftime('%H:%M:%S')} (HKT)"
+                                ts_prefix = (
+                                    f"[{ts_formatted}] "
+                                    if ts_formatted else f"[{ts}] "
                                 )
-                                ts_prefix = f"[{ts_formatted}] "
                             except Exception:
                                 ts_prefix = f"[{ts}] "
                         line = f"  {ts_prefix}{h['sender']}: {h['body']}"
@@ -1461,16 +1595,24 @@ class WhatsAppChannel(BaseChannel):
             has_bot_command = bool(body and body.lstrip().startswith("/"))
 
             # Envelope: clear chat-type + sender prefix so the agent never
-            # mistakes a group for a DM.
-            # Group:  [WhatsApp group {chat_jid}] Joe HO (+85251159218): text
-            # DM:     [WhatsApp DM] +85251159218: text
+            # mistakes a group for a DM.  Includes the WhatsApp send
+            # timestamp in local-system tz so the model can reason
+            # about "when was this sent" without guessing —
+            # particularly useful when the user replies hours after
+            # an earlier turn.
+            # Group:  [2026-04-25 19:40 JST] [WhatsApp group {chat_jid}] Joe HO (+85251159218): text
+            # DM:     [2026-04-25 19:40 JST] [WhatsApp DM] +85251159218: text
             sender_label = friendly_sender
             if resolved_name:
                 sender_label = f"{resolved_name} ({friendly_sender})"
+            ts_short = _format_local_timestamp(timestamp, style="short")
+            ts_prefix = f"[{ts_short}] " if ts_short else ""
             if is_group:
-                envelope = f"[WhatsApp group {chat_str}] {sender_label}"
+                envelope = (
+                    f"{ts_prefix}[WhatsApp group {chat_str}] {sender_label}"
+                )
             else:
-                envelope = f"[WhatsApp DM] {sender_label}"
+                envelope = f"{ts_prefix}[WhatsApp DM] {sender_label}"
             for i, part in enumerate(content_parts):
                 if hasattr(part, "type") and part.type == ContentType.TEXT:
                     txt = part.text or ""
@@ -1805,6 +1947,16 @@ class WhatsAppChannel(BaseChannel):
             b for b in buffer.gathered_body_parts if b
         ).strip()
         merged_content = list(buffer.quote_parts) + list(buffer.gathered_parts)
+
+        # Index the album header → child paths so a later reply
+        # whose ``contextInfo.stanzaID`` points back at this album
+        # can resolve real local paths instead of an opaque count
+        # placeholder.  See ``_record_inbound_media`` for the
+        # eviction policy.
+        if buffer.gathered_paths:
+            self._record_inbound_media(
+                chat_str, buffer.header_msg_id, buffer.gathered_paths,
+            )
 
         # Header info objects for routing — info comes from the
         # original albumMessage proto; sender/chat already passed

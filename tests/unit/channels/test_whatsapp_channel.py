@@ -2225,3 +2225,166 @@ class TestAlbumCollation:
         result = await _drive_inbound(ch, msg)
         assert result is False
         assert not ch._album_buffers
+
+
+# ===================================================================
+# TestLocalTimestamp + envelope + album reply path lookup
+# ===================================================================
+
+
+class TestFormatLocalTimestamp:
+    """The single timestamp formatter all three inbound surfaces
+    use (group history, envelope prefix, reply-context)."""
+
+    def test_short_style_includes_zone(self):
+        from qwenpaw.app.channels.whatsapp.channel import _format_local_timestamp
+        out = _format_local_timestamp(1777106276, style="short")
+        # Format: YYYY-MM-DD HH:MM <ZONE>
+        assert "-04-" in out
+        assert ":" in out
+        # Zone abbrev varies by host but should be present.
+        assert out.split()[-1].isalpha() or "+" in out
+
+    def test_long_style_uses_chinese_date_format(self):
+        from qwenpaw.app.channels.whatsapp.channel import _format_local_timestamp
+        out = _format_local_timestamp(1777106276, style="long")
+        assert "年" in out and "月" in out and "日" in out
+        # H:M:S present
+        assert out.count(":") >= 2
+
+    def test_handles_milliseconds(self):
+        from qwenpaw.app.channels.whatsapp.channel import _format_local_timestamp
+        # WhatsApp sometimes hands us ms-since-epoch
+        s_secs = _format_local_timestamp(1777106276, style="short")
+        s_ms = _format_local_timestamp(1777106276 * 1000, style="short")
+        assert s_secs == s_ms
+
+    def test_invalid_input_returns_empty(self):
+        from qwenpaw.app.channels.whatsapp.channel import _format_local_timestamp
+        assert _format_local_timestamp(None) == ""
+        assert _format_local_timestamp("not a number") == ""
+
+
+class TestInboundMediaIndex:
+    """Cache of inbound message id → local media paths so a later
+    reply pointing back at that msg_id (which is what WhatsApp's
+    contextInfo.stanzaID gives us) can resolve real files —
+    critical for albums where the header proto carries no media
+    keys, only an expectedImageCount."""
+
+    def test_record_then_lookup_round_trip(self, tmp_path):
+        ch = _make_channel()
+        # Use real files so the path-existence filter doesn't drop them.
+        f1 = tmp_path / "a.jpg"; f1.write_bytes(b"x")
+        f2 = tmp_path / "b.jpg"; f2.write_bytes(b"y")
+        ch._record_inbound_media("chat@g.us", "MSG1", [str(f1), str(f2)])
+        assert ch._lookup_inbound_media("chat@g.us", "MSG1") == [
+            str(f1), str(f2),
+        ]
+
+    def test_lookup_drops_paths_that_no_longer_exist(self, tmp_path):
+        ch = _make_channel()
+        live = tmp_path / "live.jpg"; live.write_bytes(b"x")
+        gone = tmp_path / "gone.jpg"  # never created
+        ch._record_inbound_media("chat", "M", [str(live), str(gone)])
+        assert ch._lookup_inbound_media("chat", "M") == [str(live)]
+
+    def test_fifo_eviction_at_limit(self, tmp_path):
+        ch = _make_channel()
+        ch._inbound_media_limit = 3
+        for i in range(5):
+            f = tmp_path / f"{i}.jpg"; f.write_bytes(b"x")
+            ch._record_inbound_media("c", f"M{i}", [str(f)])
+        # Only the last 3 entries should still be cached.
+        assert len(ch._inbound_media) == 3
+        assert ("c", "M0") not in ch._inbound_media
+        assert ("c", "M1") not in ch._inbound_media
+        assert ("c", "M4") in ch._inbound_media
+
+    def test_record_skips_non_existent_paths(self):
+        ch = _make_channel()
+        ch._record_inbound_media("c", "M", ["/no/such/file.jpg"])
+        assert ch._lookup_inbound_media("c", "M") == []
+
+
+@pytest.mark.asyncio
+async def test_quote_with_album_uses_cached_paths(tmp_path):
+    """When the user replies to an album whose children we
+    previously cached (via ``_record_inbound_media`` from
+    ``_flush_album``), the reply context should surface real
+    ``image: /path/...`` lines plus inline ImageContent —
+    not the opaque ``"album with N images"`` placeholder.
+    """
+    ch = _make_channel()
+    # Pre-populate cache as if the album arrived earlier.
+    img1 = tmp_path / "child1.jpg"; img1.write_bytes(b"x")
+    img2 = tmp_path / "child2.jpg"; img2.write_bytes(b"y")
+    ch._record_inbound_media(
+        "grp@g.us", "ALBUM_HDR_ID", [str(img1), str(img2)],
+    )
+
+    ctx = MagicMock()
+    ctx.HasField = lambda name: name == "quotedMessage"
+    ctx.participant = "alice@s.whatsapp.net"
+    ctx.stanzaId = "ALBUM_HDR_ID"  # points back at our cached header
+
+    album = MagicMock()
+    album.expectedImageCount = 2
+    album.expectedVideoCount = 0
+    quoted = MagicMock()
+    quoted.conversation = ""
+    quoted.HasField = lambda name: name == "albumMessage"
+    quoted.albumMessage = album
+    ctx.quotedMessage = quoted
+
+    etm = MagicMock()
+    etm.text = "look at these"
+    etm.contextInfo = ctx
+    msg = _make_proto_message(extendedTextMessage=etm)
+
+    parts = await ch._extract_quote_content(
+        MagicMock(), msg, chat_str="grp@g.us",
+    )
+    text = parts[0].text
+    # Real paths surface in the Media: line, NOT a count placeholder.
+    assert str(img1) in text
+    assert str(img2) in text
+    assert "album with" not in text
+    # ImageContent inlined for vision-capable models.
+    image_parts = [p for p in parts if isinstance(p, ImageContent)]
+    assert len(image_parts) == 2
+
+
+@pytest.mark.asyncio
+async def test_quote_with_album_falls_back_to_count_on_cache_miss():
+    """When the cache has nothing for the quoted album header
+    (album sent before bot was running, restart cleared the
+    index), fall back to the original count-only placeholder
+    rather than emitting a half-rendered block."""
+    ch = _make_channel()
+    # No _record_inbound_media call — cache is empty.
+
+    ctx = MagicMock()
+    ctx.HasField = lambda name: name == "quotedMessage"
+    ctx.participant = "alice@s.whatsapp.net"
+    ctx.stanzaId = "MISSING_ID"
+
+    album = MagicMock()
+    album.expectedImageCount = 3
+    album.expectedVideoCount = 1
+    quoted = MagicMock()
+    quoted.conversation = ""
+    quoted.HasField = lambda name: name == "albumMessage"
+    quoted.albumMessage = album
+    ctx.quotedMessage = quoted
+
+    etm = MagicMock()
+    etm.text = "x"
+    etm.contextInfo = ctx
+    msg = _make_proto_message(extendedTextMessage=etm)
+
+    parts = await ch._extract_quote_content(
+        MagicMock(), msg, chat_str="grp@g.us",
+    )
+    text = parts[0].text
+    assert "album with 3 images + 1 video" in text
