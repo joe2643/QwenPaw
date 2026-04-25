@@ -13,6 +13,7 @@ here we keep httpx stubbed so CI never hits chatgpt.com.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import httpx
@@ -22,7 +23,9 @@ from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from qwenpaw.providers.codex_oauth_model import (
     CodexOAuthChatModel,
     _CodexOAuthAsyncStream,
+    _extract_unfetchable_url,
     _raise_for_upstream_status,
+    _strip_unfetchable_image_from_body,
 )
 from qwenpaw.providers.codex_translate import StreamState
 
@@ -307,6 +310,110 @@ class TestRaiseForUpstreamStatus:
         with pytest.raises(httpx.HTTPStatusError) as exc_info:
             _raise_for_upstream_status(resp)  # type: ignore[arg-type]
         assert str(status) in str(exc_info.value)
+
+
+# ---------------------------------------------------------------- #
+# Strip-and-retry helpers (image URL fetch failures)               #
+# ---------------------------------------------------------------- #
+
+
+class TestExtractUnfetchableUrl:
+    """The error-message parser ChatGPT returns when it can't fetch
+    an image we sent.  Cover the standard sentence shape, the
+    JSON-wrapped form (most common in production), and the
+    no-match cases that must not yield a URL."""
+
+    def test_extracts_url_from_plain_sentence(self) -> None:
+        body = (
+            "Error while downloading "
+            "https://media.example/m?t=abc&exp=1. Upstream "
+            "status code: 403."
+        )
+        assert (
+            _extract_unfetchable_url(body)
+            == "https://media.example/m?t=abc&exp=1"
+        )
+
+    def test_extracts_url_from_json_wrapped_error(self) -> None:
+        body = (
+            '{"error":{"message":"Error while downloading '
+            'https://media.example/m?sig=xyz. Upstream status '
+            'code: 403.","type":"invalid_request_error"}}'
+        )
+        url = _extract_unfetchable_url(body)
+        assert url == "https://media.example/m?sig=xyz"
+
+    def test_returns_none_for_non_download_error(self) -> None:
+        assert _extract_unfetchable_url("rate limit exceeded") is None
+        assert _extract_unfetchable_url("invalid api key") is None
+        assert _extract_unfetchable_url("") is None
+
+    def test_returns_none_when_marker_present_but_no_url(self) -> None:
+        # Pathological: marker without a URL — fall back to None
+        # rather than match something nonsensical.
+        body = "Error while downloading something. Upstream"
+        assert _extract_unfetchable_url(body) is None
+
+
+class TestStripUnfetchableImageFromBody:
+    def test_strips_matching_image_url_and_returns_true(self) -> None:
+        body = {
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "describe"},
+                    {"type": "input_image",
+                     "image_url": "https://x.example/a"},
+                    {"type": "input_image",
+                     "image_url": "https://x.example/b"},
+                ],
+            }],
+        }
+        stripped = _strip_unfetchable_image_from_body(
+            body, "https://x.example/a",
+        )
+        assert stripped is True
+        content = body["input"][0]["content"]
+        # The matching image was replaced by a text placeholder;
+        # the other image and the user text survive untouched.
+        types = [c.get("type") for c in content]
+        assert types == ["input_text", "input_text", "input_image"]
+        assert content[1]["text"].startswith("[image previously sent")
+        assert content[2]["image_url"] == "https://x.example/b"
+
+    def test_no_match_returns_false_and_leaves_body_alone(self) -> None:
+        body = {
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_image",
+                     "image_url": "https://x.example/a"},
+                ],
+            }],
+        }
+        snapshot = json.loads(json.dumps(body))
+        stripped = _strip_unfetchable_image_from_body(
+            body, "https://different.example/z",
+        )
+        assert stripped is False
+        assert body == snapshot
+
+    def test_strips_across_multiple_input_entries(self) -> None:
+        body = {
+            "input": [
+                {"type": "message", "role": "user", "content": [
+                    {"type": "input_image", "image_url": "https://bad"},
+                ]},
+                {"type": "message", "role": "user", "content": [
+                    {"type": "input_image", "image_url": "https://bad"},
+                ]},
+            ],
+        }
+        assert _strip_unfetchable_image_from_body(body, "https://bad")
+        for entry in body["input"]:
+            assert entry["content"][0]["type"] == "input_text"
 
 
 # ---------------------------------------------------------------- #

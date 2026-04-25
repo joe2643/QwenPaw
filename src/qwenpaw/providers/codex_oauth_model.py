@@ -22,7 +22,9 @@ Design mirrors :class:`qwenpaw.providers.anthropic_provider.ClaudeOAuthChatModel
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from typing import Any, AsyncIterator
 
 import httpx
@@ -37,6 +39,67 @@ from .codex_translate import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ChatGPT returns:
+#   "Error while downloading https://media.example/path. Upstream
+#    status code: 403."
+# Capture the URL so we can strip it from the request body and retry
+# once.  Stops at whitespace OR the literal sentence ". Upstream"
+# so trailing punctuation in the message doesn't pollute the URL.
+_UNFETCHABLE_URL_RE = re.compile(
+    r"Error while downloading (https?://[^\s]+?)\. Upstream",
+)
+
+
+def _extract_unfetchable_url(error_body: str) -> str | None:
+    """Pull the failing image URL out of ChatGPT's 400 body, or
+    return ``None`` when the error isn't a download failure (auth,
+    rate limit, etc.).
+    """
+    if not error_body or "Error while downloading" not in error_body:
+        return None
+    m = _UNFETCHABLE_URL_RE.search(error_body)
+    return m.group(1) if m else None
+
+
+def _strip_unfetchable_image_from_body(
+    body: dict, bad_url: str,
+) -> bool:
+    """Mutate ``body`` in place to remove every ``input_image`` item
+    whose URL matches ``bad_url``.  Replaces each removed image with
+    a brief text placeholder so the agent (and the model) still see
+    that something used to be there — losing the block silently
+    confuses the model when the conversation references "the image
+    you just sent".  Returns ``True`` if at least one item was
+    stripped, ``False`` otherwise.
+    """
+    if not bad_url:
+        return False
+    stripped = False
+    placeholder = (
+        "[image previously sent here is no longer fetchable; "
+        "ask the user to re-send if needed]"
+    )
+    for entry in body.get("input") or []:
+        content = entry.get("content")
+        if not isinstance(content, list):
+            continue
+        new_content: list[dict] = []
+        for c in content:
+            if (
+                isinstance(c, dict)
+                and c.get("type") == "input_image"
+                and c.get("image_url") == bad_url
+            ):
+                new_content.append(
+                    {"type": "input_text", "text": placeholder},
+                )
+                stripped = True
+            else:
+                new_content.append(c)
+        entry["content"] = new_content
+    return stripped
 
 
 class CodexOAuthChatModel(OpenAIChatModel):
@@ -93,19 +156,58 @@ class CodexOAuthChatModel(OpenAIChatModel):
                 )
 
             # Non-streaming: open the stream, drain it, close it.
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(600, connect=30),
-            ) as client:
-                async with client.stream(
-                    "POST",
-                    upstream_url,
-                    json=responses_body,
-                    headers=headers,
-                ) as upstream:
-                    _raise_for_upstream_status(upstream)
-                    chat_body = await collect_as_chat_completion(
-                        upstream, state,
-                    )
+            # Retry once when ChatGPT bounces a request because it
+            # couldn't download an image URL we sent (most often a
+            # signed-URL TTL expiry from a stale conversation
+            # entry).  Strip the offending block, swap in a text
+            # placeholder, retry — preserves the rest of the turn.
+            attempts_left = 2
+            while True:
+                attempts_left -= 1
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(600, connect=30),
+                ) as client:
+                    async with client.stream(
+                        "POST",
+                        upstream_url,
+                        json=responses_body,
+                        headers=headers,
+                    ) as upstream:
+                        try:
+                            _raise_for_upstream_status(upstream)
+                        except httpx.HTTPStatusError as e:
+                            err_body = (await upstream.aread()).decode(
+                                "utf-8", errors="replace",
+                            )
+                            bad_url = _extract_unfetchable_url(err_body)
+                            if (
+                                attempts_left > 0
+                                and bad_url
+                                and _strip_unfetchable_image_from_body(
+                                    responses_body, bad_url,
+                                )
+                            ):
+                                logger.warning(
+                                    "Codex 400 on image URL %s — "
+                                    "stripped from request and retrying",
+                                    bad_url,
+                                )
+                                # Reset translator state for the retry so the
+                                # second response replaces (not appends to)
+                                # the first.
+                                state = StreamState(
+                                    model=responses_body["model"],
+                                )
+                                continue
+                            raise httpx.HTTPStatusError(
+                                f"{e}: {err_body[:500]}",
+                                request=e.request,
+                                response=e.response,
+                            ) from e
+                        chat_body = await collect_as_chat_completion(
+                            upstream, state,
+                        )
+                        break
             return ChatCompletion.model_validate(chat_body)
 
         self.client.chat.completions.create = _wrapped_create  # type: ignore[method-assign]
@@ -154,25 +256,38 @@ class _CodexOAuthAsyncStream:
         self._stream_ctx: Any = None
         self._upstream: httpx.Response | None = None
         self._iter: AsyncIterator[dict] | None = None
+        # Allow exactly one strip-and-retry on first open when ChatGPT
+        # 400s with "Error while downloading <url>".  Same fallback
+        # the non-streaming path uses; gate stays at one attempt to
+        # avoid retry storms when several URLs are stale.
+        self._retry_attempts_left: int = 1
 
     def __aiter__(self) -> "_CodexOAuthAsyncStream":
         return self
 
+    async def _open_stream(self) -> None:
+        """Open (or re-open) the upstream HTTP stream into
+        ``self._upstream`` / ``self._stream_ctx``.  Pulled out so
+        the strip-and-retry path can call it again after mutating
+        the body in place.
+        """
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(600, connect=30),
+        )
+        self._stream_ctx = self._client.stream(
+            "POST",
+            self._upstream_url,
+            json=self._upstream_body,
+            headers=self._headers,
+        )
+        self._upstream = await self._stream_ctx.__aenter__()
+
     async def __anext__(self) -> ChatCompletionChunk:
         if self._iter is None:
             # Lazy-open the HTTP stream on first __anext__.
-            self._client = httpx.AsyncClient(
-                timeout=httpx.Timeout(600, connect=30),
-            )
-            self._stream_ctx = self._client.stream(
-                "POST",
-                self._upstream_url,
-                json=self._upstream_body,
-                headers=self._headers,
-            )
-            self._upstream = await self._stream_ctx.__aenter__()
+            await self._open_stream()
             assert self._upstream is not None
-            if self._upstream.status_code != 200:
+            while self._upstream.status_code != 200:
                 # Capture everything we need *before* ``_cleanup``
                 # nulls ``self._upstream`` — otherwise the f-string
                 # below raises ``AttributeError: 'NoneType'`` and
@@ -183,6 +298,31 @@ class _CodexOAuthAsyncStream:
                 err_bytes = await self._upstream.aread()
                 err_body = err_bytes.decode("utf-8", errors="replace")
                 await self._cleanup()
+
+                # Strip-and-retry path: ChatGPT bounced because it
+                # couldn't download a URL we sent (most often a
+                # signed-URL that expired since the conversation
+                # history first got captured).  Replace the broken
+                # block with a placeholder so the agent still sees
+                # something used to be there, and try once more.
+                bad_url = _extract_unfetchable_url(err_body)
+                if (
+                    self._retry_attempts_left > 0
+                    and bad_url
+                    and _strip_unfetchable_image_from_body(
+                        self._upstream_body, bad_url,
+                    )
+                ):
+                    self._retry_attempts_left -= 1
+                    logger.warning(
+                        "Codex 400 on image URL %s — stripped from "
+                        "request and retrying stream",
+                        bad_url,
+                    )
+                    await self._open_stream()
+                    assert self._upstream is not None
+                    continue
+
                 raise httpx.HTTPStatusError(
                     f"Codex upstream HTTP {status}: {err_body[:500]}",
                     request=request,
