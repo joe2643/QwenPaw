@@ -311,6 +311,7 @@ class StreamState:
         "emitted_role",
         "final_usage",
         "active_item_type",
+        "active_item_phase",
     )
 
     def __init__(self, model: str) -> None:
@@ -332,6 +333,19 @@ class StreamState:
         # OAuth users gets dropped instead of leaking to the
         # downstream channel.
         self.active_item_type: str | None = None
+        # ChatGPT's Responses API tags assistant message items with
+        # a ``phase`` field — "commentary" for scratch preamble the
+        # model emits before tool calls, "final_answer" for the
+        # actual user-facing reply.  Both share the same
+        # ``response.output_text.delta`` event stream; only the
+        # parent ``output_item.added.item.phase`` distinguishes
+        # them.  We capture the phase per item and drop deltas for
+        # commentary items so the channel layer never sees Codex
+        # scratch text.  Reference: OpenClaw's metadata-based
+        # detection (https://github.com/openclaw/openclaw —
+        # ``OpenAIResponsesAssistantPhase`` in
+        # ``src/agents/openai-ws-connection.ts``).
+        self.active_item_phase: str | None = None
 
 
 def _chat_chunk(
@@ -383,20 +397,34 @@ async def translate_responses_events_to_chat_chunks(
 
         ev_type = ev.get("type", "")
 
-        # Text deltas — only forward when the active item is a
-        # user-facing ``message``.  Without this gate, reasoning
-        # summary text emitted by Codex/gpt-5.x leaks straight to
-        # the downstream channel as if it were the assistant's
-        # reply (observed 2026-04-25: scratch-style fragments like
-        # "Need view_video maybe returns note?" surfaced in
-        # WhatsApp).  When ``active_item_type`` is None we fall
-        # back to forwarding so older models that omit the
-        # ``output_item.added`` envelope still work.
+        # Text deltas — non-message items (reasoning summary)
+        # always drop.  Message items split by ``phase``:
+        #   - ``commentary`` (Codex/gpt-5.x scratch preamble like
+        #     "Need view_video maybe...") emits as
+        #     ``reasoning_content`` — agentscope reads that into
+        #     a ``ThinkingBlock`` which the runner adapter turns
+        #     into a ``MessageType.REASONING`` event, which the
+        #     channel layer already drops from user-facing send
+        #     while the Console UI still renders it in the
+        #     thinking pane.
+        #   - ``final_answer`` (or missing — older models)
+        #     emits as ``content`` and reaches the channel as
+        #     before.
+        # Result: scratch never leaks to chat surfaces but UI
+        # operators retain full visibility into the model's
+        # internal reasoning.  Reference: OpenClaw's metadata-
+        # based phase routing.
         if ev_type == "response.output_text.delta":
             if state.active_item_type not in (None, "message"):
                 continue
             delta_text = ev.get("delta", "") or ""
-            if delta_text:
+            if not delta_text:
+                continue
+            if state.active_item_phase == "commentary":
+                yield _chat_chunk(
+                    state, {"reasoning_content": delta_text},
+                )
+            else:
                 yield _chat_chunk(state, {"content": delta_text})
             continue
 
@@ -405,6 +433,13 @@ async def translate_responses_events_to_chat_chunks(
             item = ev.get("item") or {}
             item_type = item.get("type", "")
             state.active_item_type = item_type
+            # ChatGPT Responses API tags message items with
+            # ``phase`` ("commentary" or "final_answer") on the
+            # output_item itself.  Capture so the text-delta
+            # filter above can route by it.  Default to None
+            # for non-message items / models that don't expose
+            # the field.
+            state.active_item_phase = item.get("phase") if item_type == "message" else None
             if item_type == "function_call":
                 idx = len(state.tool_calls)
                 item_id = item.get("id", "")
@@ -436,6 +471,7 @@ async def translate_responses_events_to_chat_chunks(
 
         if ev_type == "response.output_item.done":
             state.active_item_type = None
+            state.active_item_phase = None
             continue
 
         # Tool-call argument deltas
@@ -517,11 +553,14 @@ async def collect_as_chat_completion(
 
         t = ev.get("type", "")
 
-        # Same active-item gate as the streaming path: skip text
-        # deltas that belong to a reasoning item so they never end
-        # up in the chat.completion ``content``.
+        # Same item / phase gates as the streaming path — skip
+        # text deltas from non-message items (reasoning summary)
+        # AND from message items in ``commentary`` phase (Codex
+        # scratch preamble).
         if t == "response.output_text.delta":
             if state.active_item_type not in (None, "message"):
+                continue
+            if state.active_item_phase == "commentary":
                 continue
             content_parts.append(ev.get("delta", "") or "")
             continue
@@ -530,6 +569,9 @@ async def collect_as_chat_completion(
             item = ev.get("item") or {}
             item_type = item.get("type", "")
             state.active_item_type = item_type
+            state.active_item_phase = (
+                item.get("phase") if item_type == "message" else None
+            )
             if item_type == "function_call":
                 item_id = item.get("id", "")
                 idx = len(tool_calls)
@@ -550,6 +592,7 @@ async def collect_as_chat_completion(
 
         if t == "response.output_item.done":
             state.active_item_type = None
+            state.active_item_phase = None
             continue
 
         if t == "response.function_call_arguments.delta":

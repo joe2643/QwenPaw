@@ -833,3 +833,153 @@ class TestCollectAsChatCompletion:
         )
         with pytest.raises(RuntimeError, match="boom"):
             await collect_as_chat_completion(upstream, state)
+
+
+class TestPhaseBasedCommentaryDrop:
+    """ChatGPT Responses API tags assistant message items with
+    ``phase``: ``commentary`` for scratch preamble, ``final_answer``
+    for the user-facing reply.  Both share the same
+    ``response.output_text.delta`` event stream — only the parent
+    ``output_item.added.item.phase`` distinguishes them.
+    Reference: OpenClaw's metadata-based detection
+    (``OpenAIResponsesAssistantPhase`` in their codebase).
+    """
+
+    @pytest.mark.asyncio
+    async def test_commentary_phase_text_dropped_in_stream(self):
+        """Commentary-phase deltas (Codex scratch like 'Need view_video')
+        must NOT reach the chat-completion content."""
+        state = StreamState(model="gpt-5.5")
+        upstream = _FakeUpstream([
+            _sse({
+                "type": "response.output_item.added",
+                "item": {
+                    "id": "msg_1",
+                    "type": "message",
+                    "phase": "commentary",
+                },
+            }),
+            _sse({"type": "response.output_text.delta",
+                  "delta": "Need view_video maybe"}),
+            _sse({"type": "response.output_text.delta",
+                  "delta": " returns note?"}),
+            _sse({"type": "response.output_item.done"}),
+            _sse({
+                "type": "response.output_item.added",
+                "item": {
+                    "id": "msg_2",
+                    "type": "message",
+                    "phase": "final_answer",
+                },
+            }),
+            _sse({"type": "response.output_text.delta",
+                  "delta": "Hello user!"}),
+            _sse({"type": "response.output_item.done"}),
+            _sse({"type": "response.completed",
+                  "response": {"output": []}}),
+        ])
+        chunks = []
+        async for c in translate_responses_events_to_chat_chunks(
+            upstream, state,
+        ):
+            chunks.append(c)
+        text = "".join(
+            c["choices"][0]["delta"].get("content", "")
+            for c in chunks
+        )
+        # Only the final_answer text reaches the channel.
+        assert text == "Hello user!"
+        assert "Need view_video" not in text
+
+    @pytest.mark.asyncio
+    async def test_final_answer_passes_through(self):
+        """Sanity: final_answer phase text is forwarded as before."""
+        state = StreamState(model="gpt-5.5")
+        upstream = _FakeUpstream([
+            _sse({
+                "type": "response.output_item.added",
+                "item": {
+                    "id": "msg_1",
+                    "type": "message",
+                    "phase": "final_answer",
+                },
+            }),
+            _sse({"type": "response.output_text.delta",
+                  "delta": "哼，收到。我先睇下。"}),
+            _sse({"type": "response.output_item.done"}),
+            _sse({"type": "response.completed",
+                  "response": {"output": []}}),
+        ])
+        chunks = []
+        async for c in translate_responses_events_to_chat_chunks(
+            upstream, state,
+        ):
+            chunks.append(c)
+        text = "".join(
+            c["choices"][0]["delta"].get("content", "")
+            for c in chunks
+        )
+        assert text == "哼，收到。我先睇下。"
+
+    @pytest.mark.asyncio
+    async def test_missing_phase_treated_as_final_answer(self):
+        """Backwards compat: when the older API doesn't expose
+        ``phase`` on message items, default behaviour is to
+        forward the text (assume final_answer).  Prevents
+        regression for non-Codex providers that share this
+        translator and never set the field."""
+        state = StreamState(model="gpt-5.4")
+        upstream = _FakeUpstream([
+            _sse({
+                "type": "response.output_item.added",
+                "item": {"id": "msg_1", "type": "message"},
+            }),
+            _sse({"type": "response.output_text.delta",
+                  "delta": "ok"}),
+            _sse({"type": "response.output_item.done"}),
+            _sse({"type": "response.completed",
+                  "response": {"output": []}}),
+        ])
+        chunks = []
+        async for c in translate_responses_events_to_chat_chunks(
+            upstream, state,
+        ):
+            chunks.append(c)
+        text = "".join(
+            c["choices"][0]["delta"].get("content", "")
+            for c in chunks
+        )
+        assert text == "ok"
+
+    @pytest.mark.asyncio
+    async def test_commentary_drop_in_collect(self):
+        """Same gate works on the non-streaming drain path."""
+        state = StreamState(model="gpt-5.5")
+        upstream = _FakeUpstream([
+            _sse({
+                "type": "response.output_item.added",
+                "item": {
+                    "id": "msg_1",
+                    "type": "message",
+                    "phase": "commentary",
+                },
+            }),
+            _sse({"type": "response.output_text.delta",
+                  "delta": "scratch text"}),
+            _sse({"type": "response.output_item.done"}),
+            _sse({
+                "type": "response.output_item.added",
+                "item": {
+                    "id": "msg_2",
+                    "type": "message",
+                    "phase": "final_answer",
+                },
+            }),
+            _sse({"type": "response.output_text.delta",
+                  "delta": "user-facing"}),
+            _sse({"type": "response.output_item.done"}),
+            _sse({"type": "response.completed",
+                  "response": {"output": []}}),
+        ])
+        body = await collect_as_chat_completion(upstream, state)
+        assert body["choices"][0]["message"]["content"] == "user-facing"
