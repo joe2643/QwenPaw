@@ -39,6 +39,7 @@ from .auth import AuthMiddleware
 from .routers import router as api_router, create_agent_scoped_router
 from .routers.agent_scoped import AgentContextMiddleware
 from .routers.approval import router as approval_router
+from .routers.openai_compat import router as openai_compat_router
 from .routers.voice import voice_router
 from ..envs import load_envs_into_environ
 from ..providers.provider_manager import ProviderManager
@@ -748,6 +749,11 @@ app.include_router(api_router, prefix="/api")
 
 # Approval router: /api/approval/approve, /api/approval/deny, etc.
 app.include_router(approval_router, prefix="/api")
+
+# OpenAI-compatible chat-completions shim backed by Codex OAuth.
+# Mounted at root /v1/... (NOT under /api/) so any consumer that
+# expects a stock OpenAI base_url just sets ``http://host:8088/v1``.
+app.include_router(openai_compat_router)
 
 # Agent-scoped router: /api/agents/{agentId}/chats, etc.
 agent_scoped_router = create_agent_scoped_router()
