@@ -34,20 +34,30 @@ from qwenpaw.providers.claude_acpx_daemon import (
 
 def _python_cmd_builder(script: str) -> Any:
     """Return a ``cmd_builder`` callable for AcpxDaemon that runs the
-    given inline Python script.  The script gets the session name
-    on argv[1]; the daemon then appends ``--ttl <n>`` then the prompt
-    as a positional, so the script's argv layout matches real acpx:
+    given inline Python script.  Mirrors the real
+    :func:`acpx_translate.stateful_acpx_cmd` shape: globals go into
+    the argv head, ``--ttl`` lives in the global slot, the daemon
+    then appends prompt as a trailing positional.  argv layout:
 
       argv[0] = python (interpreter)
       argv[1] = "-c"
       argv[2] = script source
       argv[3] = session_name
-      argv[4..N-2] = "--ttl", "<n>"
+      argv[4..5] = "--ttl", "<n>" (when ttl_seconds given)
       argv[-1] = prompt text
     """
 
-    def builder(session_name: str) -> tuple[str, ...]:
-        return (sys.executable, "-c", script, session_name)
+    def builder(
+        session_name: str,
+        *,
+        ttl_seconds: int | None = None,
+        cwd: str | None = None,  # noqa: ARG001 — unused in tests but
+        # accepted for signature compat with the real builder.
+    ) -> tuple[str, ...]:
+        args: list[str] = [sys.executable, "-c", script, session_name]
+        if ttl_seconds is not None:
+            args += ["--ttl", str(ttl_seconds)]
+        return tuple(args)
 
     return builder
 
@@ -222,6 +232,7 @@ class TestSubmitTurnBasic:
     @pytest.mark.asyncio
     async def test_yields_session_update_and_final(self) -> None:
         daemon = AcpxDaemon(
+            auto_ensure_session=False,
             cmd_builder=_python_cmd_builder(_BASIC_SCRIPT),
         )
         lines = []
@@ -241,6 +252,7 @@ class TestSubmitTurnBasic:
     @pytest.mark.asyncio
     async def test_prompt_blocks_reach_subprocess_stdin(self) -> None:
         daemon = AcpxDaemon(
+            auto_ensure_session=False,
             cmd_builder=_python_cmd_builder(_ECHO_PROMPT_SCRIPT),
         )
         lines = []
@@ -258,6 +270,7 @@ class TestSubmitTurnBasic:
     @pytest.mark.asyncio
     async def test_empty_blocks_become_empty_prompt_sentinel(self) -> None:
         daemon = AcpxDaemon(
+            auto_ensure_session=False,
             cmd_builder=_python_cmd_builder(_ECHO_PROMPT_SCRIPT),
         )
         lines = []
@@ -286,6 +299,7 @@ class TestSubmitTurnRouting:
             return {"content": "FAKE_FILE_CONTENT"}
 
         daemon = AcpxDaemon(
+            auto_ensure_session=False,
             cmd_builder=_python_cmd_builder(_REQUEST_SCRIPT),
         )
         daemon.set_handler("fs/read_text_file", handler)
@@ -315,6 +329,7 @@ class TestSubmitTurnRouting:
         # No handler registered for fs/read_text_file: daemon should
         # write back an error envelope automatically.
         daemon = AcpxDaemon(
+            auto_ensure_session=False,
             cmd_builder=_python_cmd_builder(_REQUEST_SCRIPT),
         )
         lines = []
@@ -337,6 +352,7 @@ class TestSubmitTurnRouting:
             raise RuntimeError("kaboom")
 
         daemon = AcpxDaemon(
+            auto_ensure_session=False,
             cmd_builder=_python_cmd_builder(_REQUEST_SCRIPT),
         )
         daemon.set_handler("fs/read_text_file", boom)
@@ -373,6 +389,7 @@ class TestSubmitTurnErrors:
     @pytest.mark.asyncio
     async def test_after_shutdown_raises(self) -> None:
         daemon = AcpxDaemon(
+            auto_ensure_session=False,
             cmd_builder=_python_cmd_builder(_BASIC_SCRIPT),
         )
         await daemon.shutdown()
@@ -406,6 +423,7 @@ class TestSubmitTurnErrors:
     @pytest.mark.asyncio
     async def test_subprocess_timeout_raises(self) -> None:
         daemon = AcpxDaemon(
+            auto_ensure_session=False,
             cmd_builder=_python_cmd_builder(_STALL_SCRIPT),
             turn_timeout_seconds=0.5,
         )
@@ -422,6 +440,7 @@ class TestSubmitTurnErrors:
     @pytest.mark.asyncio
     async def test_nonzero_rc_logged_and_metric_recorded(self) -> None:
         daemon = AcpxDaemon(
+            auto_ensure_session=False,
             cmd_builder=_python_cmd_builder(_BAD_RC_SCRIPT),
         )
         # Subprocess exits before producing JSON-RPC; the loop just
@@ -446,6 +465,7 @@ class TestShutdown:
     @pytest.mark.asyncio
     async def test_shutdown_kills_inflight(self) -> None:
         daemon = AcpxDaemon(
+            auto_ensure_session=False,
             cmd_builder=_python_cmd_builder(_STALL_SCRIPT),
             turn_timeout_seconds=10,
         )

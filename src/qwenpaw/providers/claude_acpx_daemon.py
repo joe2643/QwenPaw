@@ -142,20 +142,35 @@ class AcpxDaemon:
         ttl_seconds: int = _DEFAULT_TTL_SECONDS,
         turn_timeout_seconds: float = _DEFAULT_TURN_TIMEOUT_SECONDS,
         # Test seam: override how we materialise the argv tuple.
-        # Production uses :func:`acpx_translate.stateful_acpx_cmd`.
-        cmd_builder: Callable[[str], tuple[str, ...]] = (
+        # Production uses :func:`acpx_translate.stateful_acpx_cmd`
+        # with ttl + cwd parameters.
+        cmd_builder: Callable[..., tuple[str, ...]] = (
             acpx_translate.stateful_acpx_cmd
         ),
+        # Test seam: production always runs ``acpx claude sessions
+        # ensure --name <name>`` before the first prompt for a
+        # session, but unit tests use script-based fake binaries that
+        # don't model that surface.  Setting False makes submit_turn
+        # skip the ensure round trip entirely.
+        auto_ensure_session: bool = True,
     ) -> None:
         self._ttl_seconds = ttl_seconds
         self._turn_timeout = turn_timeout_seconds
         self._cmd_builder = cmd_builder
+        self._auto_ensure_session = auto_ensure_session
         # Method-name → handler.  Populated by
         # :func:`register_handlers` from claude_acpx_handlers.
         self._handlers: dict[str, HandlerFn] = {}
         # Set of in-flight processes so :meth:`shutdown` can kill them
         # rather than orphaning.
         self._inflight: set[asyncio.subprocess.Process] = set()
+        # Sessions we've already shelled out ``sessions ensure`` for
+        # this process — acpx requires the named session to exist on
+        # disk before ``-s <name>`` will route a prompt to it.  See
+        # smoke test 2026-04-27.  Per-process cache; a daemon restart
+        # re-runs ensure (idempotent on disk).
+        self._ensured_sessions: set[str] = set()
+        self._ensure_lock = asyncio.Lock()
         self._closed = False
 
     # ----- Singleton accessor (Lane D entrypoint) ---------------- #
@@ -232,6 +247,16 @@ class AcpxDaemon:
                 "Run `npm i -g acpx` or ensure `npx` is available.",
             )
 
+        # acpx requires the session to exist on disk before ``-s
+        # <name>`` works — otherwise the JSON-RPC reply is a
+        # ``NO_SESSION`` error.  Idempotent shell-out, cached per
+        # process so repeat calls in the same daemon don't pay the
+        # round trip.  Unit tests opt out via ``auto_ensure_session=
+        # False`` because their fake binaries don't model the ensure
+        # subcommand.
+        if self._auto_ensure_session:
+            await self._ensure_session(session_name)
+
         text_payload = _payload_text(prompt_blocks)
         # The prompt rides as a positional CLI argument so stdin stays
         # free for ACP reply traffic (Claude→client requests like
@@ -242,11 +267,15 @@ class AcpxDaemon:
         # of the prompt while keeping it open for replies, which the
         # Python asyncio.subprocess API doesn't expose without unsafe
         # tricks.  Argv route is simpler and matches the real CLI.
-        cmd = (
-            self._cmd_builder(session_name)
-            + ("--ttl", str(self._ttl_seconds))
-            + (text_payload,)
-        )
+        #
+        # ttl rides in the global-options slot via ``cmd_builder`` so
+        # acpx's queue-owner inherits it; appending after the
+        # subcommand triggers ``error: unknown option --ttl`` (smoke
+        # test 2026-04-27).
+        cmd = self._cmd_builder(
+            session_name,
+            ttl_seconds=self._ttl_seconds,
+        ) + (text_payload,)
 
         proc = await self._spawn(cmd)
         try:
@@ -334,6 +363,10 @@ class AcpxDaemon:
         effort, and acpx's own LRU eventually GCs orphan sessions on
         disk.
         """
+        # Drop from the ensured cache regardless of whether the close
+        # call lands — re-mint with a fresh name still pays the
+        # ``sessions ensure`` round trip but stays correct.
+        self._ensured_sessions.discard(session_name)
         if self._closed:
             return
         if not _binary_available():
@@ -415,6 +448,65 @@ class AcpxDaemon:
         self._inflight.clear()
 
     # ----- Internal helpers --------------------------------------- #
+
+    async def _ensure_session(self, session_name: str) -> None:
+        """Idempotent ``acpx claude sessions ensure --name <name>``.
+
+        Lazy-cached per-process: the second call for the same name
+        is a no-op.  acpx itself is also idempotent on this command
+        (returns ``(exists)`` instead of ``(created)`` when the
+        session is already on disk), so re-running on a daemon
+        restart is safe.
+
+        Failures raise :class:`AcpxDaemonError`; the caller bubbles
+        up rather than continuing to a NO_SESSION error from the
+        prompt path.
+        """
+        if session_name in self._ensured_sessions:
+            return
+        async with self._ensure_lock:
+            if session_name in self._ensured_sessions:
+                return
+            version = acpx_translate._PINNED_ACPX_VERSION
+            cmd = (
+                "npx",
+                f"acpx@{version}",
+                "claude",
+                "sessions",
+                "ensure",
+                "--name",
+                session_name,
+            )
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except FileNotFoundError as e:
+                raise AcpxDaemonError(
+                    f"acpx spawn failed for sessions ensure: {e}",
+                ) from e
+            try:
+                _, stderr = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=30,
+                )
+            except asyncio.TimeoutError as e:
+                proc.kill()
+                await proc.wait()
+                raise AcpxDaemonError(
+                    f"acpx claude sessions ensure timed out for "
+                    f"{session_name}",
+                ) from e
+            if proc.returncode != 0:
+                err_msg = (stderr or b"").decode("utf-8", errors="replace")
+                raise AcpxDaemonError(
+                    f"acpx claude sessions ensure --name {session_name} "
+                    f"failed (rc={proc.returncode}): {err_msg[:500]}",
+                )
+            self._ensured_sessions.add(session_name)
 
     async def _spawn(
         self,

@@ -53,23 +53,52 @@ _PINNED_ACPX_VERSION: str = "0.6.1"
 
 # Stateless one-shot exec — used for the legacy fire-and-forget path
 # and for unit tests that don't care about session lifecycle.
+#
+# IMPORTANT: ``--format``, ``--json-strict``, ``--ttl``, ``--cwd`` are
+# **global** options on the ``acpx`` binary and MUST appear BEFORE
+# the ``claude`` subcommand.  Putting them after produces an
+# ``error: unknown option`` and rc=1 with no JSON output.  See smoke
+# test 2026-04-27 — first integration run surfaced this immediately.
 DEFAULT_ACPX_CMD: tuple[str, ...] = (
-    "npx", f"acpx@{_PINNED_ACPX_VERSION}", "claude", "exec",
+    "npx", f"acpx@{_PINNED_ACPX_VERSION}",
     "--format", "json", "--json-strict",
+    "claude", "exec",
 )
 
 
-def stateful_acpx_cmd(session_name: str) -> tuple[str, ...]:
+def stateful_acpx_cmd(
+    session_name: str,
+    *,
+    ttl_seconds: int | None = None,
+    cwd: str | None = None,
+) -> tuple[str, ...]:
     """Stateful invocation: ``acpx claude -s <name>`` keeps Claude
     Code's session warm across CoPaw turns.  Used by
     :class:`ClaudeAcpxChatModel` once the session registry has
     decided which session this turn belongs to.
+
+    NOTE: acpx requires the named session to exist on disk before
+    ``-s <name>`` works.  Lane B's :class:`AcpxDaemon._ensure_session`
+    shells out to ``acpx claude sessions ensure --name <name>`` once
+    per session lifetime to satisfy that contract.
+
+    The optional ``ttl_seconds`` and ``cwd`` overrides land in the
+    global-options slot before ``claude`` so the queue-owner inherits
+    the right idle policy and working directory.
     """
-    return (
-        "npx", f"acpx@{_PINNED_ACPX_VERSION}", "claude",
-        "-s", session_name,
-        "--format", "json", "--json-strict",
-    )
+    args: list[str] = [
+        "npx",
+        f"acpx@{_PINNED_ACPX_VERSION}",
+        "--format",
+        "json",
+        "--json-strict",
+    ]
+    if ttl_seconds is not None:
+        args += ["--ttl", str(ttl_seconds)]
+    if cwd is not None:
+        args += ["--cwd", cwd]
+    args += ["claude", "-s", session_name]
+    return tuple(args)
 
 
 # =========================================================================
@@ -226,20 +255,14 @@ def extract_tail_from_history(
                 "text": f"[tool-result tool_call_id={tcid}]\n{text}",
             })
         elif role == "assistant":
-            # Hybrid mode (codex C1 resolution): if Claude's session
-            # already produced this turn, we shouldn't be re-shipping
-            # it.  But on commit_turn the wrapper advances
-            # last_shipped_idx past assistant outputs, so this case
-            # is a buggy ship_tail that included the assistant reply
-            # we just got back.  Defensive: log and include nothing.
-            text = _plain(content)
-            if text:
-                logger.warning(
-                    "extract_tail_from_history: unexpected assistant turn "
-                    "in tail (idx=%d) — last_shipped_idx not advanced "
-                    "after prior turn?",
-                    messages.index(msg),
-                )
+            # Expected: agentscope appends Claude's previous reply to
+            # the message list between turns, so the next turn's
+            # tail starts with the assistant message Claude already
+            # produced (and acpx already has in its session state).
+            # Drop silently — re-shipping it would let the agent
+            # quote its own reply back at itself, which is harmless
+            # but noisy.
+            continue
         # role=="system" in tail is also unexpected (system goes in
         # seed); skip silently.
     return blocks or [{"type": "text", "text": ""}]
