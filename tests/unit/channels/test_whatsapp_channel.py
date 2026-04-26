@@ -1766,6 +1766,7 @@ class TestSendMediaStickerConvention:
         await ch.send_media("1234567890@s.whatsapp.net", part, meta={})
 
         ch._client.send_sticker.assert_awaited_once()
+        assert ch._client.send_sticker.await_args.kwargs.get("passthrough") is True
         ch._client.send_image.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1817,6 +1818,7 @@ class TestSendMediaStickerConvention:
         await ch.send_media("1234567890@s.whatsapp.net", part, meta={})
 
         ch._client.send_sticker.assert_awaited_once()
+        assert ch._client.send_sticker.await_args.kwargs.get("passthrough") is True
         ch._client.send_image.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1836,6 +1838,7 @@ class TestSendMediaStickerConvention:
         await ch.send_media("1234567890@s.whatsapp.net", part, meta={})
 
         ch._client.send_sticker.assert_awaited_once()
+        assert ch._client.send_sticker.await_args.kwargs.get("passthrough") is True
         ch._client.send_image.assert_not_awaited()
 
     @pytest.mark.asyncio

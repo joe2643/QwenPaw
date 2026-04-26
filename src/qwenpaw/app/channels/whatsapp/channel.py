@@ -1000,15 +1000,37 @@ class WhatsAppChannel(BaseChannel):
                 pass
             return None
 
+        # Cache hit lookup for a quoted single-media parent message.
+        # Inbound media saves to ``wa_<kind>_<msg_id>.<ext>`` and
+        # registers under ``(chat_str, msg_id)`` in
+        # ``_inbound_media``.  When the user replies to that message,
+        # WhatsApp's contextInfo carries the parent's stanza ID — we
+        # use it to reverse-lookup the original file path instead of
+        # re-downloading a fresh copy as ``wa_quote_<stanza>.<ext>``.
+        # Filtering by extension keeps the right media type when the
+        # cache holds multiple paths for one ID (album re-use).
+        # Returns ``None`` for a cache miss so callers can fall back
+        # to ``_try_download``.
+        def _cached_quote_path(extensions: set[str]) -> str | None:
+            for p in self._lookup_inbound_media(chat_str, stanza_id):
+                if Path(p).suffix.lower() in extensions:
+                    return p
+            return None
+
         # Detect media types present in quoted message.  For each
-        # downloadable type we attempt ``client.download_any`` and,
-        # on success, emit the path inline in the text block so the
+        # downloadable type we first reuse the cached inbound copy
+        # if we still have it on disk, and only download a fresh
+        # ``wa_quote_<stanza>.*`` when the cache misses (forwarded
+        # message, restart cleared the index, etc.).  On success
+        # the resolved path lands inline in the text block so the
         # agent can reference it without guessing.
         if quoted_msg.HasField("imageMessage"):
             caption = getattr(quoted_msg.imageMessage, "caption", "") or ""
             if caption and not quote_body:
                 quote_body = caption
-            img_path = await _try_download("jpg")
+            img_path = _cached_quote_path(
+                {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"},
+            ) or await _try_download("jpg")
             if img_path:
                 media_types.append(f"image: {img_path}")
                 extra_parts.append(
@@ -1021,28 +1043,53 @@ class WhatsAppChannel(BaseChannel):
                 media_types.append("image")
 
         if quoted_msg.HasField("videoMessage"):
-            vid_path = await _try_download("mp4")
+            vid_path = _cached_quote_path(
+                {".mp4", ".mov", ".avi", ".webm", ".mkv", ".mpeg"},
+            ) or await _try_download("mp4")
             media_types.append(f"video: {vid_path}" if vid_path else "video")
 
         if quoted_msg.HasField("audioMessage"):
             ptt = getattr(quoted_msg.audioMessage, "ptt", False)
             label = "voice note" if ptt else "audio"
-            aud_path = await _try_download("ogg")
+            aud_path = _cached_quote_path(
+                {".ogg", ".m4a", ".mp3", ".wav", ".opus"},
+            ) or await _try_download("ogg")
             media_types.append(f"{label}: {aud_path}" if aud_path else label)
 
         if quoted_msg.HasField("documentMessage"):
             fname = getattr(quoted_msg.documentMessage, "fileName", "") or ""
             base_label = f"file: {fname}" if fname else "document"
-            # Preserve the original extension when we can — some
-            # downstream tools sniff file type from the path.
             ext = fname.rsplit(".", 1)[-1] if "." in fname else "bin"
-            doc_path = await _try_download(ext)
+            # Documents are arbitrary file types — inbound saves
+            # use the user's filename when present (e.g.
+            # ``report.pdf``) or ``wa_doc_<msg_id>`` with no
+            # extension when the upload was nameless.  The cache
+            # holds at most one path per ``(chat, msg_id)`` for
+            # non-album parents, so we accept the first hit
+            # regardless of extension instead of constraining by
+            # ``.<ext>`` — the extension constraint silently
+            # missed nameless docs because ``Path("wa_doc_x").suffix``
+            # is ``""`` and never matches ``".bin"``.
+            cached = self._lookup_inbound_media(chat_str, stanza_id)
+            doc_path = cached[0] if cached else await _try_download(ext)
             media_types.append(
                 f"{base_label} ({doc_path})" if doc_path else base_label,
             )
 
         if quoted_msg.HasField("stickerMessage"):
-            st_path = await _try_download("webp")
+            # Sticker is the one case where the cached extension
+            # collides with image (.webp), but the parent message
+            # here is a sticker proto — its cached file is always
+            # ``wa_sticker_<msg_id>.webp``.  Match on .webp; when
+            # the cache holds both an image and a sticker for the
+            # same ID (shouldn't happen for non-album), the image
+            # path would shadow it, so prefer file names that
+            # actually contain ``sticker`` to disambiguate.
+            cached = self._lookup_inbound_media(chat_str, stanza_id)
+            st_path = next(
+                (p for p in cached if "sticker" in Path(p).stem.lower()),
+                None,
+            ) or _cached_quote_path({".webp"}) or await _try_download("webp")
             media_types.append(f"sticker: {st_path}" if st_path else "sticker")
 
         # AlbumMessage: WhatsApp's multi-image / multi-video container.
@@ -1730,23 +1777,30 @@ class WhatsAppChannel(BaseChannel):
                         and p.text.startswith("=== UNTRUSTED")
                     )
                 ]
+                envelope_prefix = f"{envelope}: "
                 for i, part in enumerate(content_parts):
-                    if hasattr(part, "text") and part.text.startswith(
-                        "[WhatsApp ",
+                    if not hasattr(part, "text") or not isinstance(
+                        part.text, str,
                     ):
-                        # Format is: [WhatsApp group xxx] Name (+phone): text
-                        # Strip up to the first ": " after the closing bracket.
-                        bracket_end = part.text.find("] ")
-                        if bracket_end > 0:
-                            after_bracket = part.text[bracket_end + 2 :]
-                            idx = after_bracket.find(": ")
-                            if idx > 0:
-                                raw_text = after_bracket[idx + 2 :]
-                                content_parts[i] = TextContent(
-                                    type=ContentType.TEXT,
-                                    text=raw_text,
-                                )
-                        break
+                        continue
+                    # We wrapped the user's text with the exact
+                    # ``envelope`` string above, so strip by
+                    # exact-prefix match — that's the only way to
+                    # reliably handle sender display names that
+                    # contain ``": "`` themselves (e.g.
+                    # ``Ops: Night (+123)`` would defeat any
+                    # ``find(": ")`` heuristic).  Older envelopes
+                    # without the timestamp prefix won't hit this
+                    # branch because ``envelope`` always reflects
+                    # the current wrap shape, and the wrap+strip
+                    # both run inside the same ``has_bot_command``
+                    # block.
+                    if part.text.startswith(envelope_prefix):
+                        content_parts[i] = TextContent(
+                            type=ContentType.TEXT,
+                            text=part.text[len(envelope_prefix) :],
+                        )
+                    break
                 request = self.build_agent_request_from_user_content(
                     channel_id=self.channel,
                     sender_id=effective_sender,
@@ -2480,7 +2534,7 @@ class WhatsAppChannel(BaseChannel):
                         "whatsapp: send_media → sticker path=%s",
                         file_path,
                     )
-                    await self._client.send_sticker(jid, file_path)
+                    await self._client.send_sticker(jid, file_path, passthrough=True)
                 else:
                     await self._client.send_image(jid, file_path)
             elif t == ContentType.VIDEO:
