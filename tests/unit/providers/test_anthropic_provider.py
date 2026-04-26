@@ -158,6 +158,132 @@ async def test_check_model_connection_api_error_returns_false(
     assert msg == "Model 'claude-3-5-haiku' is not reachable or usable"
 
 
+# ---------------------------------------------------------------- #
+# api_key sentinel branches — oauth vs acpx vs anthropic-direct    #
+# ---------------------------------------------------------------- #
+
+
+class TestSentinelBranches:
+    """Pins the ``api_key`` sentinel dispatch in
+    :class:`AnthropicProvider`.  Three string-valued sentinels share
+    the same provider class:
+
+    * ``"oauth"`` -> :class:`ClaudeOAuthChatModel` (claude-oauth tile)
+    * ``"acpx"``  -> :class:`ClaudeAcpxChatModel`  (claude-acpx tile)
+    * anything else -> ``AnthropicChatModel``       (Anthropic-direct)
+
+    Drift between the sentinel constants and the dispatch branch
+    silently routes a user's traffic to the wrong path (e.g. user
+    picks claude-acpx tile but every chat hits Anthropic direct
+    because the sentinel string disagrees).  These tests guard
+    against that.
+    """
+
+    def test_acpx_sentinel_constant_value(self) -> None:
+        # The literal string is load-bearing: it must match what
+        # PROVIDER_CLAUDE_ACPX writes into the persisted provider
+        # config in provider_manager.py.
+        from qwenpaw.providers.anthropic_provider import (
+            ACPX_API_KEY_SENTINEL,
+        )
+
+        assert ACPX_API_KEY_SENTINEL == "acpx"
+
+    def test_oauth_sentinel_constant_value(self) -> None:
+        # Symmetric guard so a future "let's rename to claude-oauth"
+        # refactor doesn't silently break PROVIDER_CLAUDE_OAUTH.
+        from qwenpaw.providers.anthropic_provider import (
+            OAUTH_API_KEY_SENTINEL,
+        )
+
+        assert OAUTH_API_KEY_SENTINEL == "oauth"
+
+    def test_is_acpx_true_when_api_key_is_acpx(self) -> None:
+        provider = AnthropicProvider(
+            id="claude-acpx",
+            name="Claude Code (acpx)",
+            base_url="acpx://claude",
+            api_key="acpx",
+            chat_model="OpenAIChatModel",
+        )
+        assert provider._is_acpx is True
+        # Sentinels are mutually exclusive — same api_key cannot be
+        # both at once.
+        assert provider._is_oauth is False
+
+    def test_is_acpx_false_when_api_key_is_oauth(self) -> None:
+        provider = AnthropicProvider(
+            id="claude-oauth",
+            name="Claude Code (OAuth)",
+            base_url="https://api.anthropic.com",
+            api_key="oauth",
+            chat_model="AnthropicChatModel",
+        )
+        assert provider._is_acpx is False
+        assert provider._is_oauth is True
+
+    def test_is_acpx_false_for_real_api_key(self) -> None:
+        # Vanilla Anthropic-direct: api_key is the user's actual sk-
+        # token, neither sentinel branch fires.
+        provider = AnthropicProvider(
+            id="anthropic",
+            name="Anthropic",
+            base_url="https://api.anthropic.com",
+            api_key="sk-ant-real-token",
+            chat_model="AnthropicChatModel",
+        )
+        assert provider._is_acpx is False
+        assert provider._is_oauth is False
+
+    def test_acpx_branch_returns_claude_acpx_chat_model(self) -> None:
+        # Dispatch contract: get_chat_model_instance must reach the
+        # acpx wrapper class when the sentinel is set.  This is
+        # what the UI's Settings > Active Model tile cares about.
+        from agentscope.model import AnthropicChatModel
+        from qwenpaw.providers.claude_acpx_model import (
+            ClaudeAcpxChatModel,
+        )
+
+        provider = AnthropicProvider(
+            id="claude-acpx",
+            name="Claude Code (acpx)",
+            base_url="acpx://claude",
+            api_key="acpx",
+            chat_model="OpenAIChatModel",
+        )
+        model = provider.get_chat_model_instance("claude-sonnet-4-5")
+        assert isinstance(model, ClaudeAcpxChatModel)
+        # The wrapper subclasses OpenAIChatModel, NOT
+        # AnthropicChatModel — guards against a future "swap base
+        # class" refactor that would silently change parser behavior.
+        assert not isinstance(model, AnthropicChatModel)
+
+    def test_anthropic_branch_returns_anthropic_chat_model(
+        self,
+        monkeypatch,
+    ) -> None:
+        # Vanilla path still works — adding the acpx branch must not
+        # have shadowed the default dispatch.
+        from agentscope.model import AnthropicChatModel
+        from qwenpaw.providers.claude_acpx_model import (
+            ClaudeAcpxChatModel,
+        )
+
+        provider = AnthropicProvider(
+            id="anthropic",
+            name="Anthropic",
+            base_url="https://api.anthropic.com",
+            api_key="sk-ant-real-token",
+            chat_model="AnthropicChatModel",
+        )
+        model = provider.get_chat_model_instance("claude-sonnet-4-5")
+        assert isinstance(model, AnthropicChatModel)
+        # And not an acpx wrapper masquerading via the OpenAIChatModel
+        # MRO — defense in depth against a constructor-arg fall-through
+        # that would silently route Anthropic-direct traffic to acpx.
+        assert not isinstance(model, ClaudeAcpxChatModel)
+
+
 async def test_update_config_updates_only_non_none_values() -> None:
     provider = _make_provider(is_custom=True)
 

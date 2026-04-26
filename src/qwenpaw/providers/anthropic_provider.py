@@ -32,6 +32,15 @@ CODING_DASHSCOPE_BASE_URL = "https://coding.dashscope.aliyuncs.com/v1"
 # provider config — users just set the api_key to this literal.
 OAUTH_API_KEY_SENTINEL = "oauth"
 
+# Sibling sentinel that switches the provider into Claude Code (acpx)
+# mode — same string-based approach so adding a new dispatch path does
+# not require a schema migration.  Distinct from
+# :data:`OAUTH_API_KEY_SENTINEL` because the two paths share the model
+# catalogue but otherwise behave very differently (direct API vs ACP
+# subprocess + stateful session registry; see
+# :class:`qwenpaw.providers.claude_acpx_model.ClaudeAcpxChatModel`).
+ACPX_API_KEY_SENTINEL = "acpx"
+
 
 # Tool-name prefix required by Anthropic OAuth billing validation when
 # multiple tools are sent.  Claude Code's own tool catalogue uses
@@ -351,6 +360,15 @@ class AnthropicProvider(Provider):
     def _is_oauth(self) -> bool:
         return self.api_key == OAUTH_API_KEY_SENTINEL
 
+    @property
+    def _is_acpx(self) -> bool:
+        """True when the provider is configured to route through the
+        ``acpx`` ACP bridge (Claude Code via subprocess) rather than
+        Anthropic-direct or Claude OAuth.  Mutually exclusive with
+        :attr:`_is_oauth`: the two sentinels are distinct strings.
+        """
+        return self.api_key == ACPX_API_KEY_SENTINEL
+
     def _client(self, timeout: float = 5) -> anthropic.AsyncAnthropic:
         """Build a non-OAuth sync-constructed async client (the common
         path).  OAuth callers must use :meth:`_async_client` instead,
@@ -528,6 +546,23 @@ class AnthropicProvider(Provider):
                     ensure_ascii=False,
                 ),
             }
+
+        if self._is_acpx:
+            # Claude Code via the ``acpx`` ACP subprocess bridge.  This
+            # branch must come before the OAuth check above only for
+            # narrative clarity — the two sentinel strings ("acpx" vs
+            # "oauth") are mutually exclusive so order is not load-
+            # bearing.  The wrapper class owns its own subprocess /
+            # session registry plumbing (see Lane C/D).
+            from .claude_acpx_model import ClaudeAcpxChatModel
+
+            return ClaudeAcpxChatModel(
+                model_name=model_id,
+                stream=True,
+                stream_tool_parsing=False,
+                client_kwargs=client_kwargs,
+                generate_kwargs=self.get_effective_generate_kwargs(model_id),
+            )
 
         if self._is_oauth:
             from qwenpaw.providers.claude_auth import (

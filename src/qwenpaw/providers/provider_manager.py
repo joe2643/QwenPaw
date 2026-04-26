@@ -795,6 +795,57 @@ PROVIDER_CLAUDE_OAUTH = AnthropicProvider(
     },
 )
 
+# Claude Code (acpx) — routes ``chat.completions.create`` through the
+# ``acpx`` CLI bridge to the Claude Code IDE-grade agent (ACP protocol).
+# Stateful per-conversation sessions reuse Claude Code's prompt cache,
+# so the cache prefix stays stable across turns (vs the stateless
+# Anthropic-direct path).  Sibling to ``claude-oauth`` rather than a
+# replacement: direct API still has the lowest latency for one-shot
+# turns; this path wins on multi-turn cache-hit rate.
+#
+# The literal ``"acpx"`` sentinel (see ``ACPX_API_KEY_SENTINEL`` in
+# ``anthropic_provider.py``) tells :class:`AnthropicProvider` to switch
+# its ``get_chat_model_instance`` dispatch into the
+# :class:`qwenpaw.providers.claude_acpx_model.ClaudeAcpxChatModel`
+# branch.  Although the registered ``chat_model`` field is
+# ``"OpenAIChatModel"`` (because that's the SDK shape the wrapper
+# inherits from for streaming/parsing), the actual returned class is a
+# subclass that owns its own ACP subprocess + session registry.
+PROVIDER_CLAUDE_ACPX = AnthropicProvider(
+    id="claude-acpx",
+    name="Claude Code (acpx)",
+    # base_url is cosmetic for this provider — the wrapper never hits
+    # the Anthropic HTTP API.  Surfacing a marker URL here makes the
+    # UI tile readable without misleading the user about traffic flow.
+    base_url="acpx://claude",
+    api_key="acpx",
+    api_key_prefix="",
+    require_api_key=False,
+    # Reuse the Claude OAuth model catalogue verbatim — Claude Code
+    # via acpx exposes the same Sonnet/Opus/Haiku set.  Any drift
+    # (new slug, gated rollout) is handled centrally in CLAUDE_OAUTH_MODELS.
+    models=CLAUDE_OAUTH_MODELS,
+    # The actual returned class is ``ClaudeAcpxChatModel`` which is a
+    # subclass of agentscope's ``OpenAIChatModel`` (so the streaming /
+    # tool-parsing parsers run on familiar SDK types).  Recording
+    # ``"OpenAIChatModel"`` here keeps the literal-typed ``chat_model``
+    # field happy without lying about the parent class.
+    chat_model="OpenAIChatModel",
+    freeze_url=True,
+    # 8K output floor — Claude Code's tool-call argument bodies
+    # (``write_file`` w/ multi-line content, ``execute_shell_command``
+    # with large heredocs) routinely exceed agentscope's 2048 default
+    # and truncate mid-stream.  Mirrors PROVIDER_CLAUDE_OAUTH below.
+    generate_kwargs={"max_tokens": 8192},
+    meta={
+        "api_key_hint": (
+            "No API key — install acpx (`npm i -g acpx`) and run "
+            "`claude login` once to populate ~/.claude/.credentials.json. "
+            "Tool execution stays inside CoPaw (Hybrid mode)."
+        ),
+    },
+)
+
 PROVIDER_GEMINI = GeminiProvider(
     id="gemini",
     name="Google Gemini",
@@ -909,6 +960,7 @@ class ProviderManager:  # pylint: disable=too-many-public-methods
         self._add_builtin(PROVIDER_AZURE_OPENAI)
         self._add_builtin(PROVIDER_ANTHROPIC)
         self._add_builtin(PROVIDER_CLAUDE_OAUTH)
+        self._add_builtin(PROVIDER_CLAUDE_ACPX)
         self._add_builtin(PROVIDER_CODEX_OAUTH)
         self._add_builtin(PROVIDER_GEMINI)
         self._add_builtin(PROVIDER_DEEPSEEK)

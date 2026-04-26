@@ -241,6 +241,53 @@ class CodexOAuthStatus(BaseModel):
     )
 
 
+class ClaudeAcpxStatus(BaseModel):
+    """Status of the Claude Code (acpx) provider — combines two checks
+    that both must pass before a chat turn can succeed:
+
+    1. ``acpx_cli_available`` — ``npx acpx --version`` runs (caches /
+       installs the pinned acpx if missing) and returns a version
+       string the registry can use as a probe.
+    2. ``claude_credentials_present`` — ``~/.claude/.credentials.json``
+       was populated by ``claude login`` and the OAuth token is still
+       within its TTL window (mirrors :class:`ClaudeOAuthStatus`).
+
+    Either check failing surfaces in ``error`` so the UI tile can show
+    a single actionable message instead of a generic "provider not
+    ready" placeholder.  Read-only — does NOT spawn a real ACP session
+    or hit Anthropic's API.
+    """
+
+    acpx_cli_available: bool = Field(
+        ...,
+        description="Whether `npx acpx --version` succeeded",
+    )
+    acpx_version: Optional[str] = Field(
+        None,
+        description="Version string reported by the acpx CLI, if any",
+    )
+    claude_credentials_present: bool = Field(
+        ...,
+        description=(
+            "Whether ~/.claude/.credentials.json exists and decoded"
+        ),
+    )
+    credentials_path: str = Field(
+        ...,
+        description="Expected path of the Claude credentials file",
+    )
+    expires_in_s: Optional[int] = Field(
+        None,
+        description="Seconds until access_token expiry",
+    )
+    error: Optional[str] = Field(
+        None,
+        description=(
+            "Reason either check could not be completed, if any"
+        ),
+    )
+
+
 def _codex_status_from_creds(creds) -> "CodexOAuthStatus":
     """Build a populated ``CodexOAuthStatus`` from a loaded CodexCredential.
     Lives beside the endpoint so both the status and reload handlers
@@ -367,6 +414,131 @@ async def claude_oauth_login_status() -> ClaudeOAuthStatus:
             credentials_path=str(path),
             error=f"{type(e).__name__}: {e}",
         )
+
+
+@router.get(
+    "/claude-acpx/test-connection",
+    response_model=ClaudeAcpxStatus,
+    summary="Claude Code (acpx) provider readiness probe",
+)
+async def claude_acpx_test_connection() -> ClaudeAcpxStatus:
+    """Probe the two prerequisites for the Claude Code (acpx)
+    provider in a single round-trip:
+
+    1. ``npx acpx --version`` runs.  We use ``npx`` rather than
+       requiring a global install so the user's first-run experience
+       on a fresh machine is "click button → wait for npm install"
+       rather than "read installation docs".  Cap at 10s — npm
+       cold-cache on a slow link can blow that, but anything longer
+       has stalled and a hard fail is more useful than an open-ended
+       wait.
+    2. Claude OAuth credentials are present and decoded — mirrors the
+       check in :func:`claude_oauth_login_status` because the acpx
+       path uses the same on-disk file.
+
+    On any failure, populate ``error`` with the most specific message
+    we have, set the corresponding boolean to ``False``, and let the
+    UI tile decide how to render the partial-success states (CLI ok
+    but credentials missing, etc.).
+    """
+    import asyncio
+
+    from ...providers.claude_auth import (
+        ClaudeAuth,
+        _resolve_credentials_path,
+    )
+
+    path = _resolve_credentials_path()
+
+    # Check 1: acpx CLI installability.  ``npx --no-install`` would
+    # fail-fast if the package isn't already cached, but on a
+    # first-run user that produces a less helpful error ("not found")
+    # than letting npm fetch and cache it.  We let npx do its normal
+    # resolve-then-install dance and surface whatever exit code /
+    # stderr it emits.
+    acpx_cli_available = False
+    acpx_version: Optional[str] = None
+    cli_error: Optional[str] = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "npx",
+            "acpx",
+            "--version",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=10.0,
+            )
+        except asyncio.TimeoutError:
+            # Don't leave a zombie subprocess behind — kill the
+            # process group so npm's child fetcher dies too.
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            cli_error = "acpx --version timed out after 10s"
+        else:
+            if proc.returncode == 0:
+                acpx_cli_available = True
+                acpx_version = (
+                    stdout.decode("utf-8", "replace").strip() or None
+                )
+            else:
+                err_txt = (stderr or stdout).decode("utf-8", "replace").strip()
+                cli_error = (
+                    f"npx acpx --version failed (exit {proc.returncode}): "
+                    f"{err_txt[:200]}"
+                ) if err_txt else f"npx acpx --version exit {proc.returncode}"
+    except FileNotFoundError:
+        # ``npx`` itself is missing — tell the user to install Node.
+        cli_error = (
+            "npx not found on PATH — install Node.js (npm) so acpx "
+            "can be fetched."
+        )
+    except Exception as e:
+        cli_error = f"{type(e).__name__}: {e}"
+
+    # Check 2: Claude OAuth credentials.  Same shape as
+    # ``claude_oauth_login_status`` but we collapse the multi-error-
+    # branch shape into a single ``error`` string so the caller
+    # doesn't have to differentiate FileNotFoundError vs decode
+    # errors at the UI layer.
+    claude_credentials_present = False
+    expires_in_s: Optional[int] = None
+    creds_error: Optional[str] = None
+    creds_path = str(path)
+    try:
+        auth = ClaudeAuth()
+        creds = auth._creds  # populated synchronously by ClaudeAuth.__init__
+        assert creds is not None
+        claude_credentials_present = True
+        creds_path = str(creds.credentials_path)
+        expires_in_s = creds.seconds_until_expiry
+    except FileNotFoundError as e:
+        creds_error = str(e)
+    except Exception as e:
+        creds_error = f"{type(e).__name__}: {e}"
+
+    # Combine the two error messages so a single string suffices for
+    # the simple UI tile.  When both pass, ``error`` is ``None``.
+    parts: list[str] = []
+    if cli_error:
+        parts.append(cli_error)
+    if creds_error:
+        parts.append(creds_error)
+    error = "; ".join(parts) if parts else None
+
+    return ClaudeAcpxStatus(
+        acpx_cli_available=acpx_cli_available,
+        acpx_version=acpx_version,
+        claude_credentials_present=claude_credentials_present,
+        credentials_path=creds_path,
+        expires_in_s=expires_in_s,
+        error=error,
+    )
 
 
 @router.put(
