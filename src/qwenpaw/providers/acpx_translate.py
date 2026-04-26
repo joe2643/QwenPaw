@@ -40,7 +40,16 @@ logger = logging.getLogger(__name__)
 # Pinned acpx version (plan T4 decision).  acpx is alpha; auto-
 # upgrading mid-conversation kills active sessions.  Bump quarterly
 # after manual review of the upstream changelog.
-_PINNED_ACPX_VERSION: str = "0.X.Y"  # TODO: pin to a known-good release before first ship
+#
+# Selected 0.6.1 (latest at 2026-04-26) after CLI surface verification:
+# ``acpx claude -s <name> --format json --json-strict --ttl <s>`` is
+# the per-turn invocation Lane B drives, ``acpx claude sessions close
+# <name>`` is the registry tear-down, and ``acpx claude set <key>
+# <value>`` is the session/set_config_option call.  Bumping to a newer
+# patch release is safe; bumping minor (0.7.x+) requires re-running
+# the verification because the CLI surface has churned across minors
+# during the alpha.
+_PINNED_ACPX_VERSION: str = "0.6.1"
 
 # Stateless one-shot exec — used for the legacy fire-and-forget path
 # and for unit tests that don't care about session lifecycle.
