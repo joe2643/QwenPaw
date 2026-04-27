@@ -55,6 +55,23 @@ LRU eviction calls a caller-supplied async ``tear_down_cb`` so registry
 stays subprocess-agnostic.  Production wiring shells out
 ``acpx claude sessions close <name>`` (codex C12: don't leak disk
 sessions).  Tests inject a no-op or a recorder.
+
+V1 limitation — daemon restart loses cache
+------------------------------------------
+
+Registry state lives only in memory.  On qwenpaw daemon restart the
+registry resets and ``make_session_name`` mints a new name (different
+random suffix), so the prior on-disk acpx session is orphaned and the
+prompt cache prefix goes cold.  Multi-turn QA 2026-04-27 confirmed
+this — orphaned sessions accumulate in ``acpx claude sessions list``
+until acpx's own LRU GCs them.
+
+Future work: persist (key → session_name + last_shipped_idx + chain
+hash) to disk on commit_turn so a restart can re-attach to the live
+acpx session and resume ship_tail.  Naive "deterministic name" doesn't
+work because parallel CoPaw processes (e.g. ``qwenpaw app`` plus a
+``qwenpaw task`` headless run) sharing the same agent_id+session_id
+would collide on identity.
 """
 
 from __future__ import annotations
@@ -148,6 +165,24 @@ def history_hash(messages: list[dict], up_to_idx: int) -> str:
     return h.hexdigest()
 
 
+# generate_kwargs keys that are session-MUTABLE via ``acpx claude set``
+# and therefore must NOT contribute to env_hash — otherwise a runtime
+# effort tweak (e.g. ``reasoning_effort: medium → high``) would mint a
+# new session and defeat the cache thesis the whole provider is built
+# around.  Multi-turn QA 2026-04-27 caught this.
+#
+# Denylist (not allowlist) on purpose: any *new* generate_kwargs field
+# that future agentscope/openai versions introduce will enter env_hash
+# by default and force a session refresh, which is the SAFE direction
+# (a needless refresh is recoverable; reusing a session through a
+# changed semantic is silent corruption).  Maintain this denylist as
+# the surface of acpx's ``configOptions`` grows — currently effort is
+# the only generate_kwargs analogue acpx exposes.
+_SESSION_MUTABLE_GK_KEYS: frozenset[str] = frozenset(
+    {"reasoning_effort", "reasoning", "thinking"},
+)
+
+
 def env_hash(
     *,
     system_prompt: str,
@@ -159,7 +194,16 @@ def env_hash(
     """SHA-1 over the dimensions that change Claude session behavior
     independently of message history (codex C2/C6/C14).  Any of
     these flipping invalidates session reuse.
+
+    Filters out :data:`_SESSION_MUTABLE_GK_KEYS` from generate_kwargs
+    because those round-trip through ``acpx claude set`` rather than
+    requiring a fresh session.
     """
+    gk_filtered = {
+        k: v
+        for k, v in (generate_kwargs or {}).items()
+        if k not in _SESSION_MUTABLE_GK_KEYS
+    }
     payload = {
         "sys": system_prompt,
         "tools": sorted(tool_names or []),
@@ -167,7 +211,7 @@ def env_hash(
         "perm": permission_mode,
         # Hash sorted keys + values; keys present-but-empty are still
         # signal (e.g. ``thinking={}`` ≠ no thinking at all).
-        "gk": sorted((generate_kwargs or {}).items()),
+        "gk": sorted(gk_filtered.items()),
     }
     return _hash(json.dumps(payload, sort_keys=True, default=str))
 

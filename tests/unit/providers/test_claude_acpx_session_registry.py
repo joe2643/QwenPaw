@@ -215,6 +215,81 @@ class TestEnvHash:
         )
         assert a != b
 
+    def test_tool_names_change_invalidates(self) -> None:
+        # Adding/removing a tool changes the agent capability surface
+        # Claude was prompted with — must mint a new session.
+        a = env_hash(
+            system_prompt="s",
+            tool_names=["t1"],
+            cwd="/r",
+            permission_mode="default",
+            generate_kwargs=None,
+        )
+        b = env_hash(
+            system_prompt="s",
+            tool_names=["t1", "t2"],
+            cwd="/r",
+            permission_mode="default",
+            generate_kwargs=None,
+        )
+        assert a != b
+
+    def test_session_mutable_fields_excluded_from_env_hash(self) -> None:
+        """``reasoning_effort``/``reasoning``/``thinking`` round-trip
+        through ``acpx claude set effort`` instead of identifying a
+        new session.  Including them in env_hash would mint a fresh
+        session on every effort change, defeating the cache thesis.
+        Multi-turn QA 2026-04-27 caught this.
+        """
+        # Effort change alone must NOT change env_hash.
+        a = env_hash(
+            system_prompt="s",
+            tool_names=[],
+            cwd="/r",
+            permission_mode="default",
+            generate_kwargs={"max_tokens": 1024, "reasoning_effort": "low"},
+        )
+        b = env_hash(
+            system_prompt="s",
+            tool_names=[],
+            cwd="/r",
+            permission_mode="default",
+            generate_kwargs={"max_tokens": 1024, "reasoning_effort": "high"},
+        )
+        assert a == b
+        # Same for reasoning dict and Anthropic-style thinking dict.
+        c = env_hash(
+            system_prompt="s",
+            tool_names=[],
+            cwd="/r",
+            permission_mode="default",
+            generate_kwargs={
+                "max_tokens": 1024,
+                "reasoning": {"effort": "high"},
+                "thinking": {"budget_tokens": 4096},
+            },
+        )
+        assert a == c
+
+    def test_other_generate_kwargs_still_invalidate(self) -> None:
+        # Sanity: max_tokens IS part of identity (changes shipped tokens
+        # accounting and can affect Claude Code's behavior).
+        a = env_hash(
+            system_prompt="s",
+            tool_names=[],
+            cwd="/r",
+            permission_mode="default",
+            generate_kwargs={"max_tokens": 1024},
+        )
+        b = env_hash(
+            system_prompt="s",
+            tool_names=[],
+            cwd="/r",
+            permission_mode="default",
+            generate_kwargs={"max_tokens": 4096},
+        )
+        assert a != b
+
 
 # ---------------------------------------------------------------- #
 # make_session_name — stable, includes host+pid
