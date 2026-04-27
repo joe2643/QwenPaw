@@ -63,19 +63,23 @@ they don't run into them blind:
   it.  Not active corruption — just slower cleanup than env_hash
   change paths.
 
-* **Multimodal degraded.**  v1 collapses non-text prompt blocks
-  (images, audio, resources) to plain-text placeholders before
-  shipping to acpx.  Users sending images through the claude-acpx
-  provider will silently get degraded context vs a direct Anthropic
-  path.  Lane B's content-block translation is the v2 fix.
+* **Multimodal degraded at stdin boundary.**  ACP-block translation
+  (:func:`acpx_translate.content_to_acp_blocks`) preserves image and
+  resource_link blocks through the message-building pipeline, but
+  acpx's stdin currently expects plain text.  At subprocess spawn
+  (:func:`acpx_translate.spawn_acpx_and_stream`) blocks flatten via
+  ``_content_text`` to a text transcript, so users sending images
+  through the claude-acpx provider silently get degraded context vs
+  a direct Anthropic path.  Lane B (acpx supporting ACP content
+  blocks on stdin) is the v2 fix.
 
-* **Cancellation-after-effort-set divergence (rare).**  In ``_open``,
-  effort is pushed to acpx + recorded in the registry BEFORE
-  ``submit_turn`` is called.  If a cancel fires between those two,
-  registry believes the new effort is in place but the session was
-  never used.  The next turn's effort-delta check then short-circuits
-  — Claude inherits the (correct) effort it was set to, so no real
-  divergence.  Listed for completeness.
+* **Cancellation-after-effort-set is benign.**  In ``_open``, effort
+  is pushed to acpx + recorded in the registry BEFORE ``submit_turn``
+  is called.  A cancel between the two leaves both sides
+  consistent — acpx received the config change and stored it; the
+  registry recorded the same value.  The next turn's effort-delta
+  check correctly skips re-sending.  Documented to head off
+  "we forgot to recover" worries — there's nothing to recover.
 """
 
 from __future__ import annotations
@@ -524,7 +528,7 @@ class _AcpxStreamAdapter:
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning(
-                    "acpx set thinking %s failed for %s: %s",
+                    "acpx set effort %s failed for %s: %s",
                     self._effort,
                     self._session_name,
                     e,

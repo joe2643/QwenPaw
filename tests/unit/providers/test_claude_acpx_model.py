@@ -13,7 +13,7 @@ and our acpx subprocess pipeline.  These tests pin five things:
 3. **Plan→submit→commit** flow drives the registry through
    ``plan_turn`` and ``commit_turn`` and forwards the right blocks
    to the daemon for both ``seed_full`` and ``ship_tail`` modes.
-4. **Effort delta sync** pushes ``acpx claude set thinking <eff>`` only
+4. **Effort delta sync** pushes ``acpx claude set effort <level>`` only
    when the entry's last-recorded effort changed.
 5. **Stream adapter** finalises (commit + lock release) on natural
    end-of-iter, and bails without commit on close / exception.

@@ -440,7 +440,7 @@ class Registry:
         entry: AcpxSessionEntry,
         effort: str,
     ) -> None:
-        """Record a ``set thinking <level>`` push.  Independent of
+        """Record a ``set effort <level>`` push.  Independent of
         commit_turn so callers can update mid-flight."""
         entry.last_effort = effort
         entry.last_used_at = time.time()
