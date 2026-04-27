@@ -1502,6 +1502,88 @@ def _sync_browser_close_handles(
             pass
 
 
+_GOTO_TIMEOUT_MS = 15000
+_GOTO_WAIT_UNTIL = "domcontentloaded"
+
+
+async def _safe_goto(page, url: str, label: str) -> tuple[bool, str]:
+    """Navigate ``page`` to ``url`` with SPA-tolerant defaults.
+
+    Playwright's default ``wait_until="load"`` blocks on the ``load``
+    event, but lots of streaming/SPA pages (Flow, Gemini, etc.) never
+    fire it — the page reaches ``readyState=interactive`` and stays
+    there.  We default to ``domcontentloaded`` (which fires at
+    interactive) and bound the wait at 15s.  On timeout we still
+    treat the navigation as successful when the page actually
+    committed (URL changed and ``readyState`` is at least
+    ``interactive``); the caller gets a warning string telling them
+    the load event didn't fire so they can adapt their next step
+    (use ``eval`` instead of ``snapshot``, etc.) instead of failing
+    the whole tool call.
+
+    Returns ``(ok, warning_or_error)`` — ``warning_or_error`` is empty
+    on clean load, populated when we recovered from a timeout or
+    when navigation genuinely failed.
+    """
+    pre_url = ""
+    try:
+        pre_url = page.url
+    except Exception:
+        pass
+    try:
+        if _USE_SYNC_PLAYWRIGHT:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                _get_executor(),
+                lambda: page.goto(
+                    url,
+                    wait_until=_GOTO_WAIT_UNTIL,
+                    timeout=_GOTO_TIMEOUT_MS,
+                ),
+            )
+        else:
+            await page.goto(
+                url,
+                wait_until=_GOTO_WAIT_UNTIL,
+                timeout=_GOTO_TIMEOUT_MS,
+            )
+        return True, ""
+    except Exception as e:
+        # Tolerate the SPA / streaming-page case: navigation reached
+        # the network response but never finished firing the load
+        # event.  Probe the live state — if the URL committed and the
+        # document is at least ``interactive``, downstream
+        # ``eval`` / coordinate-click / safe-label probes will work.
+        # Hard-fail only when nothing happened.
+        cur_url = ""
+        ready_state = ""
+        try:
+            cur_url = page.url
+            if _USE_SYNC_PLAYWRIGHT:
+                loop = asyncio.get_event_loop()
+                ready_state = await loop.run_in_executor(
+                    _get_executor(),
+                    lambda: page.evaluate("document.readyState"),
+                )
+            else:
+                ready_state = await page.evaluate("document.readyState")
+        except Exception:
+            pass
+        if cur_url and cur_url != pre_url and ready_state in (
+            "interactive",
+            "complete",
+        ):
+            warn = (
+                f"{label}: page committed (readyState={ready_state}) "
+                f"but ``load`` event did not fire within "
+                f"{_GOTO_TIMEOUT_MS // 1000}s.  Use eval / coordinate "
+                f"click instead of snapshot for this page."
+            )
+            logger.info("%s — recovered: %s", label, warn)
+            return True, warn
+        return False, f"{label}: navigation failed: {e!s}"
+
+
 async def _action_open(state: dict, url: str, page_id: str) -> ToolResponse:
     url = (url or "").strip()
     if not url:
@@ -1536,28 +1618,28 @@ async def _action_open(state: dict, url: str, page_id: str) -> ToolResponse:
 
         _register_page(state, page, page_id)
 
-        if _USE_SYNC_PLAYWRIGHT:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                _get_executor(),
-                lambda: page.goto(url),
+        ok, warn = await _safe_goto(page, url, "open")
+        if not ok:
+            return _tool_response(
+                json.dumps(
+                    {"ok": False, "error": warn},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
             )
-        else:
-            await page.goto(url)
 
         state["pages"][page_id] = page
         state["current_page_id"] = page_id
+        out = {
+            "ok": True,
+            "message": f"Opened {url}",
+            "page_id": page_id,
+            "url": url,
+        }
+        if warn:
+            out["warning"] = warn
         return _tool_response(
-            json.dumps(
-                {
-                    "ok": True,
-                    "message": f"Opened {url}",
-                    "page_id": page_id,
-                    "url": url,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
+            json.dumps(out, ensure_ascii=False, indent=2),
         )
     except Exception as e:
         return _tool_response(
@@ -1593,25 +1675,25 @@ async def _action_navigate(
             ),
         )
     try:
-        if _USE_SYNC_PLAYWRIGHT:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                _get_executor(),
-                lambda: page.goto(url),
+        ok, warn = await _safe_goto(page, url, "navigate")
+        if not ok:
+            return _tool_response(
+                json.dumps(
+                    {"ok": False, "error": warn},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
             )
-        else:
-            await page.goto(url)
         state["current_page_id"] = page_id
+        out = {
+            "ok": True,
+            "message": f"Navigated to {url}",
+            "url": page.url,
+        }
+        if warn:
+            out["warning"] = warn
         return _tool_response(
-            json.dumps(
-                {
-                    "ok": True,
-                    "message": f"Navigated to {url}",
-                    "url": page.url,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
+            json.dumps(out, ensure_ascii=False, indent=2),
         )
     except Exception as e:
         return _tool_response(
@@ -2148,6 +2230,13 @@ async def _action_snapshot(
             ),
         )
     try:
+        # Cap the snapshot wait so streaming/SPA pages can't hang
+        # the agent.  Playwright's ``aria_snapshot`` defaults to
+        # 30s of "wait for stable", which never resolves on pages
+        # that mutate continuously (Flow project view, chat UIs,
+        # live dashboards).  We bound it at 10s and let the caller
+        # see the timeout as a normal exception that the
+        # outer ``except`` handles.
         if _USE_SYNC_PLAYWRIGHT:
             # Hybrid mode: execute in thread pool
             loop = asyncio.get_event_loop()
@@ -2155,12 +2244,12 @@ async def _action_snapshot(
             locator = root.locator(":root")
             raw = await loop.run_in_executor(
                 _get_executor(),
-                lambda: locator.aria_snapshot(),  # pylint: disable=unnecessary-lambda
+                lambda: locator.aria_snapshot(timeout=10000),
             )
         else:
             root = _get_root(page, frame_selector)
             locator = root.locator(":root")
-            raw = await locator.aria_snapshot()
+            raw = await locator.aria_snapshot(timeout=10000)
 
         raw_str = str(raw) if raw is not None else ""
         snapshot, refs = build_role_snapshot_from_aria(
