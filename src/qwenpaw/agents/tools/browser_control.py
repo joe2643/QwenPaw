@@ -14,6 +14,7 @@ import atexit
 from concurrent import futures
 import json
 import logging
+import os
 import shlex
 from pathlib import Path
 import signal
@@ -23,6 +24,8 @@ import sys
 import time
 from typing import Any, Optional
 from urllib import request as urllib_request
+
+import psutil
 
 from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
@@ -96,8 +99,16 @@ if _USE_SYNC_PLAYWRIGHT:
     def _get_executor() -> futures.ThreadPoolExecutor:
         global _executor
         if _executor is None:
+            # 4 workers, not 1: the per-step close timeout below leaks
+            # a worker thread when ``_sync_browser_close`` hangs in
+            # Chromium teardown.  A single-worker pool would deadlock
+            # every subsequent sync call behind the dead thread; with
+            # 4 we tolerate a handful of leaked teardown threads
+            # before pressure becomes visible.  Threads are still
+            # idle most of the time, so the wider pool isn't a memory
+            # cost in steady state.
             _executor = futures.ThreadPoolExecutor(
-                max_workers=1,
+                max_workers=4,
                 thread_name_prefix="playwright",
             )
         return _executor
@@ -156,6 +167,13 @@ def _make_fresh_state(workspace_id: str, workspace_dir: str) -> dict[str, Any]:
         "owned_browser_process": False,
         "browser_pid": None,
         "browser_process": None,
+        # PIDs of Chromium-family processes we discovered as
+        # descendants of this Python process after launch.  Used
+        # by the snap-and-go teardown so we can SIGTERM/SIGKILL
+        # the actual renderer + zygote tree even when Playwright's
+        # ``browser.close()`` hangs (which it always does on this
+        # host — see ``_BROWSER_CLOSE_TIMEOUT`` comment).
+        "chromium_pids": [],
     }
 
 
@@ -174,6 +192,206 @@ def _get_workspace_state(
 
 # Stop the browser after this many seconds of inactivity (default 10 minutes).
 _BROWSER_IDLE_TIMEOUT = 600.0
+
+# Best-effort grace period for ``playwright.stop()`` before we go
+# straight to SIGTERM/SIGKILL on the Chromium PID tree.  This is the
+# tail end of a known-unfixable Chromium-on-Linux teardown bug
+# (reproduced via raw CDP ``Browser.close`` too — the deadlock is
+# inside Chromium itself, not Playwright); chromedp / browserless /
+# CEF all converged on the same "bound graceful close + force kill"
+# pattern.  Search "Chromium browser.close hang Linux" or see
+# Chromium#271553 / Playwright#4761 / Sparticuz/chromium#85.
+#
+# Linux gets 500ms because graceful close virtually never returns on
+# broken-GPU hosts (RTX-without-driver, AMD APU, headless without X)
+# — anything longer just makes ``/stop`` feel slower for nothing.
+# Healthy Linux installs that DO close cleanly still finish in <200ms.
+# Other platforms keep the longer budget because their close paths
+# usually work.
+_BROWSER_CLOSE_TIMEOUT = (
+    0.5 if sys.platform.startswith("linux") else 2.0
+)
+
+# Per-signal wait when killing a Chromium PID tree.  SIGTERM gets
+# ``_KILL_WAIT_S`` to drain, then SIGKILL gets the same.  Bounded so a
+# stuck PID can't extend background cleanup beyond ~6s end-to-end.
+_KILL_WAIT_S = 2.0
+
+# Filename substrings that count as "Chromium-family" when scanning
+# our process descendants.  Captures the major slugs Playwright lays
+# down on disk and that show up in ``proc.name()``: regular Chrome /
+# Chromium binaries plus headless-shell builds.  Edge / Brave / Opera
+# match through ``chrome`` substring.
+_CHROMIUM_NAME_KEYWORDS = ("chrom", "headless_shell")
+
+
+def _is_chromium_proc(proc: psutil.Process) -> bool:
+    """True if *proc* looks like a Chromium-family browser binary."""
+    try:
+        name = (proc.name() or "").lower()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return False
+    return any(k in name for k in _CHROMIUM_NAME_KEYWORDS)
+
+
+def _capture_chromium_pids(
+    user_data_dir: Optional[str] = None,
+) -> list[int]:
+    """Snapshot Chromium PIDs descending from this Python process.
+
+    When *user_data_dir* is provided we prefer descendants whose argv
+    contains ``--user-data-dir=<dir>``; the broader descendant scan is
+    used as a fallback so non-persistent Playwright launches (which
+    use a temp profile path we don't know) still get tracked.
+
+    Best-effort: NoSuchProcess / AccessDenied during enumeration is
+    swallowed — a missed PID just means a leaked renderer until atexit.
+    """
+    me = psutil.Process(os.getpid())
+    matched: list[int] = []
+    fallback: list[int] = []
+    needle = (
+        f"--user-data-dir={user_data_dir}" if user_data_dir else ""
+    )
+    try:
+        descendants = me.children(recursive=True)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return []
+    for child in descendants:
+        if not _is_chromium_proc(child):
+            continue
+        if needle:
+            try:
+                cmdline = child.cmdline()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+            if any(needle in arg for arg in cmdline):
+                matched.append(child.pid)
+                continue
+        fallback.append(child.pid)
+    return matched if matched else fallback
+
+
+def _kill_pid_tree_sync(root_pid: int) -> None:
+    """Best-effort SIGTERM → SIGKILL of *root_pid* and all descendants.
+
+    Synchronous and safe to call from atexit.  Uses psutil so the
+    descendant enumeration survives renderer process churn (PIDs come
+    and go as Chromium spawns/reaps zygotes).
+    """
+    try:
+        root = psutil.Process(root_pid)
+    except psutil.NoSuchProcess:
+        return
+    try:
+        targets = root.children(recursive=True) + [root]
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        targets = [root]
+    # SIGTERM phase
+    for p in targets:
+        try:
+            p.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    gone, alive = psutil.wait_procs(targets, timeout=_KILL_WAIT_S)
+    if not alive:
+        return
+    # SIGKILL phase
+    for p in alive:
+        try:
+            p.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    psutil.wait_procs(alive, timeout=_KILL_WAIT_S)
+
+
+async def _kill_pid_tree(root_pid: int) -> None:
+    """Async wrapper that runs the sync kill in a thread."""
+    await asyncio.to_thread(_kill_pid_tree_sync, root_pid)
+
+
+async def _background_browser_cleanup(
+    pw_instance: Any,
+    chromium_pids: list[int],
+    owned_proc: Any,
+    label: str,
+) -> None:
+    """Fire-and-forget teardown that ``_action_stop`` schedules.
+
+    Runs after the caller has already returned success and reset the
+    state dict.  Steps:
+
+    1. Brief ``playwright.stop()`` attempt — gives Playwright a chance
+       to flush renderer state on hosts where graceful close works.
+       Bounded by ``_BROWSER_CLOSE_TIMEOUT``.
+    2. SIGTERM/SIGKILL every captured Chromium PID — survives even
+       when ``playwright.stop()`` hangs forever on this host.
+    3. SIGTERM/SIGKILL the owned ``subprocess.Popen`` (managed_cdp
+       mode) so Chromium dies even if it spawned outside our PID
+       tree (rare, but happens with snap Chromium namespaces).
+
+    Exceptions are logged and swallowed so a cleanup failure on one
+    workspace can't stall others.
+    """
+    if pw_instance is not None:
+        try:
+            await asyncio.wait_for(
+                pw_instance.stop(),
+                timeout=_BROWSER_CLOSE_TIMEOUT,
+            )
+            logger.debug(
+                "%s: playwright.stop() completed cleanly",
+                label,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "%s: playwright.stop() timed out after %.1fs — "
+                "killing %d Chromium PID(s) directly",
+                label,
+                _BROWSER_CLOSE_TIMEOUT,
+                len(chromium_pids),
+            )
+        except Exception as e:
+            logger.debug("%s: playwright.stop() raised: %s", label, e)
+    for pid in chromium_pids:
+        try:
+            await _kill_pid_tree(pid)
+        except Exception as e:
+            logger.debug("%s: PID %d kill failed: %s", label, pid, e)
+    if owned_proc is not None:
+        try:
+            await _stop_owned_browser_process_handle(owned_proc)
+        except Exception as e:
+            logger.debug(
+                "%s: owned-process kill failed: %s",
+                label,
+                e,
+            )
+
+
+async def _stop_owned_browser_process_handle(proc) -> None:
+    """Kill a tracked ``subprocess.Popen`` if still alive (managed_cdp).
+
+    Detached helper so ``_background_browser_cleanup`` can call it
+    without needing the original state dict — the dict has already
+    been reset by ``_action_stop``.
+    """
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        if sys.platform == "win32":
+            proc.terminate()
+        else:
+            proc.send_signal(signal.SIGTERM)
+        await asyncio.to_thread(proc.wait, _KILL_WAIT_S)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+            await asyncio.to_thread(proc.wait, _KILL_WAIT_S)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 def _touch_activity(state: dict) -> None:
@@ -218,6 +436,7 @@ def _reset_browser_state(state: dict) -> None:
     state["owned_browser_process"] = False
     state["browser_pid"] = None
     state["browser_process"] = None
+    state["chromium_pids"] = []
 
 
 async def _idle_watchdog(
@@ -251,25 +470,37 @@ async def _idle_watchdog(
 def _atexit_cleanup() -> None:
     """Best-effort browser cleanup registered with :func:`atexit`.
 
-    Playwright child processes are cleaned up by the OS when the parent
-    exits, but this gives Playwright a chance to flush any pending I/O and
-    close Chrome gracefully before the process disappears.
+    Synchronous PID-tree kill only — graceful Playwright close hangs
+    on this host and we have no event loop to bound it from atexit
+    anyway.  Reads the captured ``chromium_pids`` snapshot off each
+    workspace state and SIGTERM/SIGKILLs the trees directly.  If the
+    snapshot is empty (e.g. capture happened before Chromium spawned
+    its zygotes) we still ``terminate`` any tracked
+    ``browser_process`` handle so managed_cdp launches don't leak.
     """
     if not _workspace_states:
         return
 
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running() or loop.is_closed():
-            return
-        for ws_state in list(_workspace_states.values()):
-            if _is_browser_running(ws_state):
+    for ws_state in list(_workspace_states.values()):
+        for pid in list(ws_state.get("chromium_pids") or []):
+            try:
+                _kill_pid_tree_sync(pid)
+            except Exception:
+                pass
+        proc = ws_state.get("browser_process")
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
                 try:
-                    loop.run_until_complete(_action_stop(ws_state))
-                except Exception:
-                    pass
-    except Exception:
-        pass
+                    proc.wait(_KILL_WAIT_S)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    try:
+                        proc.wait(_KILL_WAIT_S)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
 
 atexit.register(_atexit_cleanup)
@@ -283,7 +514,18 @@ def _tool_response(text: str) -> ToolResponse:
 
 
 def _chromium_launch_args() -> list[str]:
-    """Extra args for Chromium when running in container or Windows."""
+    """Extra args for Chromium when running in container, Windows, or Linux.
+
+    Linux gets a teardown-stability set on top of the container/sandbox
+    args because headless Chromium's GPU process routinely refuses to
+    exit on machines with broken/missing GPU stacks (RTX without driver,
+    AMD Strix Halo with TTM quirks, etc.).  The flags here don't *fix*
+    Chromium's close hang — that's a system-level Chromium-on-Linux
+    issue with no upstream solution (see comments on
+    ``_BROWSER_CLOSE_TIMEOUT``) — but they reduce the surface where
+    GPU-process churn pins the parent waiting for an ack that never
+    comes.  Snap-and-go teardown still does the actual reaping.
+    """
     args = []
     if is_running_in_container() or sys.platform == "win32":
         args.extend(["--no-sandbox"])
@@ -293,6 +535,34 @@ def _chromium_launch_args() -> list[str]:
     # Windows always needs --disable-gpu to run properly
     if sys.platform == "win32":
         args.extend(["--disable-gpu"])
+
+    if sys.platform.startswith("linux"):
+        args.extend(
+            [
+                # Disable hardware GPU (no driver / SwiftShader fallback
+                # would crash repeatedly and stall newPage; see
+                # Playwright#4761).
+                "--disable-gpu",
+                # Don't fall back to SwiftShader software rendering —
+                # the renderer churn from repeated SwiftShader init is
+                # one of the close-hang triggers.
+                "--disable-software-rasterizer",
+                # Run GPU work in-process so there's no separate
+                # ``--type=gpu-process`` to wait on at teardown
+                # (Chromium #271553 zombie GPU processes are the
+                # canonical Linux-shutdown stall).
+                "--in-process-gpu",
+                # Required by Chromium 139+ when SwiftShader is the
+                # only fallback path; harmless on older versions.
+                "--enable-unsafe-swiftshader",
+                # Skip features known to keep background threads alive
+                # past renderer close — Vulkan init goes through the
+                # broken GPU stack we already disabled,
+                # CalculateNativeWinOcclusion blocks on X11 calls that
+                # hang headlessly.
+                "--disable-features=Vulkan,CalculateNativeWinOcclusion",
+            ],
+        )
     return args
 
 
@@ -814,10 +1084,20 @@ async def _ensure_browser(
 
 
 def _start_idle_watchdog(state: dict) -> None:
-    """Cancel any existing idle watchdog and start a fresh one."""
+    """Cancel any existing idle watchdog and start a fresh one.
+
+    Also captures the Chromium PID tree on first launch so that
+    snap-and-go teardown can SIGTERM/SIGKILL it without depending on
+    Playwright's hung ``browser.close``.  Idempotent — re-capturing
+    on subsequent calls just refreshes the PID list (renderers come
+    and go).
+    """
     old_task = state.get("_idle_task")
     if old_task and not old_task.done():
         old_task.cancel()
+    state["chromium_pids"] = _capture_chromium_pids(
+        state.get("user_data_dir") or None,
+    )
     state["_idle_task"] = asyncio.ensure_future(_idle_watchdog(state))
 
 
@@ -1051,9 +1331,20 @@ async def _action_start(
 
 
 async def _action_stop(state: dict) -> ToolResponse:
+    """Snap-and-go teardown.
+
+    Graceful close on this host (Linux + Strix Halo, repro'd via raw
+    CDP too) hangs forever ~always, so we don't make the caller wait
+    for it.  We snapshot the references that need cleanup, reset the
+    state dict immediately so the next launch isn't blocked, then
+    schedule the actual teardown on a background task.  Background
+    cleanup gives Playwright a brief grace period to flush state on
+    healthy hosts but always SIGTERM/SIGKILLs the captured Chromium
+    PID tree so the renderer dies even when ``playwright.stop()``
+    never returns.
+    """
     _cancel_idle_watchdog(state)
 
-    # Check browser state based on mode
     if not _is_browser_running(state):
         return _tool_response(
             json.dumps(
@@ -1063,34 +1354,90 @@ async def _action_stop(state: dict) -> ToolResponse:
             ),
         )
 
-    # CDP-connected mode: just disconnect Playwright; optionally stop owned Chrome process.
-    if state.get("connected_via_cdp"):
-        cdp_url = state.get("cdp_url") or ""
-        owned = bool(state.get("owned_browser_process"))
-        pid = state.get("browser_pid")
-        try:
-            if state["context"] is not None:
+    is_cdp = bool(state.get("connected_via_cdp"))
+    cdp_url = state.get("cdp_url") or ""
+    owned = bool(state.get("owned_browser_process"))
+    pid = state.get("browser_pid")
+    is_sync = bool(_USE_SYNC_PLAYWRIGHT)
+
+    # Snapshot what background cleanup needs.  Sync mode keeps its
+    # own ``_sync_*`` references; the snap-and-go pattern works for
+    # both (we just delegate to ``_sync_browser_close`` in a thread).
+    if is_sync:
+        snapshot_pw = state.get("_sync_playwright")
+        snapshot_browser = state.get("_sync_browser")
+        snapshot_context = state.get("_sync_context")
+    else:
+        snapshot_pw = state.get("playwright")
+        snapshot_browser = state.get("browser")
+        snapshot_context = state.get("context")
+    snapshot_pids = list(state.get("chromium_pids") or [])
+    snapshot_proc = state.get("browser_process") if owned else None
+
+    # Reset immediately so a follow-up ``start`` action sees a clean
+    # state and doesn't trip the "browser already running" branch
+    # while background teardown is still draining.
+    _reset_browser_state(state)
+
+    label = (
+        f"cdp-stop pid={pid}" if is_cdp
+        else "sync-stop" if is_sync
+        else "pw-stop"
+    )
+
+    if is_sync:
+        # Sync mode delegates to ``_sync_browser_close`` in the
+        # executor — also snap-and-go so a hung close just leaks one
+        # of the 4 worker slots instead of blocking ``_action_stop``.
+        loop = asyncio.get_event_loop()
+
+        async def _sync_background():
+            try:
+                await asyncio.wait_for(
+                    loop.run_in_executor(
+                        _get_executor(),
+                        lambda: _sync_browser_close_handles(
+                            snapshot_pw,
+                            snapshot_browser,
+                            snapshot_context,
+                        ),
+                    ),
+                    timeout=_BROWSER_CLOSE_TIMEOUT * 2,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "%s: sync close timed out — killing %d "
+                    "Chromium PID(s) directly",
+                    label,
+                    len(snapshot_pids),
+                )
+            except Exception as e:
+                logger.debug("%s: sync close raised: %s", label, e)
+            for p in snapshot_pids:
                 try:
-                    await state["context"].close()
-                except Exception:
-                    pass
-            if state["browser"] is not None:
+                    await _kill_pid_tree(p)
+                except Exception as e:
+                    logger.debug("%s: PID %d kill failed: %s", label, p, e)
+            if snapshot_proc is not None:
                 try:
-                    await state["browser"].close()
-                except Exception:
-                    pass
-            if state["playwright"] is not None:
-                try:
-                    await state["playwright"].stop()
-                except Exception:
-                    pass
-            stopped = False
-            if owned:
-                stopped = await _stop_owned_browser_process(state)
-        finally:
-            _reset_browser_state(state)
+                    await _stop_owned_browser_process_handle(snapshot_proc)
+                except Exception as e:
+                    logger.debug("%s: owned-proc kill failed: %s", label, e)
+
+        asyncio.create_task(_sync_background())
+    else:
+        asyncio.create_task(
+            _background_browser_cleanup(
+                snapshot_pw,
+                snapshot_pids,
+                snapshot_proc,
+                label,
+            ),
+        )
+
+    if is_cdp:
         message = (
-            f"Disconnected from Chrome and stopped owned browser process (pid={pid})"
+            f"Disconnected from Chrome and scheduled stop of owned browser process (pid={pid})"
             if owned
             else f"Disconnected from Chrome (process still running: {cdp_url})"
         )
@@ -1100,72 +1447,59 @@ async def _action_stop(state: dict) -> ToolResponse:
                     "ok": True,
                     "message": message,
                     "owned_browser_process": owned,
-                    "browser_stopped": stopped if owned else False,
+                    "browser_stopped": owned,
+                    "cleanup": "scheduled",
                 },
                 ensure_ascii=False,
                 indent=2,
             ),
         )
 
-    # Playwright-launched browser: terminate Chrome process.
-    # Warn that other agents sharing this browser will lose their connection.
-    warning = (
-        "Chrome process will be terminated. "
-        "Any other agents connected to this browser via CDP will be disconnected."
-    )
-    if _USE_SYNC_PLAYWRIGHT:
-        loop = asyncio.get_event_loop()
-        try:
-            await loop.run_in_executor(
-                _get_executor(),
-                lambda: _sync_browser_close(state),
-            )
-        except Exception as e:
-            return _tool_response(
-                json.dumps(
-                    {"ok": False, "error": f"Browser stop failed: {e!s}"},
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-            )
-        finally:
-            _reset_browser_state(state)
-    else:
-        try:
-            # For persistent_context, close the context directly (no separate browser)
-            if state["context"] is not None:
-                try:
-                    await state["context"].close()
-                except Exception:
-                    pass
-            if state["browser"] is not None:
-                try:
-                    await state["browser"].close()
-                except Exception:
-                    pass
-            if state["playwright"] is not None:
-                try:
-                    await state["playwright"].stop()
-                except Exception:
-                    pass
-        except Exception as e:
-            return _tool_response(
-                json.dumps(
-                    {"ok": False, "error": f"Browser stop failed: {e!s}"},
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-            )
-        finally:
-            _reset_browser_state(state)
-
     return _tool_response(
         json.dumps(
-            {"ok": True, "message": "Browser stopped", "warning": warning},
+            {
+                "ok": True,
+                "message": "Browser stop scheduled",
+                "warning": (
+                    "Chrome process will be terminated in the background. "
+                    "Any other agents connected via CDP will be disconnected."
+                ),
+                "cleanup": "scheduled",
+                "chromium_pids": snapshot_pids,
+            },
             ensure_ascii=False,
             indent=2,
         ),
     )
+
+
+def _sync_browser_close_handles(
+    sync_pw: Any,
+    sync_browser: Any,
+    sync_context: Any,
+) -> None:
+    """Sync close that operates on detached handles.
+
+    Mirrors :func:`_sync_browser_close` but takes the handles as
+    arguments instead of pulling them from a state dict — needed by
+    the snap-and-go path where the state is reset before the
+    background cleanup runs.
+    """
+    if sync_browser is not None:
+        try:
+            sync_browser.close()
+        except Exception:
+            pass
+    elif sync_context is not None:
+        try:
+            sync_context.close()
+        except Exception:
+            pass
+    if sync_pw is not None:
+        try:
+            sync_pw.stop()
+        except Exception:
+            pass
 
 
 async def _action_open(state: dict, url: str, page_id: str) -> ToolResponse:
