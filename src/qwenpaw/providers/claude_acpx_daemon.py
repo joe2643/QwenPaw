@@ -306,11 +306,21 @@ class AcpxDaemon:
 
         Used by Lane D for thinking-effort delta sync without
         re-shipping the prompt.  Returns when the subprocess exits.
+
+        Calls :meth:`_ensure_session` first because Lane D may invoke
+        this before the first ``submit_turn`` for a fresh session —
+        without ensure, acpx replies ``rc=4 NO_SESSION`` and the
+        effort delta silently gets dropped (Lane D's wrapper logs a
+        warning but proceeds with whatever effort acpx defaulted to,
+        which is wrong when the user explicitly chose ``high``).
+        Smoke test 2026-04-27 caught this.
         """
         if self._closed:
             raise AcpxDaemonError("AcpxDaemon is shut down")
         if not _binary_available():
             raise AcpxDaemonError("acpx binary not found on PATH")
+        if self._auto_ensure_session:
+            await self._ensure_session(session_name)
 
         version = acpx_translate._PINNED_ACPX_VERSION
         cmd = (

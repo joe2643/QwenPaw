@@ -305,11 +305,16 @@ class TestDetectEffort:
             None,
         ) == "low"
 
-    def test_anthropic_thinking_budget(self) -> None:
+    def test_anthropic_thinking_budget_ignored(self) -> None:
+        # acpx's underlying ``effort`` config option only accepts the
+        # symbolic levels {low, medium, high, xhigh, max}; budget_tokens
+        # would round-trip as ``budget:4096`` and acpx rejects it with
+        # a generic Internal error.  We deliberately don't map it —
+        # smoke test 2026-04-27 caught the rejection.
         assert _detect_effort(
             {"thinking": {"budget_tokens": 4096}},
             None,
-        ) == "budget:4096"
+        ) is None
 
 
 class TestWireRegistryTearDown:
@@ -482,7 +487,7 @@ class TestEffortSync:
 
         # Effort medium pushed once (cold session, no prior effort).
         assert daemon.set_config_calls == [
-            (daemon.submit_calls[0]["session_name"], "thinking", "medium"),
+            (daemon.submit_calls[0]["session_name"], "effort", "medium"),
         ]
 
     def test_skips_set_thinking_when_effort_unchanged(
@@ -927,4 +932,4 @@ class TestEffortDeferredToAdapter:
         asyncio.run(_drain())
         # After full iteration: set_config pushed exactly once.
         assert len(daemon.set_config_calls) == 1
-        assert daemon.set_config_calls[0][1:] == ("thinking", "low")
+        assert daemon.set_config_calls[0][1:] == ("effort", "low")

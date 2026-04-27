@@ -589,7 +589,7 @@ class TestTeardownAndSetConfig:
             "create_subprocess_exec",
             fake_exec,
         )
-        daemon = AcpxDaemon()
+        daemon = AcpxDaemon(auto_ensure_session=False)
         before = claude_acpx_metrics.snapshot()["effort_set"]
         await daemon.run_set_config("copaw-x", "thinking", "high")
         after = claude_acpx_metrics.snapshot()["effort_set"]
@@ -619,7 +619,7 @@ class TestTeardownAndSetConfig:
             "create_subprocess_exec",
             fake_exec,
         )
-        daemon = AcpxDaemon()
+        daemon = AcpxDaemon(auto_ensure_session=False)
         with pytest.raises(AcpxDaemonError, match="acpx claude set"):
             await daemon.run_set_config("copaw-x", "thinking", "high")
 

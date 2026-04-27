@@ -129,6 +129,11 @@ def _extract_tool_names(tools: Any) -> list[str]:
     return out
 
 
+_VALID_ACPX_EFFORTS: frozenset[str] = frozenset(
+    {"low", "medium", "high", "xhigh", "max"},
+)
+
+
 def _detect_effort(
     call_kwargs: dict,
     generate_kwargs: dict | None,
@@ -137,12 +142,19 @@ def _detect_effort(
     Per-call kwargs win over constructor defaults.  Recognised shapes:
 
     * OpenAI-flavored: ``reasoning_effort="medium"`` /
-      ``reasoning={"effort": "medium"}``;
-    * Anthropic-flavored: ``thinking={"budget_tokens": 4096}``.
+      ``reasoning={"effort": "medium"}``.
+
+    Anthropic-style ``thinking={"budget_tokens": N}`` is intentionally
+    NOT mapped here — acpx's underlying ``effort`` config option
+    accepts only ``{low, medium, high, xhigh, max}`` (smoke test
+    2026-04-27 surfaced the rejection).  Callers wanting a custom
+    budget should configure Claude Code's profile directly.
 
     The string we return is round-tripped through ``acpx claude set
-    thinking <value>`` so the daemon's effort matches what we last
-    recorded — see :meth:`Registry.update_effort`.
+    -s <name> effort <value>`` so the daemon's effort matches what we
+    last recorded — see :meth:`Registry.update_effort`.  Unknown
+    values are passed through unchanged so we surface acpx's own
+    rejection message rather than masking it.
     """
     for src in (call_kwargs, generate_kwargs or {}):
         eff = src.get("reasoning_effort")
@@ -151,9 +163,6 @@ def _detect_effort(
         reasoning = src.get("reasoning")
         if isinstance(reasoning, dict) and reasoning.get("effort"):
             return str(reasoning["effort"])
-        thinking = src.get("thinking")
-        if isinstance(thinking, dict) and thinking.get("budget_tokens"):
-            return f"budget:{thinking['budget_tokens']}"
     return None
 
 
@@ -312,7 +321,7 @@ class ClaudeAcpxChatModel(OpenAIChatModel):
                     try:
                         await daemon.run_set_config(
                             plan.session_name,
-                            "thinking",
+                            "effort",
                             effort,
                         )
                         await registry.update_effort(entry, effort)
@@ -478,7 +487,7 @@ class _AcpxStreamAdapter:
             try:
                 await self._daemon.run_set_config(
                     self._session_name,
-                    "thinking",
+                    "effort",
                     self._effort,
                 )
                 await self._registry.update_effort(
