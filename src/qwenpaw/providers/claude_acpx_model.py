@@ -30,7 +30,7 @@ Wiring map:
     4. Render prompt blocks via ``render_history_for_seed`` /
        ``extract_tail_from_history``.
     5. If thinking-effort changed since last turn, push ``acpx claude
-       set thinking <effort>`` via :meth:`AcpxDaemon.run_set_config`.
+       set effort <level>`` via :meth:`AcpxDaemon.run_set_config`.
     6. Acquire ``entry.lock`` and submit the prompt through
        :meth:`AcpxDaemon.submit_turn`; pipe stdout into Lane A's
        :func:`translate_acp_updates_to_chat_chunks`.
@@ -43,6 +43,39 @@ in shape — both subclass :class:`OpenAIChatModel` so agentscope's
 existing response parsing keeps working unchanged.  Streaming returns
 an :class:`_AcpxStreamAdapter`; non-streaming drains the same pipeline
 into a single :class:`ChatCompletion`.
+
+V1 limitations (2026-04-27)
+---------------------------
+
+These are accepted tradeoffs for v1 — surface to operators/users so
+they don't run into them blind:
+
+* **Daemon restart loses cache.**  The session registry lives only in
+  memory; on qwenpaw daemon restart the prior on-disk acpx session
+  is orphaned (visible via ``acpx claude sessions list``) and the
+  next chat turn cold-mints a new one.  Acpx's own LRU eventually
+  reaps the orphans.  Future work: persist registry state so a
+  restart can re-attach.
+
+* **Agent rename leaks slowly.**  The registry keys by ``agent_id``;
+  if an agent is renamed (rather than replaced via env_hash change),
+  the old session lingers until the registry's LRU (cap=200) evicts
+  it.  Not active corruption — just slower cleanup than env_hash
+  change paths.
+
+* **Multimodal degraded.**  v1 collapses non-text prompt blocks
+  (images, audio, resources) to plain-text placeholders before
+  shipping to acpx.  Users sending images through the claude-acpx
+  provider will silently get degraded context vs a direct Anthropic
+  path.  Lane B's content-block translation is the v2 fix.
+
+* **Cancellation-after-effort-set divergence (rare).**  In ``_open``,
+  effort is pushed to acpx + recorded in the registry BEFORE
+  ``submit_turn`` is called.  If a cancel fires between those two,
+  registry believes the new effort is in place but the session was
+  never used.  The next turn's effort-delta check then short-circuits
+  — Claude inherits the (correct) effort it was set to, so no real
+  divergence.  Listed for completeness.
 """
 
 from __future__ import annotations
@@ -127,11 +160,6 @@ def _extract_tool_names(tools: Any) -> list[str]:
         if name:
             out.append(str(name))
     return out
-
-
-_VALID_ACPX_EFFORTS: frozenset[str] = frozenset(
-    {"low", "medium", "high", "xhigh", "max"},
-)
 
 
 def _detect_effort(
@@ -329,7 +357,7 @@ class ClaudeAcpxChatModel(OpenAIChatModel):
                         # Best-effort: Claude inherits its prior
                         # effort if set-config didn't take.
                         logger.warning(
-                            "acpx set thinking %s failed for %s: %s",
+                            "acpx set effort %s failed for %s: %s",
                             effort,
                             plan.session_name,
                             e,
@@ -395,7 +423,7 @@ class _AcpxStreamAdapter:
     Owns four lifecycles:
 
     * the registry entry lock (acquired lazily on first __anext__);
-    * the per-turn ``acpx claude set thinking`` push (lazy, same);
+    * the per-turn ``acpx claude set effort`` push (lazy, same);
     * the daemon's ``submit_turn`` async generator (raw ACP lines);
     * the ACP→chat-completion translator built on top of it.
 

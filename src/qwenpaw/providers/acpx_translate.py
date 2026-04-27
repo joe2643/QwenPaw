@@ -10,8 +10,8 @@ spawns the Claude Code ACP adapter as a child, owns the
 JSON-RPC channel, and emits one raw ACP JSON-RPC message per
 line on stdout (no acpx-specific envelope).
 
-Consumed by a sibling ``ClaudeAcpxChatModel`` (TODO) that
-subclasses agentscope's :class:`OpenAIChatModel` so CoPaw
+Consumed by :class:`qwenpaw.providers.claude_acpx_model.ClaudeAcpxChatModel`,
+which subclasses agentscope's :class:`OpenAIChatModel` so CoPaw
 agents can hit Claude Code via ACP without changing call sites.
 
 ACP reference (from upstream ``schema.json``):
