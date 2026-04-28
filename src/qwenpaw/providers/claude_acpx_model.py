@@ -29,7 +29,7 @@ Wiring map:
        ``ship_tail`` ``ShipPlan``.
     4. Render prompt blocks via ``render_history_for_seed`` /
        ``extract_tail_from_history``.
-    5. If thinking-effort changed since last turn, push ``acpx claude
+    5. If effort changed since last turn, push ``acpx claude
        set effort <level>`` via :meth:`AcpxDaemon.run_set_config`.
     6. Acquire ``entry.lock`` and submit the prompt through
        :meth:`AcpxDaemon.submit_turn`; pipe stdout into Lane A's
@@ -80,6 +80,57 @@ they don't run into them blind:
   registry recorded the same value.  The next turn's effort-delta
   check correctly skips re-sending.  Documented to head off
   "we forgot to recover" worries — there's nothing to recover.
+
+V2 deferred — known limits surfaced by 2026-04-28 review
+--------------------------------------------------------
+
+These were intentionally left for v2 after a structured review.
+Each is reachable today only on uncommon paths; v1 ships with the
+weaker contract documented and tested rather than the stronger
+contract half-implemented:
+
+* **Workspace boundary on fs/terminal handlers.**
+  :mod:`claude_acpx_handlers` accepts any ``path`` Claude asks for
+  (``fs/read_text_file``, ``fs/write_text_file``) and any
+  ``command`` (``terminal/create``).  v1 is single-tenant local; the
+  permission UI (next bullet) gates exposure.  v2 should add an
+  explicit workspace-root scope and reject paths/commands that
+  escape it before the permission prompt fires.
+
+* **Auto-permit replaces real permission UI.**
+  :class:`AcpxPermissionHandler` returns the first ``allow_*``
+  option for any ``session/request_permission``.  Acceptable on a
+  single-user dev box where every tool call belongs to the same
+  human; v2 must surface the request to a UI confirm with the
+  guard's policy as the default.
+
+* **Per-line stream timeout.**
+  :meth:`AcpxDaemon._stream_lines` enforces a 5-minute total turn
+  timeout but ``proc.stdout.readline()`` has no per-call cap.  A
+  wedged acpx that drips one byte every 4 minutes can run for the
+  full turn-timeout instead of being killed at first stall.  v2 to
+  add per-line ``asyncio.wait_for`` with a tunable threshold.
+
+* **Non-stream lock release pattern.**
+  :meth:`ClaudeAcpxChatModel._call_chat` releases the per-entry
+  lock with ``if entry.lock.locked(): try release()`` and catches
+  ``RuntimeError``.  The streaming path's ``_lock_held`` flag is
+  the cleaner pattern.  v2 to refactor; current shape is correct
+  but obscures bugs.
+
+* **Test-connection endpoint contract.**
+  ``GET /api/providers/claude-acpx/test-connection`` shells out to
+  ``npx acpx --version`` per call (no version pin) and uses GET
+  for what is semantically a side-effecting probe (npm fetch on
+  first run).  v2 to (a) pin the version to match
+  ``acpx_translate._PINNED_ACPX_VERSION``, (b) move to POST or add
+  a cache, (c) emit a structured pinned-version diagnostic.
+
+* **Multi-worker / horizontal scaling.**
+  Registry is process-singleton and not shared across workers; the
+  ``plan_turn`` → ``submit_turn`` → ``commit_turn`` contract is
+  single-tenant.  v2 → Redis-backed registry with a coordinated
+  session-name namespace.
 """
 
 from __future__ import annotations
@@ -170,7 +221,7 @@ def _detect_effort(
     call_kwargs: dict,
     generate_kwargs: dict | None,
 ) -> str | None:
-    """Return a stable string for the current thinking-effort, or None.
+    """Return a stable string for the current effort, or None.
     Per-call kwargs win over constructor defaults.  Recognised shapes:
 
     * OpenAI-flavored: ``reasoning_effort="medium"`` /
@@ -421,6 +472,15 @@ class ClaudeAcpxChatModel(OpenAIChatModel):
 # =========================================================================
 
 
+# Module-level strong refs for cleanup tasks scheduled from
+# ``_AcpxStreamAdapter.__del__``.  The adapter is being collected at
+# that point so storing the ref on ``self`` does nothing — the loop
+# only weakrefs scheduled tasks (per Python docs), so without an
+# external strong ref the cleanup can be GC'd mid-flight.  Tasks
+# self-discard via the done callback.
+_PENDING_CLEANUP_TASKS: set[asyncio.Task[Any]] = set()
+
+
 class _AcpxStreamAdapter:
     """AsyncStream-compatible iterator returned for ``stream=True``.
 
@@ -649,12 +709,18 @@ class _AcpxStreamAdapter:
         if self._closed:
             return
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(self._finalize(commit=False))
-                return
+            loop = asyncio.get_running_loop()
         except RuntimeError:
-            pass
+            # No running loop — fall through to the warning branch.
+            loop = None
+        if loop is not None and loop.is_running():
+            # Strong-ref the cleanup task in a module-level set so the
+            # GC can't collect it before _finalize runs (loop only
+            # weakrefs tasks).  Self-discard on completion.
+            task = loop.create_task(self._finalize(commit=False))
+            _PENDING_CLEANUP_TASKS.add(task)
+            task.add_done_callback(_PENDING_CLEANUP_TASKS.discard)
+            return
         if self._lock_held or self._chunk_iter is not None:
             try:
                 logger.warning(

@@ -442,6 +442,8 @@ async def claude_acpx_test_connection() -> ClaudeAcpxStatus:
     but credentials missing, etc.).
     """
     import asyncio
+    import os
+    import signal
 
     from ...providers.claude_auth import (
         ClaudeAuth,
@@ -466,6 +468,9 @@ async def claude_acpx_test_connection() -> ClaudeAcpxStatus:
             "--version",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            # New session so a stuck npm fetcher can be reaped via
+            # killpg below — bare proc.kill() only kills the npx leader.
+            start_new_session=True,
         )
         try:
             stdout, stderr = await asyncio.wait_for(
@@ -474,10 +479,19 @@ async def claude_acpx_test_connection() -> ClaudeAcpxStatus:
             )
         except asyncio.TimeoutError:
             # Don't leave a zombie subprocess behind — kill the
-            # process group so npm's child fetcher dies too.
+            # whole process group (npx → node fetcher tree) and
+            # then reap so the PID is released before we return.
             try:
-                proc.kill()
-            except ProcessLookupError:
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            try:
+                await proc.wait()
+            except Exception:  # noqa: BLE001
                 pass
             cli_error = "acpx --version timed out after 10s"
         else:

@@ -433,6 +433,16 @@ class AnthropicProvider(Provider):
     async def check_connection(self, timeout: float = 5) -> tuple[bool, str]:
         """Check if Anthropic provider is reachable."""
         try:
+            if self._is_acpx:
+                # acpx routes via the local ``npx acpx`` subprocess, not
+                # ``base_url``; falling through to ``client.models.list()``
+                # would call the OpenAI-shaped Anthropic endpoint with an
+                # ``acpx`` sentinel string as the API key and surface
+                # "Unknown exception" to the UI.  The dedicated
+                # GET /api/providers/claude-acpx/test-connection endpoint
+                # owns the real probe (binary present + OAuth creds);
+                # here we just signal "supported, defer to that".
+                return True, ""
             if self._is_oauth:
                 # OAuth: we don't need to round-trip to /v1/models; a
                 # successful credential read + (if needed) refresh
@@ -458,6 +468,11 @@ class AnthropicProvider(Provider):
 
     async def fetch_models(self, timeout: float = 5) -> List[ModelInfo]:
         """Fetch available models."""
+        if self._is_acpx:
+            # acpx doesn't expose a discovery endpoint; the configured
+            # model list comes from provider_manager defaults.  Same
+            # contract as OAuth — empty list means "use configured".
+            return []
         if self._is_oauth:
             # Upstream ``GET /v1/models`` with OAuth auth is gated
             # behind ``user:profile`` scope on some subscriptions and
@@ -479,6 +494,15 @@ class AnthropicProvider(Provider):
         target = (model_id or "").strip()
         if not target:
             return False, "Empty model ID"
+
+        if self._is_acpx:
+            # The Anthropic SDK ping path doesn't apply — acpx is a
+            # subprocess driver, not an HTTP client against base_url.
+            # The dedicated GET /api/providers/claude-acpx/test-connection
+            # endpoint runs the real binary+OAuth probe.  We trust the
+            # configured model list here so the UI doesn't show a red
+            # "model unreachable" tile that we can't actually verify.
+            return True, ""
 
         body: dict[str, Any] = {
             "model": target,

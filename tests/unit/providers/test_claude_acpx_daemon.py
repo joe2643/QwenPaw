@@ -629,3 +629,191 @@ class TestTeardownAndSetConfig:
         await daemon.shutdown()
         with pytest.raises(AcpxDaemonError, match="shut down"):
             await daemon.run_set_config("copaw-x", "k", "v")
+
+
+# ----------------------------------------------------------------- #
+# F coverage: _ensure_session + dispatch task retention + handler wiring
+# ----------------------------------------------------------------- #
+
+
+# Script: emits a Claude→client request that points at a method we
+# do NOT register, then a final response.  Used to verify the daemon
+# replies with -32601 method not found rather than dropping silently.
+_UNKNOWN_METHOD_SCRIPT = r"""
+import json, sys
+sys.stdout.write(json.dumps({
+    "jsonrpc": "2.0",
+    "id": "req_X",
+    "method": "fs/no_such_method",
+    "params": {"sessionId": "sess_x"},
+}) + "\n")
+sys.stdout.flush()
+# Read the daemon's reply and echo it back as a session/update.
+reply_line = sys.stdin.readline()
+sys.stdout.write(json.dumps({
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+        "sessionId": "sess_x",
+        "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": reply_line.strip()},
+        },
+    },
+}) + "\n")
+sys.stdout.flush()
+sys.stdout.write(json.dumps({
+    "jsonrpc": "2.0", "id": "1",
+    "result": {"stopReason": "end_turn"},
+}) + "\n")
+sys.stdout.flush()
+"""
+
+
+class TestEnsureSessionCache:
+    """`_ensure_session` is hot — runs before every submit_turn for an
+    auto-ensured session.  The cache + lock have to make the second
+    call a no-op; otherwise we'd shell out to acpx per request."""
+
+    @pytest.mark.asyncio
+    async def test_idempotent_second_call_skips_subprocess(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        spawn_count = {"n": 0}
+
+        class _OkProc:
+            returncode = 0
+            pid = 1234
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                return b"ok", b""
+
+            async def wait(self) -> int:
+                return 0
+
+        async def fake_exec(*args: Any, **kwargs: Any) -> _OkProc:  # noqa: ARG001
+            spawn_count["n"] += 1
+            return _OkProc()
+
+        monkeypatch.setattr(
+            "qwenpaw.providers.claude_acpx_daemon.asyncio."
+            "create_subprocess_exec",
+            fake_exec,
+        )
+        daemon = AcpxDaemon(auto_ensure_session=True)
+
+        await daemon._ensure_session("copaw-x")
+        await daemon._ensure_session("copaw-x")
+        await daemon._ensure_session("copaw-x")
+
+        assert spawn_count["n"] == 1, (
+            "second / third _ensure_session calls must hit the cache"
+        )
+
+    @pytest.mark.asyncio
+    async def test_concurrent_ensure_serialised_by_lock(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two concurrent ``_ensure_session`` calls for the same name
+        must collapse to a single subprocess — the lock + post-lock
+        re-check is the safety net.  Without that, racing first turns
+        for a fresh session would each shell out."""
+        spawn_count = {"n": 0}
+        gate = asyncio.Event()
+
+        class _OkProc:
+            returncode = 0
+            pid = 1234
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                # Hold the first spawn while the second one queues.
+                await gate.wait()
+                return b"ok", b""
+
+            async def wait(self) -> int:
+                return 0
+
+        async def fake_exec(*args: Any, **kwargs: Any) -> _OkProc:  # noqa: ARG001
+            spawn_count["n"] += 1
+            return _OkProc()
+
+        monkeypatch.setattr(
+            "qwenpaw.providers.claude_acpx_daemon.asyncio."
+            "create_subprocess_exec",
+            fake_exec,
+        )
+        daemon = AcpxDaemon(auto_ensure_session=True)
+
+        t1 = asyncio.create_task(daemon._ensure_session("copaw-x"))
+        t2 = asyncio.create_task(daemon._ensure_session("copaw-x"))
+        # Yield so both tasks queue on the lock.
+        await asyncio.sleep(0)
+        gate.set()
+        await asyncio.gather(t1, t2)
+
+        assert spawn_count["n"] == 1, (
+            "post-lock cache re-check must collapse the second spawn"
+        )
+
+    @pytest.mark.asyncio
+    async def test_ensure_session_propagates_file_not_found(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def fake_exec(*args: Any, **kwargs: Any):  # noqa: ARG001
+            raise FileNotFoundError("npx missing")
+
+        monkeypatch.setattr(
+            "qwenpaw.providers.claude_acpx_daemon.asyncio."
+            "create_subprocess_exec",
+            fake_exec,
+        )
+        daemon = AcpxDaemon(auto_ensure_session=True)
+        with pytest.raises(AcpxDaemonError, match="sessions ensure"):
+            await daemon._ensure_session("copaw-x")
+
+
+class TestUnknownMethodDispatch:
+    """A Claude→client request for a method that hasn't been registered
+    must return a -32601 ``method not found`` reply rather than the
+    dispatch task dying silently.  Without strong-ref retention on the
+    dispatch task, this could be flaky under GC pressure."""
+
+    @pytest.mark.asyncio
+    async def test_unknown_method_reply_is_method_not_found(self) -> None:
+        daemon = AcpxDaemon(
+            auto_ensure_session=False,
+            cmd_builder=_python_cmd_builder(_UNKNOWN_METHOD_SCRIPT),
+        )
+        # Deliberately do NOT register a handler.
+        lines = []
+        async for raw in daemon.submit_turn(
+            session_name="copaw-test",
+            prompt_blocks=[{"type": "text", "text": "hi"}],
+            is_seed=True,
+        ):
+            lines.append(raw.strip())
+
+        # The script echoes our reply as the session/update text.
+        echoed = json.loads(lines[0])
+        reply_text = echoed["params"]["update"]["content"]["text"]
+        reply = json.loads(reply_text)
+        assert reply["error"]["code"] == -32601
+        assert "method not found" in reply["error"]["message"].lower()
+
+
+class TestRegisterHandlersWiredOnGetOrSpawn:
+    """Production path-A invariant: ``AcpxDaemon.get_or_spawn`` is the
+    only entry point production uses, and it must wire the ACP fs/
+    terminal/permission handlers.  Without this the first tool-using
+    turn returns -32601 method not found and the session is wedged."""
+
+    def test_singleton_has_handlers_registered(self) -> None:
+        daemon = AcpxDaemon.get_or_spawn()
+        # The handler bundle covers fs.* + terminal.* + session/.
+        assert daemon.has_handler("fs/read_text_file")
+        assert daemon.has_handler("fs/write_text_file")
+        assert daemon.has_handler("terminal/create")
+        assert daemon.has_handler("session/request_permission")

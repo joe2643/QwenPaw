@@ -87,6 +87,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Literal
 
+from qwenpaw.providers import claude_acpx_metrics as metrics
+
 logger = logging.getLogger(__name__)
 
 # Cap chosen to comfortably hold the active conversations of a single
@@ -322,6 +324,12 @@ class Registry:
         # Default no-op so unit tests don't need to wire this; production
         # wires ``acpx claude sessions close <name>``.
         self._tear_down: TearDownCb = tear_down_cb or _noop_tear_down
+        # Strong refs for fire-and-forget tear-down tasks.  Python's
+        # event loop only weakrefs scheduled tasks (per docs); without
+        # this set the GC can collect a pending teardown mid-execution
+        # and we'd leak the on-disk acpx session.  Tasks self-discard on
+        # completion via the done callback below.
+        self._pending_tasks: set[asyncio.Task[Any]] = set()
 
     async def plan_turn(
         self,
@@ -473,6 +481,7 @@ class Registry:
         )
         async with self._global_lock:
             self._entries[key] = fresh
+        metrics.record_reseed()
         logger.info(
             "acpx registry: reseed %s → %s (drift)",
             old_entry.session_name,
@@ -511,16 +520,29 @@ class Registry:
                 stale_keys.append(k)
         for k in stale_keys:
             stale = self._entries.pop(k)
-            # Schedule tear-down off the lock — fire and forget.
-            asyncio.get_event_loop().create_task(
-                self._tear_down_safe(stale.session_name),
-            )
+            # Schedule tear-down off the lock — fire and forget, but
+            # keep a strong ref via _pending_tasks so the GC can't
+            # collect mid-flight (loop only weakrefs tasks).
+            self._spawn_tear_down(stale.session_name)
 
     async def _tear_down_safe(self, name: str) -> None:
         try:
             await self._tear_down(name)
         except Exception as e:  # noqa: BLE001
             logger.warning("acpx registry: deferred tear_down(%s) failed: %s", name, e)
+
+    def _spawn_tear_down(self, session_name: str) -> None:
+        """Fire-and-forget ``_tear_down_safe`` with strong-ref retention.
+
+        The event loop only weakrefs scheduled tasks; without
+        ``_pending_tasks`` a pending teardown can be GC'd mid-execution
+        and we'd silently leak an on-disk acpx session.  The done
+        callback removes the task from the set when it finishes.
+        """
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(self._tear_down_safe(session_name))
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
 
     async def _maybe_evict_lru_locked(self) -> None:
         """Caller holds ``self._global_lock``.  Evict oldest entries
@@ -535,9 +557,7 @@ class Registry:
         excess = len(self._entries) - self._cap
         for key, evicted in sorted_items[:excess]:
             self._entries.pop(key, None)
-            asyncio.get_event_loop().create_task(
-                self._tear_down_safe(evicted.session_name),
-            )
+            self._spawn_tear_down(evicted.session_name)
 
     # ----- Test/diagnostic helpers --------------------------------- #
 

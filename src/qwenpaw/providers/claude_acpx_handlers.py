@@ -54,6 +54,7 @@ import asyncio
 import logging
 import os
 import secrets
+import signal
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -348,6 +349,10 @@ class AcpxTerminalHandlers:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd or None,
                 env=env_map,
+                # New session so terminal/release can SIGKILL the
+                # whole process group, not just the leader — tools
+                # routinely spawn shells that fork children.
+                start_new_session=True,
             )
         except FileNotFoundError as e:
             raise AcpxHandlerError(
@@ -434,17 +439,15 @@ class AcpxTerminalHandlers:
         if session is None:
             return {}
         if session.process.returncode is None:
-            try:
-                session.process.terminate()
-            except ProcessLookupError:
-                pass
+            # Terminate the entire process group: tool subprocesses
+            # routinely fork (sh -c '...', npm scripts that spawn node,
+            # etc.).  start_new_session=True at spawn time means we
+            # can killpg the leader and reap the whole tree.
+            _kill_terminal_pg(session.process, signal.SIGTERM)
             try:
                 await asyncio.wait_for(session.process.wait(), timeout=5)
             except asyncio.TimeoutError:
-                try:
-                    session.process.kill()
-                except ProcessLookupError:
-                    pass
+                _kill_terminal_pg(session.process, signal.SIGKILL)
                 await session.process.wait()
         for t in (session.drain_task, session.stderr_drain_task):
             if t is not None and not t.done():
@@ -618,12 +621,76 @@ def _slice_lines(
     return "".join(lines[start:end])
 
 
-def _build_env(env_raw: list[Any]) -> dict[str, str]:
-    """ACP env is a list of ``{name, value}`` objects.  Merge over
-    the parent process env so tools find ``PATH`` etc.; explicit
-    entries always win over inherited values.
+# Allowlist of parent-process env vars exposed to ``terminal/create``
+# children.  Keep this minimal: anything Claude Code's spawned tool
+# actually needs to function (PATH so binaries resolve, HOME for tool
+# config dirs, USER/LOGNAME for whoami-style lookups, LANG/LC_*/TZ for
+# locale, TERM/COLORTERM for tty-aware tools, TMPDIR for scratch
+# files).  Crucially this excludes provider API keys — OPENAI_API_KEY,
+# ANTHROPIC_API_KEY, AWS_*, GCP credentials etc. — that the parent
+# CoPaw process holds and that a compromised or curious tool turn
+# could otherwise exfiltrate via stdout.  ACP-specified env entries
+# (per the env_raw list) are layered on top and can override anything
+# in this baseline.
+_ENV_ALLOWLIST: tuple[str, ...] = (
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    "COLORTERM",
+    "TMPDIR",
+    "TZ",
+)
+
+
+def _kill_terminal_pg(
+    proc: asyncio.subprocess.Process,
+    sig: signal.Signals,
+) -> None:
+    """Send ``sig`` to the process group rooted at ``proc``.
+
+    ``terminal/create`` spawns with ``start_new_session=True`` so the
+    process is a session leader and ``killpg(pgid, sig)`` reaps both
+    the leader and any forked workers in one call.  Falls back to a
+    per-pid signal if the pgid is unreadable (process already gone or
+    permission lost), and silently swallows ``ProcessLookupError`` so
+    a tear-down race doesn't error the release path.
     """
-    env_map = dict(os.environ)
+    if proc.pid is None:
+        return
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, PermissionError):
+        try:
+            proc.send_signal(sig)
+        except ProcessLookupError:
+            pass
+        return
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        pass
+
+
+def _build_env(env_raw: list[Any]) -> dict[str, str]:
+    """ACP env is a list of ``{name, value}`` objects.
+
+    Returns a minimal env: an allowlist projection of ``os.environ``
+    (PATH, HOME, locale, terminal type, etc.) layered with the ACP-
+    specified entries.  We deliberately do NOT inherit the full
+    parent env — this process holds API keys (OPENAI_API_KEY,
+    ANTHROPIC_API_KEY) that a tool-spawned subprocess has no business
+    seeing.  ACP entries always win over the allowlist baseline.
+    """
+    env_map: dict[str, str] = {}
+    for key in _ENV_ALLOWLIST:
+        val = os.environ.get(key)
+        if val is not None:
+            env_map[key] = val
     if not isinstance(env_raw, list):
         return env_map
     for item in env_raw:

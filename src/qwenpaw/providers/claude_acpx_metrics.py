@@ -23,7 +23,7 @@ noise floor of "did the design pay off".
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,6 @@ class _Counters:
     reseed: int = 0
     effort_set: int = 0
     tear_down: int = 0
-    daemon_restart: int = 0
     error: int = 0
 
     def total_turns(self) -> int:
@@ -54,7 +53,6 @@ class _Counters:
             "reseed": self.reseed,
             "effort_set": self.effort_set,
             "tear_down": self.tear_down,
-            "daemon_restart": self.daemon_restart,
             "error": self.error,
             "total_turns": self.total_turns(),
             "hit_ratio": round(self.hit_ratio(), 4),
@@ -82,10 +80,6 @@ def record_effort_set() -> None:
 
 def record_tear_down() -> None:
     _GLOBAL.tear_down += 1
-
-
-def record_daemon_restart() -> None:
-    _GLOBAL.daemon_restart += 1
 
 
 def record_error() -> None:

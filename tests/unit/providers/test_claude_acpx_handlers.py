@@ -112,15 +112,27 @@ class TestSliceLines:
 
 
 class TestBuildEnv:
-    def test_empty_returns_parent_env(self) -> None:
+    def test_empty_returns_allowlisted_parent_env(self) -> None:
         env = _build_env([])
-        # Parent PATH should be present.
+        # PATH is in the allowlist and is virtually always set.
         assert "PATH" in env
 
-    def test_explicit_overrides_parent(
+    def test_acp_overrides_allowlisted_parent(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # PATH is allowlisted, so a parent value flows through and
+        # the ACP entry overrides it.
+        monkeypatch.setenv("PATH", "from_parent")
+        env = _build_env([{"name": "PATH", "value": "from_acp"}])
+        assert env["PATH"] == "from_acp"
+
+    def test_acp_can_set_unlisted_var(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # ACP entries are layered on top, so the tool can still set
+        # arbitrary names — we just don't inherit them from the parent.
         monkeypatch.setenv("FOO", "from_parent")
         env = _build_env([{"name": "FOO", "value": "from_acp"}])
         assert env["FOO"] == "from_acp"
@@ -132,6 +144,40 @@ class TestBuildEnv:
             {"name": 123, "value": "bad"},  # name not str
         ])
         assert env["OK"] == "yes"
+
+    def test_parent_secrets_excluded(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The whole point of the allowlist: provider API keys held by
+        the parent CoPaw process must NOT flow into terminal/create
+        children.  A compromised or curious tool turn could otherwise
+        read them via ``env`` / ``printenv`` and exfiltrate via
+        stdout."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-leaky")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-leaky")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "leaky")
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "leaky")
+
+        env = _build_env([])
+
+        assert "OPENAI_API_KEY" not in env
+        assert "ANTHROPIC_API_KEY" not in env
+        assert "AWS_SECRET_ACCESS_KEY" not in env
+        assert "DASHSCOPE_API_KEY" not in env
+
+    def test_locale_and_home_inherit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Allowlist covers what tools actually need.  Without HOME the
+        tool can't find user config; without LANG/LC_* it'll fall back
+        to C locale and break unicode in node/python child processes."""
+        monkeypatch.setenv("HOME", "/home/test")
+        monkeypatch.setenv("LANG", "en_US.UTF-8")
+        env = _build_env([])
+        assert env["HOME"] == "/home/test"
+        assert env["LANG"] == "en_US.UTF-8"
 
 
 # ----------------------------------------------------------------- #

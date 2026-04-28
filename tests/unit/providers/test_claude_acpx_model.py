@@ -933,3 +933,112 @@ class TestEffortDeferredToAdapter:
         # After full iteration: set_config pushed exactly once.
         assert len(daemon.set_config_calls) == 1
         assert daemon.set_config_calls[0][1:] == ("effort", "low")
+
+
+# =================================================================== #
+# F coverage: __del__ branches + cleanup task retention                #
+# =================================================================== #
+
+
+class TestStreamAdapterDelBranches:
+    """``_AcpxStreamAdapter.__del__`` has three branches:
+
+    1. Already closed → no-op.
+    2. Loop is running → schedule ``_finalize`` and strong-ref it via
+       the module-level ``_PENDING_CLEANUP_TASKS`` so the GC can't
+       collect the cleanup before it runs.
+    3. No running loop / interpreter shutdown → fall through to the
+       warning branch (covered indirectly elsewhere).
+
+    Without strong-ref retention from (2), the loop's weakref-only
+    task tracking lets the GC reclaim the cleanup mid-flight, leaving
+    the entry lock held and the daemon's submit_turn generator un-
+    closed.  This test pins (1) and (2)."""
+
+    def test_del_when_already_closed_is_noop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fresh_registry: Registry,
+        context_set: None,
+    ) -> None:
+        daemon = _FakeDaemon(
+            lines=[_agent_message_line("hi"), _final_acp_line()],
+        )
+        _patch_daemon(monkeypatch, daemon)
+
+        model = ClaudeAcpxChatModel(model_name="claude-sonnet-4-5")
+        adapter = asyncio.run(
+            model.client.chat.completions.create(
+                model="claude-sonnet-4-5",
+                messages=[{"role": "user", "content": "hi"}],
+                stream=True,
+            ),
+        )
+
+        async def _drain_then_close() -> None:
+            async for _ in adapter:
+                pass
+            # Adapter should already be closed by natural finalisation,
+            # but be explicit.
+            await adapter.close()
+
+        asyncio.run(_drain_then_close())
+        assert adapter._closed is True
+
+        # Manually invoke __del__ — should be a clean no-op.  The
+        # set must NOT grow.
+        from qwenpaw.providers import claude_acpx_model
+
+        before = len(claude_acpx_model._PENDING_CLEANUP_TASKS)
+        adapter.__del__()
+        after = len(claude_acpx_model._PENDING_CLEANUP_TASKS)
+        assert after == before
+
+    def test_del_with_running_loop_strong_refs_finalize(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fresh_registry: Registry,
+        context_set: None,
+    ) -> None:
+        """When __del__ runs inside a live loop and the adapter is not
+        closed, it must schedule _finalize and store the task in the
+        module-level set so the GC can't reclaim it.  We verify the
+        task gets added and self-discards on completion."""
+        daemon = _FakeDaemon(
+            lines=[_agent_message_line("hi"), _final_acp_line()],
+        )
+        _patch_daemon(monkeypatch, daemon)
+
+        from qwenpaw.providers import claude_acpx_model
+
+        async def _scenario() -> None:
+            model = ClaudeAcpxChatModel(model_name="claude-sonnet-4-5")
+            adapter = await model.client.chat.completions.create(
+                model="claude-sonnet-4-5",
+                messages=[{"role": "user", "content": "hi"}],
+                stream=True,
+            )
+            # Drive one anext so _open() runs and acquires the entry
+            # lock — this is the state where __del__ needs to clean up.
+            ait = adapter.__aiter__()
+            await ait.__anext__()
+            assert adapter._lock_held is True
+
+            # Manually invoke __del__ while the loop is running and
+            # the adapter is not closed.
+            before = len(claude_acpx_model._PENDING_CLEANUP_TASKS)
+            adapter.__del__()
+            after = len(claude_acpx_model._PENDING_CLEANUP_TASKS)
+            assert after == before + 1, (
+                "__del__ inside a running loop must add the cleanup "
+                "task to _PENDING_CLEANUP_TASKS for GC safety"
+            )
+
+            # Drain so the cleanup task completes and self-discards.
+            for _ in range(20):
+                if len(claude_acpx_model._PENDING_CLEANUP_TASKS) == before:
+                    break
+                await asyncio.sleep(0)
+            assert len(claude_acpx_model._PENDING_CLEANUP_TASKS) == before
+
+        asyncio.run(_scenario())

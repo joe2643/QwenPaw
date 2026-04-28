@@ -634,6 +634,7 @@ async def spawn_acpx_and_stream(
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
         env=env,
+        start_new_session=True,
     )
     assert proc.stdin is not None
     assert proc.stdout is not None

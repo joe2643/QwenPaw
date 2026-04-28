@@ -557,3 +557,148 @@ class TestRegistryEffortTracking:
         assert plan.entry.last_effort is None
         await reg.update_effort(plan.entry, "high")
         assert plan.entry.last_effort == "high"
+
+
+# ---------------------------------------------------------------- #
+# F coverage: tear-down failures, env_hash eviction, ref retention
+# ---------------------------------------------------------------- #
+
+
+class TestRegistryTearDownSafety:
+    """`_tear_down_safe` must swallow callback errors so a failing
+    teardown doesn't leak the exception into LRU eviction or reseed
+    paths (where the caller can't recover anyway — the entry is
+    already gone from the dict)."""
+
+    @pytest.mark.asyncio
+    async def test_tear_down_safe_swallows_exception(self) -> None:
+        async def bad_cb(name: str) -> None:  # noqa: ARG001
+            raise RuntimeError("disk full")
+
+        r = Registry(tear_down_cb=bad_cb)
+        # Direct call — should not raise.
+        await r._tear_down_safe("copaw-doomed")
+
+    @pytest.mark.asyncio
+    async def test_reseed_continues_when_tear_down_fails(self) -> None:
+        """Reseed must hand back a fresh ShipPlan even if tear-down
+        of the old session raises — old entry's on-disk state may be
+        permanently broken (acpx daemon down) and the user still
+        needs to make progress.  Also asserts the reseed metric is
+        incremented — the previous round's auto-fix wired
+        ``record_reseed()`` into ``_reseed`` and we don't want a
+        silent regression."""
+        from qwenpaw.providers import claude_acpx_metrics
+
+        claude_acpx_metrics.reset_for_test()
+        calls: list[str] = []
+
+        async def flaky_cb(name: str) -> None:
+            calls.append(name)
+            raise OSError("permission denied")
+
+        r = Registry(tear_down_cb=flaky_cb)
+        msgs1 = [{"role": "user", "content": "u1"}]
+        plan1 = await r.plan_turn(
+            agent_id="a", session_id="s", model="m", env_hash_value="e",
+            messages=msgs1,
+        )
+        await r.commit_turn(plan1.entry, new_shipped_idx=1, messages=msgs1)
+
+        edited = [{"role": "user", "content": "u1-EDIT"}]
+        plan2 = await r.plan_turn(
+            agent_id="a", session_id="s", model="m", env_hash_value="e",
+            messages=edited,
+        )
+        assert plan2.mode == "seed_full"
+        assert plan2.session_name != plan1.session_name
+        assert calls == [plan1.session_name]
+        assert claude_acpx_metrics.snapshot()["reseed"] == 1, (
+            "_reseed must call metrics.record_reseed() — drift "
+            "observability depends on it"
+        )
+
+
+class TestRegistryEnvHashEviction:
+    """`_evict_stale_for_conversation_locked` schedules tear-down for
+    sibling entries that share (agent, session, model) but have a
+    different env_hash.  This is the path that fires when a system
+    prompt edit / tool catalog change leaves the prior session
+    unreachable but still on disk."""
+
+    @pytest.mark.asyncio
+    async def test_env_hash_change_schedules_old_tear_down(self) -> None:
+        torn: list[str] = []
+
+        async def cb(name: str) -> None:
+            torn.append(name)
+
+        r = Registry(tear_down_cb=cb)
+        msgs = [{"role": "user", "content": "u"}]
+        plan1 = await r.plan_turn(
+            agent_id="a", session_id="s", model="m",
+            env_hash_value="env_v1", messages=msgs,
+        )
+        await r.commit_turn(plan1.entry, new_shipped_idx=1, messages=msgs)
+
+        # System prompt changes → new env_hash → old session evicted.
+        plan2 = await r.plan_turn(
+            agent_id="a", session_id="s", model="m",
+            env_hash_value="env_v2", messages=msgs,
+        )
+        assert plan2.session_name != plan1.session_name
+        # Let the fire-and-forget tear-down task drain.
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert torn == [plan1.session_name]
+
+
+class TestRegistryPendingTaskRetention:
+    """Codex/security/perf converged: fire-and-forget tear-down tasks
+    must be strong-ref'd or the GC can collect them mid-flight (the
+    event loop only weakrefs scheduled tasks).  The ``_pending_tasks``
+    set provides that ref; this test pins it."""
+
+    @pytest.mark.asyncio
+    async def test_pending_tasks_set_holds_inflight_teardowns(self) -> None:
+        gate = asyncio.Event()
+        seen: list[str] = []
+
+        async def slow_cb(name: str) -> None:
+            seen.append(name)
+            await gate.wait()
+
+        r = Registry(cap=1, tear_down_cb=slow_cb)
+
+        # Trigger LRU eviction.  cap=1, so the second insert must
+        # spawn a tear-down task for the first entry.
+        for i in range(2):
+            await r.plan_turn(
+                agent_id=f"a{i}", session_id="s", model="m",
+                env_hash_value="e",
+                messages=[{"role": "user", "content": f"u{i}"}],
+            )
+
+        # Yield until the fire-and-forget task starts and hits the
+        # gate.  We can't rely on a single sleep(0) — task wake-up
+        # ordering depends on the loop scheduler.
+        for _ in range(10):
+            if seen:
+                break
+            await asyncio.sleep(0)
+
+        assert seen, "tear-down callback never started"
+        assert len(r._pending_tasks) == 1, (
+            "tear-down task must be retained in _pending_tasks "
+            "while still running (loop only weakrefs tasks)"
+        )
+
+        # Release the gate and let the task complete.
+        gate.set()
+        for _ in range(10):
+            if not r._pending_tasks:
+                break
+            await asyncio.sleep(0)
+
+        # Done-callback discards the task from the set.
+        assert len(r._pending_tasks) == 0

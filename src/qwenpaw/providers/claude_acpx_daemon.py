@@ -63,7 +63,7 @@ acpx CLI surface (verified against 0.6.1, the version pinned in
   ACP JSON-RPC.  ``--json-strict`` suppresses non-JSON stderr noise.
 * ``acpx claude sessions close <name>`` — tear down a stateful session.
 * ``acpx claude set -s <name> <key> <value>`` — push a session-scoped
-  config option (e.g. thinking effort).
+  config option (e.g. effort).
 """
 
 from __future__ import annotations
@@ -71,7 +71,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
+import signal
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 from qwenpaw.providers import claude_acpx_metrics, acpx_translate
@@ -172,6 +174,11 @@ class AcpxDaemon:
         self._ensured_sessions: set[str] = set()
         self._ensure_lock = asyncio.Lock()
         self._closed = False
+        # Strong refs for fire-and-forget handler-dispatch tasks.
+        # Without this set the loop only weakrefs the task and the GC
+        # can collect it mid-flight, leaving acpx waiting on a JSON-RPC
+        # response that never arrives.  Tasks self-discard on done.
+        self._pending_dispatches: set[asyncio.Task[Any]] = set()
 
     # ----- Singleton accessor (Lane D entrypoint) ---------------- #
 
@@ -182,9 +189,20 @@ class AcpxDaemon:
         "Spawn" is a misnomer in path A — we don't actually create
         a subprocess until the first :meth:`submit_turn` call.  The
         name matches the contract Lane D imports.
+
+        On first construction we also wire the ACP handler set
+        (fs/read_text_file, fs/write_text_file, terminal/*,
+        session/request_permission) so any tool-using turn sees the
+        registered handler instead of a -32601 ``method not found``
+        bounce.  Import is deferred to break the
+        daemon ↔ handlers ↔ daemon cycle at module load time.
         """
         if cls._GLOBAL is None:
-            cls._GLOBAL = cls()
+            inst = cls()
+            from .claude_acpx_handlers import register_handlers
+
+            register_handlers(inst)
+            cls._GLOBAL = inst
         return cls._GLOBAL
 
     @classmethod
@@ -304,7 +322,7 @@ class AcpxDaemon:
     ) -> None:
         """Push ``acpx claude set -s <name> <key> <value>``.
 
-        Used by Lane D for thinking-effort delta sync without
+        Used by Lane D for effort delta sync without
         re-shipping the prompt.  Returns when the subprocess exits.
 
         Calls :meth:`_ensure_session` first because Lane D may invoke
@@ -339,6 +357,7 @@ class AcpxDaemon:
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
         except FileNotFoundError as e:
             raise AcpxDaemonError(f"acpx spawn failed: {e}") from e
@@ -349,7 +368,7 @@ class AcpxDaemon:
                 timeout=30,
             )
         except asyncio.TimeoutError as e:
-            proc.kill()
+            _kill_proc_tree(proc)
             await proc.wait()
             raise AcpxDaemonError(
                 f"acpx claude set timed out for {session_name}",
@@ -401,6 +420,7 @@ class AcpxDaemon:
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
         except FileNotFoundError:
             logger.warning(
@@ -415,7 +435,7 @@ class AcpxDaemon:
                 timeout=15,
             )
         except asyncio.TimeoutError:
-            proc.kill()
+            _kill_proc_tree(proc)
             await proc.wait()
             logger.warning(
                 "acpx claude sessions close timed out for %s",
@@ -443,10 +463,7 @@ class AcpxDaemon:
         # Snapshot because _reap mutates the set.
         for proc in list(self._inflight):
             if proc.returncode is None:
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
+                _kill_proc_tree(proc)
         for proc in list(self._inflight):
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5)
@@ -493,6 +510,7 @@ class AcpxDaemon:
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    start_new_session=True,
                 )
             except FileNotFoundError as e:
                 raise AcpxDaemonError(
@@ -504,7 +522,7 @@ class AcpxDaemon:
                     timeout=30,
                 )
             except asyncio.TimeoutError as e:
-                proc.kill()
+                _kill_proc_tree(proc)
                 await proc.wait()
                 raise AcpxDaemonError(
                     f"acpx claude sessions ensure timed out for "
@@ -528,6 +546,7 @@ class AcpxDaemon:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
         except FileNotFoundError as e:
             raise AcpxDaemonError(f"acpx spawn failed: {e}") from e
@@ -551,9 +570,10 @@ class AcpxDaemon:
           - Otherwise it's a notification or response — yield through.
         """
         assert proc.stdout is not None
-        deadline = asyncio.get_event_loop().time() + self._turn_timeout
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._turn_timeout
         while True:
-            remaining = deadline - asyncio.get_event_loop().time()
+            remaining = deadline - loop.time()
             if remaining <= 0:
                 claude_acpx_metrics.record_error()
                 raise AcpxDaemonError(
@@ -616,9 +636,14 @@ class AcpxDaemon:
         # Only requests (method + id + ideally params) reach here.
 
         params = msg.get("params") or {}
-        asyncio.create_task(
+        # Strong-ref the dispatch task in _pending_dispatches; the loop
+        # only weakrefs scheduled tasks per Python docs, and GCing a
+        # mid-flight handler would silently drop acpx's request.
+        task = asyncio.create_task(
             self._dispatch_request(proc, method, msg_id, params),
         )
+        self._pending_dispatches.add(task)
+        task.add_done_callback(self._pending_dispatches.discard)
         return True
 
     async def _dispatch_request(
@@ -715,10 +740,7 @@ class AcpxDaemon:
                     "acpx subprocess (pid=%s) did not exit; killing",
                     proc.pid,
                 )
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
+                _kill_proc_tree(proc)
                 await proc.wait()
 
         if proc.returncode and proc.returncode != 0:
@@ -760,12 +782,52 @@ class _HandlerError(Exception):
         self.code = code
 
 
+_NPX_AVAILABLE_CACHE: bool | None = None
+
+
+def _kill_proc_tree(proc: asyncio.subprocess.Process) -> None:
+    """SIGKILL the entire process group rooted at ``proc``.
+
+    Spawns are made with ``start_new_session=True`` so the process is
+    a session leader; ``killpg(pgid, SIGKILL)`` reaps both the npm/npx
+    wrapper and the node/acpx grandchildren in one call.  A bare
+    ``proc.kill()`` only kills the session-leader PID, leaving the
+    actual workers as orphans holding stdio pipes.
+
+    Falls back to ``proc.kill()`` if the process is already gone or
+    we can't read its pgid.
+    """
+    if proc.pid is None:
+        return
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, PermissionError):
+        # Already reaped, or we lost ownership — best-effort fall back.
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        return
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
 def _binary_available() -> bool:
     """``npx`` is the gateway: even when ``acpx`` itself isn't
     globally installed, ``npx acpx@<version>`` resolves it via the npm
     registry on first call.  Test by probing ``npx`` only.
+
+    The result is cached for the process lifetime — ``npx`` doesn't
+    appear/disappear at runtime, and ``shutil.which`` walks PATH on
+    every call.  Tests that need to flip the answer can reset
+    ``_NPX_AVAILABLE_CACHE`` directly.
     """
-    return shutil.which("npx") is not None
+    global _NPX_AVAILABLE_CACHE  # noqa: PLW0603
+    if _NPX_AVAILABLE_CACHE is None:
+        _NPX_AVAILABLE_CACHE = shutil.which("npx") is not None
+    return _NPX_AVAILABLE_CACHE
 
 
 def _payload_text(prompt_blocks: list[dict]) -> str:
