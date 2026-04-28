@@ -487,28 +487,66 @@ async def get_agents_running_config(
     return agent_config.running or AgentsRunningConfig()
 
 
+def _deep_merge_dicts(base: dict, patch: dict) -> dict:
+    """Recursively merge ``patch`` into ``base`` (dicts only).
+
+    Used by partial-PUT handlers so a request body that only carries the
+    fields the client wants to change does not wipe sibling subtrees that
+    were merely omitted.  Non-dict leaves in ``patch`` replace the
+    corresponding ``base`` value; missing keys in ``patch`` keep
+    ``base``.  Lists are treated as leaves (replaced wholesale) — the
+    config schema doesn't have list fields where partial merge would
+    make sense.
+    """
+    out = dict(base)
+    for key, val in patch.items():
+        if (
+            key in out
+            and isinstance(out[key], dict)
+            and isinstance(val, dict)
+        ):
+            out[key] = _deep_merge_dicts(out[key], val)
+        else:
+            out[key] = val
+    return out
+
+
 @router.put(
     "/running-config",
     response_model=AgentsRunningConfig,
     summary="Update agent running config",
-    description="Update running configuration for active agent",
+    description=(
+        "PATCH-style update for agent running configuration.  Reads the "
+        "raw JSON body and deep-merges it onto the existing running "
+        "config — fields and nested subtrees that the client omits are "
+        "preserved.  Old wholesale-replace behaviour silently wiped "
+        "nested settings (notably "
+        "``reme_light_memory_config.embedding_model_config``) every "
+        "time a partial UI form posted only the fields it knew about."
+    ),
 )
 async def put_agents_running_config(
-    running_config: AgentsRunningConfig = Body(
-        ...,
-        description="Updated agent running configuration",
-    ),
-    request: Request = None,
+    request: Request,
 ) -> AgentsRunningConfig:
     """Update agent running configuration."""
+    raw = await request.json()
+    if not isinstance(raw, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="running-config body must be a JSON object",
+        )
+
     workspace = await get_agent_for_request(request)
     agent_config = load_agent_config(workspace.agent_id)
-    agent_config.running = running_config
+    existing_running = agent_config.running or AgentsRunningConfig()
+    merged = _deep_merge_dicts(existing_running.model_dump(), raw)
+    new_running = AgentsRunningConfig.model_validate(merged)
+    agent_config.running = new_running
     save_agent_config(workspace.agent_id, agent_config)
 
     schedule_agent_reload(request, workspace.agent_id)
 
-    return running_config
+    return new_running
 
 
 @router.get(
