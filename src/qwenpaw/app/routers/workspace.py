@@ -484,7 +484,9 @@ async def get_agents_running_config(
     """Get agent running configuration."""
     workspace = await get_agent_for_request(request)
     agent_config = load_agent_config(workspace.agent_id)
-    return agent_config.running or AgentsRunningConfig()
+    running = agent_config.running or AgentsRunningConfig()
+    running.approval_level = getattr(agent_config, "approval_level", "AUTO")
+    return running
 
 
 def _deep_merge_dicts(base: dict, patch: dict) -> dict:
@@ -538,14 +540,24 @@ async def put_agents_running_config(
 
     workspace = await get_agent_for_request(request)
     agent_config = load_agent_config(workspace.agent_id)
+
+    approval_level = raw.pop("approval_level", None)
+    if approval_level is not None:
+        agent_config.approval_level = approval_level
+
     existing_running = agent_config.running or AgentsRunningConfig()
-    merged = _deep_merge_dicts(existing_running.model_dump(), raw)
+    merged = _deep_merge_dicts(
+        existing_running.model_dump(),
+        raw,
+    )
+    merged["approval_level"] = None
     new_running = AgentsRunningConfig.model_validate(merged)
     agent_config.running = new_running
     save_agent_config(workspace.agent_id, agent_config)
 
     schedule_agent_reload(request, workspace.agent_id)
 
+    new_running.approval_level = agent_config.approval_level
     return new_running
 
 

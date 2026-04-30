@@ -173,6 +173,8 @@ export interface WeixinConfig extends BaseChannelConfig {
   bot_token_file?: string;
   base_url?: string;
   media_dir?: string;
+  message_merge_enabled?: boolean;
+  message_merge_delay_ms?: number;
 }
 
 export interface OneBotConfig extends BaseChannelConfig {

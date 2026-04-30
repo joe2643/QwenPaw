@@ -66,6 +66,7 @@ class StdIOStatefulClient(StatefulClientBase):
             "replace",
         ] = "strict",
         tool_call_timeout: float | None = None,
+        **kwargs: Any,
     ) -> None:
         """Initialize the StdIO MCP client.
 
@@ -84,6 +85,8 @@ class StdIOStatefulClient(StatefulClientBase):
                 usage and the ``MCPToolFunction`` callables handed to
                 agentscope's Toolkit, so hung backends become
                 surfaced errors instead of silent forever-waits.
+            **kwargs: Additional keyword arguments accepted for compatibility
+                with AgentScope's StdIOStatefulClient.
 
         Raises:
             TypeError: If name or command is not a string
@@ -118,6 +121,8 @@ class StdIOStatefulClient(StatefulClientBase):
 
         # Tool cache
         self._cached_tools = None
+
+        self.timeout = kwargs.get("timeout")
 
     async def _run_lifecycle(self) -> None:
         """Run MCP client lifecycle in a dedicated task.

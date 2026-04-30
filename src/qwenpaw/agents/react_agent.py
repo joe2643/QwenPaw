@@ -76,6 +76,7 @@ from ..constant import (
     MEDIA_UNSUPPORTED_PLACEHOLDER,
     WORKING_DIR,
 )
+from ..providers.model_capability_cache import get_capability_cache
 
 if TYPE_CHECKING:
     from ..agents.memory import BaseMemoryManager
@@ -697,6 +698,7 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                 await self.toolkit.register_mcp_client(
                     client,
                     namesake_strategy=namesake_strategy,
+                    execution_timeout=client.timeout,
                 )
             except (ClosedResourceError, asyncio.CancelledError) as error:
                 if self._should_propagate_cancelled_error(error):
@@ -713,6 +715,7 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                         await self.toolkit.register_mcp_client(
                             recovered_client,
                             namesake_strategy=namesake_strategy,
+                            exeution_timeout=client.timeout,
                         )
                         continue
                     except asyncio.CancelledError as recover_error:
@@ -1058,6 +1061,18 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
 
         return msg
 
+    def _get_model_key(self) -> str | None:
+        """Return the capability-cache key for the active model."""
+        model = getattr(self, "model", None)
+        return getattr(model, "model_key", None)
+
+    def _model_rejects_media(self) -> bool:
+        """Check the capability cache for a learned ``rejects_media`` flag."""
+        key = self._get_model_key()
+        if key is None:
+            return False
+        return get_capability_cache().get(key, "rejects_media", False)
+
     def _proactive_strip_media_blocks(self) -> int:
         """Proactively strip media blocks from memory before model call.
 
@@ -1244,10 +1259,14 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
            fake-tool-result writes alone.
 
         2. Proactive media filter: strip media before calling when
-           the model is not flagged multimodal.
+           the model is not flagged multimodal, or the capability cache
+           records a previous ``rejects_media`` finding for this model.
 
         3. Passive bad-request / media fallback: if the model call
-           still 400s on media, strip remaining blocks and retry.
+           still 400s on media, strip remaining blocks and retry, then
+           record the finding in the capability cache. If the model is
+           marked as multimodal but still errors on media, log a warning
+           about the possibly inaccurate capability flag.
 
         Calls ``super()._reasoning`` to keep the ToolGuardMixin
         interception active.
@@ -1260,6 +1279,7 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
             await self._record_reasoning_failure(e, tool_choice)
             raise
 
+    # pylint: disable=too-many-branches
     async def _reasoning_with_media_fallback(
         self,
         tool_choice: Literal["auto", "none", "required"] | None = None,
@@ -1270,8 +1290,13 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
         the error-tombstone path without entangling retry control flow.
         """
         # --- Proactive filtering layer ---
-        if not get_active_model_supports_multimodal():
+        should_strip = (
+            not get_active_model_supports_multimodal()
+            or self._model_rejects_media()
+        )
+        if should_strip:
             if self._uses_request_time_media_normalization():
+                self._set_formatter_media_strip(True)
                 logger.debug(
                     "Formatter will strip media from copied messages "
                     "before reasoning.",
@@ -1292,6 +1317,8 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
             if not self._is_bad_request_or_media_error(e):
                 raise
 
+            model_key = self._get_model_key()
+
             if self._uses_request_time_media_normalization():
                 if get_active_model_supports_multimodal():
                     logger.warning(
@@ -1306,7 +1333,14 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                         "Retrying with request-time media stripping.",
                         e,
                     )
-                    return await super()._reasoning(tool_choice=tool_choice)
+                    msg = await super()._reasoning(tool_choice=tool_choice)
+                    if model_key:
+                        get_capability_cache().learn(
+                            model_key,
+                            "rejects_media",
+                            True,
+                        )
+                    return msg
                 finally:
                     self._set_formatter_media_strip(False)
 
@@ -1314,8 +1348,6 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
             if n_stripped == 0:
                 raise
 
-            # If the model is marked as multimodal but still
-            # errored, the capability flag may be wrong.
             if get_active_model_supports_multimodal():
                 logger.warning(
                     "Model marked multimodal but "
@@ -1330,6 +1362,15 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                 n_stripped,
             )
             msg = await super()._reasoning(tool_choice=tool_choice)
+            if model_key:
+                get_capability_cache().learn(
+                    model_key,
+                    "rejects_media",
+                    True,
+                )
+        finally:
+            if should_strip and self._uses_request_time_media_normalization():
+                self._set_formatter_media_strip(False)
 
         return await self._auto_continue_if_text_only(msg, tool_choice)
 
@@ -1428,10 +1469,12 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
         """Override summarizing with proactive media filtering,
         passive fallback, and tool_use block filtering.
 
-        1. Proactive layer: if the model does not support multimodal,
+        1. Proactive layer: if the model does not support multimodal
+           **or** the capability cache records ``rejects_media``,
            strip media blocks *before* calling the model.
         2. Passive layer: if the model call still fails with a
-           bad-request / media error, strip remaining blocks and retry.
+           bad-request / media error, strip remaining blocks and retry,
+           then record the finding in the capability cache.
         3. If the model IS marked as multimodal but still errors on
            media, log a warning about possibly inaccurate capability flag.
 
@@ -1440,8 +1483,13 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
         ``print`` can strip tool_use blocks from streaming chunks.
         """
         # --- Proactive filtering layer ---
-        if not get_active_model_supports_multimodal():
+        should_strip = (
+            not get_active_model_supports_multimodal()
+            or self._model_rejects_media()
+        )
+        if should_strip:
             if self._uses_request_time_media_normalization():
+                self._set_formatter_media_strip(True)
                 logger.debug(
                     "Formatter will strip media from copied messages "
                     "before summarizing.",
@@ -1464,6 +1512,8 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                 if not self._is_bad_request_or_media_error(e):
                     raise
 
+                model_key = self._get_model_key()
+
                 if self._uses_request_time_media_normalization():
                     if get_active_model_supports_multimodal():
                         logger.warning(
@@ -1479,6 +1529,12 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                             e,
                         )
                         msg = await super()._summarizing()
+                        if model_key:
+                            get_capability_cache().learn(
+                                model_key,
+                                "rejects_media",
+                                True,
+                            )
                     finally:
                         self._set_formatter_media_strip(False)
                 else:
@@ -1500,8 +1556,16 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                         n_stripped,
                     )
                     msg = await super()._summarizing()
+                    if model_key:
+                        get_capability_cache().learn(
+                            model_key,
+                            "rejects_media",
+                            True,
+                        )
         finally:
             self._in_summarizing = False
+            if should_strip and self._uses_request_time_media_normalization():
+                self._set_formatter_media_strip(False)
 
         return self._strip_tool_use_from_msg(msg)
 
