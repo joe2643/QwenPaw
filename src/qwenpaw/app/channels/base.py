@@ -569,7 +569,14 @@ class BaseChannel(ABC):
                 )
                 pending_msgs = []
 
-            if pending_msgs:
+        # Steer/attach race-recovery loop: if we lose the race between
+        # ``enqueue_pending_input`` (returns None when no active run) and
+        # ``attach_or_start`` (returns is_new=False when a sibling started
+        # one), bounded-retry instead of silently dropping the message.
+        # Two iterations cover one race transition; a third would imply
+        # repeated race losses, which should not happen under normal load.
+        for attempt in range(3):
+            if same_session_mode == "steer" and pending_msgs:
                 steer_queue = (
                     await self._workspace.task_tracker.enqueue_pending_input(
                         chat.id,
@@ -577,53 +584,70 @@ class BaseChannel(ABC):
                     )
                 )
                 if steer_queue is not None:
+                    # Push channels do not consume the SSE stream returned
+                    # here — the original ``is_new=True`` consumer drives
+                    # the response back to the channel. Detach immediately
+                    # so the unused queue does not accumulate buffered SSE
+                    # events for the lifetime of the run.
+                    await self._workspace.task_tracker.detach_subscriber(
+                        chat.id,
+                        steer_queue,
+                    )
+                    log_kind = (
+                        "race-recovered inject" if attempt > 0
+                        else "injected into active run"
+                    )
                     logger.info(
-                        f"steer: injected into active run "
+                        f"steer: {log_kind} "
                         f"chat_id={chat.id} session={session_id[:30]} "
-                        f"msgs={len(pending_msgs)}",
+                        f"msgs={len(pending_msgs)} attempt={attempt}",
                     )
                     return
-            # No active run yet — fall through to start one. Force
-            # max_concurrent_runs=1 so subsequent siblings will steer
-            # rather than spawn a parallel child.
-            max_concurrent_runs = 1
+                # No active run — try to start one. Force
+                # ``max_concurrent_runs=1`` so subsequent siblings will
+                # steer rather than spawn a parallel child.
+                start_max_concurrent = 1
+            else:
+                start_max_concurrent = max_concurrent_runs
 
-        queue, is_new = await self._workspace.task_tracker.attach_or_start(
-            chat.id,
-            payload,
-            self._stream_with_tracker,
-            max_concurrent_runs=max_concurrent_runs,
-        )
-
-        if is_new:
-            try:
-                async for _ in self._workspace.task_tracker.stream_from_queue(
-                    queue,
-                    chat.id,
-                ):
-                    pass
-            except asyncio.CancelledError:
-                logger.info(
-                    f"Task cancelled: chat_id={chat.id} "
-                    f"session={session_id[:30]}",
-                )
-                raise
-            return
-
-        # is_new=False. In steer mode this means a sibling won the race
-        # to start the run between our enqueue check and our attach call;
-        # retry the inject instead of dropping the message.
-        if same_session_mode == "steer" and pending_msgs:
-            await self._workspace.task_tracker.enqueue_pending_input(
+            queue, is_new = await self._workspace.task_tracker.attach_or_start(
                 chat.id,
-                pending_msgs,
+                payload,
+                self._stream_with_tracker,
+                max_concurrent_runs=start_max_concurrent,
             )
-            logger.info(
-                f"steer: race-recovered inject into active run "
-                f"chat_id={chat.id} session={session_id[:30]} "
-                f"msgs={len(pending_msgs)}",
-            )
-            return
+
+            if is_new:
+                try:
+                    async for _ in (
+                        self._workspace.task_tracker.stream_from_queue(
+                            queue,
+                            chat.id,
+                        )
+                    ):
+                        pass
+                except asyncio.CancelledError:
+                    logger.info(
+                        f"Task cancelled: chat_id={chat.id} "
+                        f"session={session_id[:30]}",
+                    )
+                    raise
+                return
+
+            # is_new=False: a sibling won the race. In steer mode, loop
+            # to retry the inject. In non-steer mode, fall through to
+            # the warning below — UnifiedQueueManager should serialize
+            # so this is a real anomaly.
+            if same_session_mode != "steer" or not pending_msgs:
+                break
+            # Detach the unused queue from the sibling run before retrying.
+            try:
+                await self._workspace.task_tracker.detach_subscriber(
+                    chat.id,
+                    queue,
+                )
+            except Exception:  # pragma: no cover - best-effort cleanup
+                pass
 
         logger.warning(
             f"Message ignored (task already running): "

@@ -576,6 +576,124 @@ async def test_agent_context_trims_compressed_msg_ids_above_cap():
 
 
 @pytest.mark.asyncio
+async def test_mark_messages_compressed_preserves_batch_order():
+    """Tombstone insertion order matches input batch order so FIFO eviction
+    later evicts the earliest-compacted ids first."""
+    from agentscope.message import Msg
+
+    from qwenpaw.agents.context.agent_context import AgentContext
+    from qwenpaw.agents.utils.estimate_token_counter import (
+        EstimatedTokenCounter,
+    )
+
+    ctx = AgentContext(token_counter=EstimatedTokenCounter())
+    msgs = [Msg("user", f"m{i}", "user") for i in range(8)]
+    expected_order = [m.id for m in msgs]
+
+    await ctx.mark_messages_compressed(msgs)
+
+    actual_order = list(ctx._compressed_msg_ids.keys())
+    assert actual_order == expected_order, (
+        "tombstone insertion order must follow the input batch order; "
+        "set-based iteration would scramble it"
+    )
+
+
+@pytest.mark.asyncio
+async def test_trim_logs_warning_on_first_eviction(monkeypatch):
+    """First eviction emits a WARNING so the residual eviction-then-
+    resurrection scenario is visible in production logs.
+
+    Spies on the module logger's ``warning`` directly because CoPaw
+    installs custom handlers that bypass pytest's caplog plumbing.
+    """
+    from qwenpaw.agents.context import agent_context as ac_mod
+    from qwenpaw.agents.context.agent_context import (
+        AgentContext,
+        _TOMBSTONE_CAP,
+    )
+    from qwenpaw.agents.utils.estimate_token_counter import (
+        EstimatedTokenCounter,
+    )
+
+    captured: list[str] = []
+
+    def _spy(msg, *args, **_kwargs):
+        captured.append(msg % args if args else str(msg))
+
+    monkeypatch.setattr(ac_mod.logger, "warning", _spy)
+
+    ctx = AgentContext(token_counter=EstimatedTokenCounter())
+    # Pre-load above the cap; the first trim call should fire the warning
+    # and bump the counter from zero.
+    ctx._compressed_msg_ids = {
+        f"old-{i}": None for i in range(_TOMBSTONE_CAP + 5)
+    }
+    assert ctx._compressed_msg_evicted_count == 0
+
+    ctx._trim_compressed_msg_ids()
+
+    assert ctx._compressed_msg_evicted_count == 5
+    assert any(
+        "Tombstone cap reached" in m for m in captured
+    ), "expected WARNING when tombstones first evict"
+
+    # Second trim past cap should NOT re-warn (counter is now non-zero).
+    captured.clear()
+    ctx._compressed_msg_ids.update({f"more-{i}": None for i in range(3)})
+    ctx._trim_compressed_msg_ids()
+    assert ctx._compressed_msg_evicted_count == 8
+    assert not any(
+        "Tombstone cap reached" in m for m in captured
+    ), "warning must fire only on first eviction per session"
+
+
+@pytest.mark.asyncio
+async def test_state_dict_persists_eviction_count_round_trip():
+    """The eviction counter survives state_dict → load_state_dict."""
+    from qwenpaw.agents.context.agent_context import AgentContext
+    from qwenpaw.agents.utils.estimate_token_counter import (
+        EstimatedTokenCounter,
+    )
+
+    ctx = AgentContext(token_counter=EstimatedTokenCounter())
+    ctx._compressed_msg_evicted_count = 42
+    state = ctx.state_dict()
+    assert state["_compressed_msg_evicted_count"] == 42
+
+    ctx2 = AgentContext(token_counter=EstimatedTokenCounter())
+    ctx2.load_state_dict(state)
+    assert ctx2._compressed_msg_evicted_count == 42
+
+
+@pytest.mark.asyncio
+async def test_merge_propagates_eviction_count_max():
+    """Session merge takes max(existing, incoming) for the eviction counter
+    so a stale sibling save with a smaller counter cannot roll it back."""
+    from qwenpaw.app.runner.session import _merge_memory_dict
+
+    existing = {
+        "content": [],
+        "_compressed_summary": "",
+        "_compressed_msg_ids": [],
+        "_compressed_msg_evicted_count": 7,
+    }
+    incoming = {
+        "content": [],
+        "_compressed_summary": "",
+        "_compressed_msg_ids": [],
+        "_compressed_msg_evicted_count": 3,
+    }
+
+    merged = _merge_memory_dict(existing, incoming)
+    assert merged["_compressed_msg_evicted_count"] == 7
+
+    # Reverse direction: incoming has the larger counter.
+    merged2 = _merge_memory_dict(incoming, existing)
+    assert merged2["_compressed_msg_evicted_count"] == 7
+
+
+@pytest.mark.asyncio
 async def test_merge_concurrent_honors_compressed_msg_id_tombstones(
     sess,
     tmp_session_dir,

@@ -19,13 +19,24 @@ from ..utils.estimate_token_counter import EstimatedTokenCounter
 
 logger = logging.getLogger(__name__)
 
-# FIFO cap on the compacted-msg-id tombstone set. Sibling runs hold a
-# pre-compaction baseline for at most their own lifetime (seconds to a
-# few minutes for chat replies), so the tombstones only need to outlive
-# concurrent saves — not forever. 10000 ids ≈ 240 KB on disk, which is
-# safely below the session-state file budget while large enough to cover
-# many compaction cycles' worth of overlapping sibling runs.
-_TOMBSTONE_CAP = 10000
+# FIFO cap on the compacted-msg-id tombstone set.
+#
+# **Structural tradeoff.** Sibling runs hold a pre-compaction baseline
+# for at most their own lifetime (seconds to a few minutes for chat
+# replies); the tombstones only need to outlive concurrent saves, not
+# forever. But there is a residual eviction-then-resurrection scenario:
+# if a tombstone is FIFO-evicted while a *very* long-lived sibling still
+# holds the original message in its baseline, a later concurrent merge
+# can re-add the compacted msg through the sibling's content list.
+#
+# The cap is sized so this is practically unreachable for chat workloads
+# — 50000 evictions during a single sibling's overlap window would
+# require ~50000 compactions (~7.5 billion input tokens) in seconds-to-
+# minutes, which is far beyond any realistic conversation. We also
+# WARN on the first eviction in any session so any real-world
+# occurrence is visible in logs. 50000 ids ≈ 1.2 MB on disk per session
+# — large but bounded.
+_TOMBSTONE_CAP = 50000
 
 
 class AgentContext(InMemoryMemory):
@@ -58,6 +69,13 @@ class AgentContext(InMemoryMemory):
         # preserved — that lets us FIFO-evict the oldest tombstones once
         # the count exceeds ``_TOMBSTONE_CAP``.
         self._compressed_msg_ids: dict[str, None] = {}
+        # Cumulative count of tombstones FIFO-evicted from this session.
+        # Persisted so it survives reload. We use this to (a) emit a
+        # one-time WARNING the first time an eviction happens (so the
+        # eviction-then-resurrection scenario is visible in production
+        # logs) and (b) signal stale-baseline risk to the merge code in
+        # ``session.py`` when a sibling save is reconciled.
+        self._compressed_msg_evicted_count: int = 0
 
     async def _append_messages_to_dialog(self, messages: list[Msg]) -> int:
         """Append messages to dialog storage file.
@@ -195,6 +213,7 @@ class AgentContext(InMemoryMemory):
             # Preserve insertion order on disk so FIFO eviction stays
             # meaningful across save/load round-trips.
             "_compressed_msg_ids": list(self._compressed_msg_ids.keys()),
+            "_compressed_msg_evicted_count": self._compressed_msg_evicted_count,
         }
 
     # pylint: disable=attribute-defined-outside-init
@@ -232,6 +251,9 @@ class AgentContext(InMemoryMemory):
             if not raw:
                 continue
             self._compressed_msg_ids[str(raw)] = None
+        self._compressed_msg_evicted_count = int(
+            state_dict.get("_compressed_msg_evicted_count", 0) or 0,
+        )
         self._trim_compressed_msg_ids()
 
     async def mark_messages_compressed(
@@ -259,16 +281,27 @@ class AgentContext(InMemoryMemory):
         # Persist messages to dialog storage instead of compressed
         await self._append_messages_to_dialog(messages)
 
-        # Remove messages from memory
-        msg_ids = {msg.id for msg in messages if msg.id}
+        # Remove messages from memory. Preserve the input batch order
+        # when inserting into the tombstone dict so FIFO eviction reflects
+        # the order in which messages were actually compacted (a ``set``
+        # would scramble it and make the eldest-evicted ID arbitrary).
+        ordered_msg_ids: list[str] = []
+        seen: set[str] = set()
+        for msg in messages:
+            if not msg.id:
+                continue
+            if msg.id in seen:
+                continue
+            ordered_msg_ids.append(msg.id)
+            seen.add(msg.id)
         initial_size = len(self.content)
         self.content = [
             (msg, marks)
             for msg, marks in self.content
-            if msg.id not in msg_ids
+            if msg.id not in seen
         ]
         removed_count = initial_size - len(self.content)
-        for msg_id in msg_ids:
+        for msg_id in ordered_msg_ids:
             self._compressed_msg_ids[msg_id] = None
         self._trim_compressed_msg_ids()
 
@@ -286,14 +319,31 @@ class AgentContext(InMemoryMemory):
         growth while keeping more than enough headroom for sibling runs
         to finish saving (sibling runs are seconds-long; the cap covers
         many compaction cycles' worth of overlapping sibling baselines).
+
+        Increments :attr:`_compressed_msg_evicted_count` and emits a
+        WARNING the first time an eviction happens for this session, so
+        the residual eviction-then-resurrection scenario (a tombstone
+        evicted while a long-lived sibling still holds the original
+        message) is visible in production logs.
         """
         excess = len(self._compressed_msg_ids) - _TOMBSTONE_CAP
         if excess <= 0:
             return
+        was_zero = self._compressed_msg_evicted_count == 0
         # ``dict`` preserves insertion order; popping the first ``excess``
         # keys removes the oldest tombstones.
         for key in list(self._compressed_msg_ids)[:excess]:
             self._compressed_msg_ids.pop(key, None)
+        self._compressed_msg_evicted_count += excess
+        if was_zero:
+            logger.warning(
+                "Tombstone cap reached: evicted %d compressed-msg-id "
+                "tombstone(s); cap=%d. Long-lived sibling runs holding "
+                "a pre-eviction baseline may resurrect compacted msgs "
+                "on save (see agent_context._TOMBSTONE_CAP).",
+                excess,
+                _TOMBSTONE_CAP,
+            )
 
     def clear_compressed_summary(self):
         """Clear the compressed summary."""

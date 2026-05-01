@@ -180,6 +180,16 @@ def _merge_memory_dict(existing: dict, incoming: dict) -> dict:
     if ordered_tombs:
         merged["_compressed_msg_ids"] = ordered_tombs
 
+    # Propagate the eviction counter as max-of-both. A stale sibling save
+    # with a smaller counter (because it predates evictions) must not roll
+    # back the on-disk counter — that would mask future eviction-warning
+    # signals and break the merge guard.
+    existing_evicted = int(existing.get("_compressed_msg_evicted_count") or 0)
+    incoming_evicted = int(incoming.get("_compressed_msg_evicted_count") or 0)
+    merged_evicted = max(existing_evicted, incoming_evicted)
+    if merged_evicted:
+        merged["_compressed_msg_evicted_count"] = merged_evicted
+
     return merged
 
 

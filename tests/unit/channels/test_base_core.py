@@ -903,6 +903,9 @@ class TestConsumeWithTracker:
             # Active run found → return a fake subscriber queue.
             return MagicMock()
 
+        async def mock_detach_subscriber(*_args, **_kwargs):
+            return None
+
         async def mock_stream(*args, **kwargs):
             if False:
                 yield None
@@ -911,6 +914,7 @@ class TestConsumeWithTracker:
         mock_task_tracker = MagicMock()
         mock_task_tracker.attach_or_start = mock_attach_or_start
         mock_task_tracker.enqueue_pending_input = mock_enqueue_pending_input
+        mock_task_tracker.detach_subscriber = mock_detach_subscriber
         mock_task_tracker.stream_from_queue = mock_stream
 
         mock_workspace.chat_manager = mock_chat_manager
@@ -1007,6 +1011,226 @@ class TestConsumeWithTracker:
         assert attach_calls, "attach_or_start should run when no active run"
         kwargs = attach_calls[0][1]
         assert kwargs.get("max_concurrent_runs") == 1
+
+    async def test_consume_with_tracker_steer_detaches_subscriber_queue(
+        self,
+        base_channel,
+    ):
+        """Steer inject must release the subscriber queue returned by
+        ``enqueue_pending_input``: push channels do not consume that
+        SSE stream, so leaving it attached would accumulate buffered
+        events for the lifetime of the run."""
+        mock_workspace = MagicMock()
+        mock_workspace.config = MagicMock()
+        mock_workspace.config.running = MagicMock(same_session_mode="steer")
+        mock_chat_manager = AsyncMock()
+
+        injected_queue = MagicMock(name="steer_subscriber_queue")
+        detached: list = []
+
+        async def mock_enqueue_pending_input(*_args, **_kwargs):
+            return injected_queue
+
+        async def mock_detach_subscriber(chat_id, queue):
+            detached.append((chat_id, queue))
+
+        async def mock_attach_or_start(*_args, **_kwargs):
+            return (MagicMock(), True)
+
+        async def mock_stream(*_args, **_kwargs):
+            if False:
+                yield None
+            return
+
+        mock_task_tracker = MagicMock()
+        mock_task_tracker.enqueue_pending_input = mock_enqueue_pending_input
+        mock_task_tracker.detach_subscriber = mock_detach_subscriber
+        mock_task_tracker.attach_or_start = mock_attach_or_start
+        mock_task_tracker.stream_from_queue = mock_stream
+
+        mock_workspace.chat_manager = mock_chat_manager
+        mock_workspace.task_tracker = mock_task_tracker
+        mock_chat_manager.get_or_create_chat.return_value = MagicMock(
+            id="chat-leak",
+        )
+
+        base_channel.set_workspace(mock_workspace)
+        mock_request = MagicMock(
+            session_id="signal:group:leak",
+            user_id="userZ",
+            channel="signal",
+        )
+        mock_payload = {"content_parts": []}
+
+        with patch.object(
+            base_channel,
+            "_extract_chat_name",
+            return_value="Leak Test",
+        ), patch.object(
+            base_channel,
+            "_payload_to_agentscope_msgs",
+            return_value=[MagicMock()],
+        ):
+            await base_channel._consume_with_tracker(
+                mock_request,
+                mock_payload,
+            )
+
+        assert detached == [("chat-leak", injected_queue)], (
+            "expected detach_subscriber call for the queue returned by "
+            "enqueue_pending_input"
+        )
+
+    async def test_consume_with_tracker_steer_retries_when_attach_loses_race(
+        self,
+        base_channel,
+    ):
+        """Race recovery: enqueue→attach loses to a sibling, retry inject."""
+        mock_workspace = MagicMock()
+        mock_workspace.config = MagicMock()
+        mock_workspace.config.running = MagicMock(same_session_mode="steer")
+        mock_chat_manager = AsyncMock()
+
+        recovered_queue = MagicMock(name="recovered_queue")
+        enqueue_calls: list = []
+        attach_calls: list = []
+        detached: list = []
+
+        async def mock_enqueue_pending_input(chat_id, msgs):
+            enqueue_calls.append((chat_id, msgs))
+            # First call: no active run. Second call: sibling started.
+            if len(enqueue_calls) == 1:
+                return None
+            return recovered_queue
+
+        async def mock_attach_or_start(*_args, **kwargs):
+            attach_calls.append(kwargs)
+            # Sibling won the race: is_new=False forces the retry path.
+            return (MagicMock(name="loser_queue"), False)
+
+        async def mock_detach_subscriber(chat_id, queue):
+            detached.append((chat_id, queue))
+
+        async def mock_stream(*_args, **_kwargs):
+            if False:
+                yield None
+            return
+
+        mock_task_tracker = MagicMock()
+        mock_task_tracker.enqueue_pending_input = mock_enqueue_pending_input
+        mock_task_tracker.attach_or_start = mock_attach_or_start
+        mock_task_tracker.detach_subscriber = mock_detach_subscriber
+        mock_task_tracker.stream_from_queue = mock_stream
+
+        mock_workspace.chat_manager = mock_chat_manager
+        mock_workspace.task_tracker = mock_task_tracker
+        mock_chat_manager.get_or_create_chat.return_value = MagicMock(
+            id="chat-race",
+        )
+
+        base_channel.set_workspace(mock_workspace)
+        mock_request = MagicMock(
+            session_id="whatsapp:group:race",
+            user_id="userR",
+            channel="whatsapp",
+        )
+        mock_payload = {"content_parts": []}
+
+        with patch.object(
+            base_channel,
+            "_extract_chat_name",
+            return_value="Race Test",
+        ), patch.object(
+            base_channel,
+            "_payload_to_agentscope_msgs",
+            return_value=[MagicMock()],
+        ):
+            await base_channel._consume_with_tracker(
+                mock_request,
+                mock_payload,
+            )
+
+        # Both enqueues happened: first lost the race, second recovered.
+        assert len(enqueue_calls) == 2, (
+            "expected retry inject after attach_or_start returned is_new=False"
+        )
+        assert len(attach_calls) == 1, (
+            "expected one attach_or_start call between the two enqueues"
+        )
+        # The recovered queue must be detached so it does not linger.
+        assert ("chat-race", recovered_queue) in detached, (
+            "expected detach_subscriber for the recovered queue"
+        )
+
+    async def test_consume_with_tracker_steer_bounds_repeated_race_loss(
+        self,
+        base_channel,
+    ):
+        """If both enqueue and attach repeatedly lose the race (highly
+        unlikely under normal load), the loop bounds itself and exits
+        cleanly rather than spinning forever."""
+        mock_workspace = MagicMock()
+        mock_workspace.config = MagicMock()
+        mock_workspace.config.running = MagicMock(same_session_mode="steer")
+        mock_chat_manager = AsyncMock()
+
+        enqueue_calls: list = []
+        attach_calls: list = []
+
+        async def mock_enqueue_pending_input(chat_id, msgs):
+            enqueue_calls.append((chat_id, msgs))
+            return None  # always misses
+
+        async def mock_attach_or_start(*_args, **kwargs):
+            attach_calls.append(kwargs)
+            return (MagicMock(), False)  # always loses
+
+        async def mock_detach_subscriber(*_args, **_kwargs):
+            return None
+
+        async def mock_stream(*_args, **_kwargs):
+            if False:
+                yield None
+            return
+
+        mock_task_tracker = MagicMock()
+        mock_task_tracker.enqueue_pending_input = mock_enqueue_pending_input
+        mock_task_tracker.attach_or_start = mock_attach_or_start
+        mock_task_tracker.detach_subscriber = mock_detach_subscriber
+        mock_task_tracker.stream_from_queue = mock_stream
+
+        mock_workspace.chat_manager = mock_chat_manager
+        mock_workspace.task_tracker = mock_task_tracker
+        mock_chat_manager.get_or_create_chat.return_value = MagicMock(
+            id="chat-bounded",
+        )
+
+        base_channel.set_workspace(mock_workspace)
+        mock_request = MagicMock(
+            session_id="signal:group:bounded",
+            user_id="userB",
+            channel="signal",
+        )
+        mock_payload = {"content_parts": []}
+
+        with patch.object(
+            base_channel,
+            "_extract_chat_name",
+            return_value="Bounded",
+        ), patch.object(
+            base_channel,
+            "_payload_to_agentscope_msgs",
+            return_value=[MagicMock()],
+        ):
+            await base_channel._consume_with_tracker(
+                mock_request,
+                mock_payload,
+            )
+
+        # Loop bounded by 3 iterations; both paths losing every time
+        # produces at most 3 of each call, then the warning path.
+        assert 1 <= len(enqueue_calls) <= 3
+        assert 1 <= len(attach_calls) <= 3
 
 
 @pytest.mark.asyncio
