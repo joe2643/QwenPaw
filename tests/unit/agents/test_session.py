@@ -510,6 +510,72 @@ async def test_merge_concurrent_saves_preserves_sibling_turns(
 
 
 @pytest.mark.asyncio
+async def test_merge_caps_compressed_msg_id_tombstones_fifo(
+    sess,
+    tmp_session_dir,
+):
+    """Tombstone list FIFO-evicts past _TOMBSTONE_CAP so disk stays bounded."""
+    from qwenpaw.agents.context.agent_context import _TOMBSTONE_CAP
+    from qwenpaw.app.runner.session import _merge_memory_dict
+
+    existing = {
+        "content": [],
+        "_compressed_summary": "",
+        "_compressed_msg_ids": [f"old-{i}" for i in range(_TOMBSTONE_CAP)],
+    }
+    incoming = {
+        "content": [
+            [{"id": "fresh-content", "role": "user", "content": "hi"}, []],
+        ],
+        "_compressed_summary": "summary",
+        "_compressed_msg_ids": [f"new-{i}" for i in range(5)],
+    }
+
+    merged = _merge_memory_dict(existing, incoming)
+    tombs = merged["_compressed_msg_ids"]
+    assert len(tombs) == _TOMBSTONE_CAP
+    # Newest 5 survive; oldest 5 evicted.
+    assert tombs[-5:] == [f"new-{i}" for i in range(5)]
+    for i in range(5):
+        assert f"old-{i}" not in tombs
+    content_ids = [item[0]["id"] for item in merged["content"]]
+    assert "fresh-content" in content_ids
+
+
+@pytest.mark.asyncio
+async def test_agent_context_trims_compressed_msg_ids_above_cap():
+    """AgentContext.mark_messages_compressed evicts oldest above cap."""
+    from agentscope.message import Msg
+
+    from qwenpaw.agents.context.agent_context import (
+        AgentContext,
+        _TOMBSTONE_CAP,
+    )
+    from qwenpaw.agents.utils.estimate_token_counter import (
+        EstimatedTokenCounter,
+    )
+
+    ctx = AgentContext(token_counter=EstimatedTokenCounter())
+    # Pre-load with CAP-1 tombstones, then add 3 more via mark — only 2 oldest
+    # should be evicted to stay at exactly CAP.
+    ctx._compressed_msg_ids = {
+        f"old-{i}": None for i in range(_TOMBSTONE_CAP - 1)
+    }
+    fresh = [Msg("user", f"m{i}", "user") for i in range(3)]
+    fresh_ids = [m.id for m in fresh]
+    await ctx.mark_messages_compressed(fresh)
+
+    assert len(ctx._compressed_msg_ids) == _TOMBSTONE_CAP
+    for fid in fresh_ids:
+        assert fid in ctx._compressed_msg_ids
+    # Two oldest evicted.
+    assert "old-0" not in ctx._compressed_msg_ids
+    assert "old-1" not in ctx._compressed_msg_ids
+    # The CAP-3 most-recent originals survive.
+    assert f"old-{_TOMBSTONE_CAP - 2}" in ctx._compressed_msg_ids
+
+
+@pytest.mark.asyncio
 async def test_merge_concurrent_honors_compressed_msg_id_tombstones(
     sess,
     tmp_session_dir,

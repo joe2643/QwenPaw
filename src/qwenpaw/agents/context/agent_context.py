@@ -19,6 +19,14 @@ from ..utils.estimate_token_counter import EstimatedTokenCounter
 
 logger = logging.getLogger(__name__)
 
+# FIFO cap on the compacted-msg-id tombstone set. Sibling runs hold a
+# pre-compaction baseline for at most their own lifetime (seconds to a
+# few minutes for chat replies), so the tombstones only need to outlive
+# concurrent saves — not forever. 10000 ids ≈ 240 KB on disk, which is
+# safely below the session-state file budget while large enough to cover
+# many compaction cycles' worth of overlapping sibling runs.
+_TOMBSTONE_CAP = 10000
+
 
 class AgentContext(InMemoryMemory):
     """Extended InMemoryMemory with bugfixes and summary support."""
@@ -46,7 +54,10 @@ class AgentContext(InMemoryMemory):
         # state_dict so concurrent same-session saves can drop these
         # ids from the on-disk content list and avoid resurrecting
         # messages that auto-compaction already removed.
-        self._compressed_msg_ids: set[str] = set()
+        # Stored as a dict[str, None] (not a set) so insertion order is
+        # preserved — that lets us FIFO-evict the oldest tombstones once
+        # the count exceeds ``_TOMBSTONE_CAP``.
+        self._compressed_msg_ids: dict[str, None] = {}
 
     async def _append_messages_to_dialog(self, messages: list[Msg]) -> int:
         """Append messages to dialog storage file.
@@ -181,7 +192,9 @@ class AgentContext(InMemoryMemory):
         return {
             "content": [[msg.to_dict(), marks] for msg, marks in self.content],
             "_compressed_summary": self._compressed_summary,
-            "_compressed_msg_ids": sorted(self._compressed_msg_ids),
+            # Preserve insertion order on disk so FIFO eviction stays
+            # meaningful across save/load round-trips.
+            "_compressed_msg_ids": list(self._compressed_msg_ids.keys()),
         }
 
     # pylint: disable=attribute-defined-outside-init
@@ -211,11 +224,15 @@ class AgentContext(InMemoryMemory):
                 )
 
         self._compressed_summary = state_dict.get("_compressed_summary", "")
-        self._compressed_msg_ids = {
-            str(i)
-            for i in state_dict.get("_compressed_msg_ids", []) or []
-            if i
-        }
+        loaded_ids = state_dict.get("_compressed_msg_ids", []) or []
+        # Rebuild as insertion-ordered dict so a load preserves the
+        # FIFO ordering that the on-disk list was written with.
+        self._compressed_msg_ids = {}
+        for raw in loaded_ids:
+            if not raw:
+                continue
+            self._compressed_msg_ids[str(raw)] = None
+        self._trim_compressed_msg_ids()
 
     async def mark_messages_compressed(
         self,
@@ -251,13 +268,32 @@ class AgentContext(InMemoryMemory):
             if msg.id not in msg_ids
         ]
         removed_count = initial_size - len(self.content)
-        self._compressed_msg_ids.update(msg_ids)
+        for msg_id in msg_ids:
+            self._compressed_msg_ids[msg_id] = None
+        self._trim_compressed_msg_ids()
 
         logger.info(
             f"Marked {removed_count} messages as compressed "
             f"and removed from memory",
         )
         return removed_count
+
+    def _trim_compressed_msg_ids(self) -> None:
+        """FIFO-evict the oldest tombstones once over ``_TOMBSTONE_CAP``.
+
+        Called from any path that mutates ``_compressed_msg_ids``. The
+        cap protects long-lived sessions from unbounded session-state
+        growth while keeping more than enough headroom for sibling runs
+        to finish saving (sibling runs are seconds-long; the cap covers
+        many compaction cycles' worth of overlapping sibling baselines).
+        """
+        excess = len(self._compressed_msg_ids) - _TOMBSTONE_CAP
+        if excess <= 0:
+            return
+        # ``dict`` preserves insertion order; popping the first ``excess``
+        # keys removes the oldest tombstones.
+        for key in list(self._compressed_msg_ids)[:excess]:
+            self._compressed_msg_ids.pop(key, None)
 
     def clear_compressed_summary(self):
         """Clear the compressed summary."""
@@ -278,9 +314,10 @@ class AgentContext(InMemoryMemory):
         if self.content:
             messages = [msg for msg, _ in self.content]
             await self._append_messages_to_dialog(messages)
-            self._compressed_msg_ids.update(
-                msg.id for msg, _ in self.content if msg.id
-            )
+            for msg, _ in self.content:
+                if msg.id:
+                    self._compressed_msg_ids[msg.id] = None
+            self._trim_compressed_msg_ids()
 
         # Clear in-memory content
         self.content.clear()

@@ -130,18 +130,35 @@ def _merge_memory_dict(existing: dict, incoming: dict) -> dict:
     appear in either side's tombstones are dropped from both content lists
     before merging, so an auto-compaction in one concurrent run is not
     undone by a sibling run that still holds the pre-compaction baseline.
+
+    Preserves the insertion order of tombstones across the merge — first
+    the existing ones (oldest), then the incoming ones (newest, skipping
+    dups) — and FIFO-trims to ``_TOMBSTONE_CAP`` so the on-disk session
+    state cannot grow unbounded across many compaction cycles.
     """
+    # Imported lazily to avoid pulling agentscope's heavy stack into the
+    # session module's import chain.
+    from ...agents.context.agent_context import _TOMBSTONE_CAP
+
     if not isinstance(existing, dict) or not isinstance(incoming, dict):
         return incoming
     merged = copy.deepcopy(incoming)
 
-    existing_tombstones = {
+    existing_tombs_seq = [
         str(i) for i in (existing.get("_compressed_msg_ids") or []) if i
-    }
-    incoming_tombstones = {
+    ]
+    incoming_tombs_seq = [
         str(i) for i in (incoming.get("_compressed_msg_ids") or []) if i
-    }
-    effective_tombstones = existing_tombstones | incoming_tombstones
+    ]
+    ordered_tombs: list[str] = list(existing_tombs_seq)
+    seen_tombs = set(ordered_tombs)
+    for tomb in incoming_tombs_seq:
+        if tomb not in seen_tombs:
+            ordered_tombs.append(tomb)
+            seen_tombs.add(tomb)
+    if len(ordered_tombs) > _TOMBSTONE_CAP:
+        ordered_tombs = ordered_tombs[-_TOMBSTONE_CAP:]
+        seen_tombs = set(ordered_tombs)
 
     existing_content = existing.get("content")
     incoming_content = incoming.get("content")
@@ -152,16 +169,16 @@ def _merge_memory_dict(existing: dict, incoming: dict) -> dict:
         merged["content"] = _merge_memory_content(
             _filter_content_by_tombstones(
                 existing_content,
-                effective_tombstones,
+                seen_tombs,
             ),
             _filter_content_by_tombstones(
                 incoming_content,
-                effective_tombstones,
+                seen_tombs,
             ),
         )
 
-    if effective_tombstones:
-        merged["_compressed_msg_ids"] = sorted(effective_tombstones)
+    if ordered_tombs:
+        merged["_compressed_msg_ids"] = ordered_tombs
 
     return merged
 

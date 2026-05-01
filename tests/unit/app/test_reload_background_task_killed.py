@@ -495,6 +495,45 @@ async def test_mark_compacting_toggles_flag_for_active_run():
 
 
 @pytest.mark.asyncio
+async def test_enqueue_before_first_sse_logs_pre_stream_warning(caplog):
+    """Steer arriving before producer's first yield is still queued + logged."""
+    import logging
+
+    tracker = TaskTracker()
+    gate_first = asyncio.Event()
+    gate_done = asyncio.Event()
+
+    async def stream(payload):
+        del payload
+        # Block before yielding any event so streaming_started stays False.
+        await gate_first.wait()
+        yield "data: first\n\n"
+        await gate_done.wait()
+        yield "data: done\n\n"
+
+    queue, _ = await tracker.attach_or_start("chat-pre", {}, stream)
+    # The producer is alive but has not yielded yet.
+    assert await tracker.is_streaming("chat-pre") is False
+
+    caplog.set_level(logging.INFO)
+    attached = await tracker.enqueue_pending_input(
+        "chat-pre", "pre-stream-msg",
+    )
+    assert attached is not None
+    assert any(
+        "Steer queued before streaming started" in rec.getMessage()
+        for rec in caplog.records
+    ), [rec.getMessage() for rec in caplog.records]
+    assert await tracker.drain_pending_input("chat-pre") == ["pre-stream-msg"]
+
+    gate_first.set()
+    gate_done.set()
+    async for _ in tracker.stream_from_queue(queue, "chat-pre"):
+        pass
+    assert await tracker.wait_all_done(timeout=1.0) is True
+
+
+@pytest.mark.asyncio
 async def test_enqueue_during_compaction_still_queues(caplog):
     """Steer arriving mid-compact is accepted but logged."""
     import logging
