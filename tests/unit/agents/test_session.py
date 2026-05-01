@@ -694,6 +694,60 @@ async def test_merge_propagates_eviction_count_max():
 
 
 @pytest.mark.asyncio
+async def test_merge_counts_merge_time_evictions(monkeypatch):
+    """When the tombstone union exceeds the cap only at merge time, the
+    persisted counter must reflect those evictions and the first-eviction
+    warning must fire from the merge path too."""
+    from qwenpaw.agents.context.agent_context import _TOMBSTONE_CAP
+    from qwenpaw.app.runner import session as session_mod
+    from qwenpaw.app.runner.session import _merge_memory_dict
+
+    captured: list[str] = []
+
+    def _spy(msg, *args, **_kwargs):
+        captured.append(msg % args if args else str(msg))
+
+    monkeypatch.setattr(session_mod.logger, "warning", _spy)
+
+    # Each side under-cap on its own; union exceeds it by 100.
+    half = _TOMBSTONE_CAP // 2 + 50
+    existing = {
+        "content": [],
+        "_compressed_summary": "",
+        "_compressed_msg_ids": [f"e-{i}" for i in range(half)],
+        # Both sides start at zero pre-merge — the warning must fire
+        # because of the merge-time eviction itself.
+        "_compressed_msg_evicted_count": 0,
+    }
+    incoming = {
+        "content": [],
+        "_compressed_summary": "",
+        "_compressed_msg_ids": [f"i-{i}" for i in range(half)],
+        "_compressed_msg_evicted_count": 0,
+    }
+
+    merged = _merge_memory_dict(existing, incoming)
+
+    # Union size 2*half = CAP + 100 → 100 evicted at merge.
+    assert merged["_compressed_msg_evicted_count"] == 100
+    assert len(merged["_compressed_msg_ids"]) == _TOMBSTONE_CAP
+    assert any(
+        "Tombstone cap reached at merge" in m for m in captured
+    ), "expected merge-time first-eviction WARNING"
+
+    # Second merge with the now-non-zero counter should NOT re-warn.
+    captured.clear()
+    bumped = dict(existing)
+    bumped["_compressed_msg_evicted_count"] = 100
+    merged2 = _merge_memory_dict(bumped, incoming)
+    # max(100, 0) + merge_evicted (still 100 here)
+    assert merged2["_compressed_msg_evicted_count"] >= 100
+    assert not any(
+        "Tombstone cap reached at merge" in m for m in captured
+    ), "merge warning must fire only on the first merge-eviction"
+
+
+@pytest.mark.asyncio
 async def test_merge_concurrent_honors_compressed_msg_id_tombstones(
     sess,
     tmp_session_dir,

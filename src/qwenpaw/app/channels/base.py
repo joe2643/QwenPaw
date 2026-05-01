@@ -607,6 +607,15 @@ class BaseChannel(ABC):
                 # ``max_concurrent_runs=1`` so subsequent siblings will
                 # steer rather than spawn a parallel child.
                 start_max_concurrent = 1
+            elif same_session_mode == "steer":
+                # Steer is the configured mode but ``pending_msgs`` is
+                # empty (payload conversion failed or yielded nothing).
+                # Even without a steer payload to inject, the SAME-CHAT
+                # contract still says "never spawn a parallel child for
+                # this chat" — force serial here too. Otherwise a steer
+                # workspace would start bounded-parallel runs for every
+                # malformed payload, defeating the mode.
+                start_max_concurrent = 1
             else:
                 start_max_concurrent = max_concurrent_runs
 

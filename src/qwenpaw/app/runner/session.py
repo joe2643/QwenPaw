@@ -156,7 +156,15 @@ def _merge_memory_dict(existing: dict, incoming: dict) -> dict:
         if tomb not in seen_tombs:
             ordered_tombs.append(tomb)
             seen_tombs.add(tomb)
+    # Count eviction-during-merge so the persisted counter reflects ALL
+    # evictions, not just the per-run trim path in
+    # ``AgentContext._trim_compressed_msg_ids``. Without this the counter
+    # under-reports when a fan-in of multiple sibling tombstone sequences
+    # exceeds the cap only at merge time, and the first-eviction warning
+    # never fires for that scenario.
+    merge_evicted = 0
     if len(ordered_tombs) > _TOMBSTONE_CAP:
+        merge_evicted = len(ordered_tombs) - _TOMBSTONE_CAP
         ordered_tombs = ordered_tombs[-_TOMBSTONE_CAP:]
         seen_tombs = set(ordered_tombs)
 
@@ -180,15 +188,26 @@ def _merge_memory_dict(existing: dict, incoming: dict) -> dict:
     if ordered_tombs:
         merged["_compressed_msg_ids"] = ordered_tombs
 
-    # Propagate the eviction counter as max-of-both. A stale sibling save
-    # with a smaller counter (because it predates evictions) must not roll
-    # back the on-disk counter — that would mask future eviction-warning
-    # signals and break the merge guard.
+    # Propagate the eviction counter as max-of-both PLUS any merge-time
+    # evictions. A stale sibling save with a smaller pre-existing counter
+    # must not roll back the on-disk counter — that would mask future
+    # eviction-warning signals and break the merge guard. Adding
+    # ``merge_evicted`` keeps the counter honest about evictions that
+    # happen only at the union step.
     existing_evicted = int(existing.get("_compressed_msg_evicted_count") or 0)
     incoming_evicted = int(incoming.get("_compressed_msg_evicted_count") or 0)
-    merged_evicted = max(existing_evicted, incoming_evicted)
+    pre_merge_max = max(existing_evicted, incoming_evicted)
+    merged_evicted = pre_merge_max + merge_evicted
     if merged_evicted:
         merged["_compressed_msg_evicted_count"] = merged_evicted
+    if merge_evicted > 0 and pre_merge_max == 0:
+        logger.warning(
+            "Tombstone cap reached at merge: evicted %d compressed-msg-id "
+            "tombstone(s); cap=%d. Long-lived sibling runs holding a "
+            "pre-eviction baseline may resurrect compacted msgs on save.",
+            merge_evicted,
+            _TOMBSTONE_CAP,
+        )
 
     return merged
 

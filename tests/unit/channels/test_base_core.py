@@ -1232,6 +1232,86 @@ class TestConsumeWithTracker:
         assert 1 <= len(enqueue_calls) <= 3
         assert 1 <= len(attach_calls) <= 3
 
+    async def test_consume_with_tracker_steer_forces_serial_on_empty_msgs(
+        self,
+        base_channel,
+    ):
+        """Steer mode must still force ``max_concurrent_runs=1`` when
+        payload conversion yields no msgs. Otherwise a malformed steer
+        payload would silently fall back to bounded-parallel children,
+        defeating the steer semantic for that chat."""
+        mock_workspace = MagicMock()
+        mock_workspace.config = MagicMock()
+        mock_workspace.config.running = MagicMock(same_session_mode="steer")
+        mock_chat_manager = AsyncMock()
+
+        attach_calls: list = []
+        enqueue_calls: list = []
+
+        async def mock_attach_or_start(*_args, **kwargs):
+            attach_calls.append(kwargs)
+            return (MagicMock(), True)
+
+        async def mock_enqueue_pending_input(*args, **_kwargs):
+            enqueue_calls.append(args)
+            return None
+
+        async def mock_detach_subscriber(*_args, **_kwargs):
+            return None
+
+        async def mock_stream(*_args, **_kwargs):
+            if False:
+                yield None
+            return
+
+        mock_task_tracker = MagicMock()
+        mock_task_tracker.attach_or_start = mock_attach_or_start
+        mock_task_tracker.enqueue_pending_input = mock_enqueue_pending_input
+        mock_task_tracker.detach_subscriber = mock_detach_subscriber
+        mock_task_tracker.stream_from_queue = mock_stream
+
+        mock_workspace.chat_manager = mock_chat_manager
+        mock_workspace.task_tracker = mock_task_tracker
+        mock_chat_manager.get_or_create_chat.return_value = MagicMock(
+            id="chat-empty-steer",
+        )
+
+        base_channel.set_workspace(mock_workspace)
+        mock_request = MagicMock(
+            session_id="signal:group:empty",
+            user_id="userE",
+            channel="signal",
+        )
+        # Payload claims a higher concurrency budget — steer must override.
+        mock_payload = {"content_parts": [], "max_concurrent_runs": 3}
+
+        with patch.object(
+            base_channel,
+            "_extract_chat_name",
+            return_value="Empty Steer",
+        ), patch.object(
+            base_channel,
+            "_payload_to_agentscope_msgs",
+            return_value=[],  # conversion yields no msgs
+        ), patch.object(
+            base_channel,
+            "get_payload_max_concurrent_runs",
+            return_value=3,
+        ):
+            await base_channel._consume_with_tracker(
+                mock_request,
+                mock_payload,
+            )
+
+        # No enqueue (empty pending_msgs short-circuits the steer branch).
+        assert not enqueue_calls
+        # attach_or_start must have been called with max_concurrent_runs=1
+        # despite the payload requesting 3.
+        assert attach_calls, "expected attach_or_start to start a fresh run"
+        assert attach_calls[0].get("max_concurrent_runs") == 1, (
+            "steer mode must force serial even when pending_msgs is empty"
+        )
+
 
 @pytest.mark.asyncio
 class TestStreamWithTracker:
