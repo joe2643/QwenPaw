@@ -113,6 +113,19 @@ class _WhatsAppAlbumBuffer:
 
 WHATSAPP_MAX_TEXT_LENGTH = 4096
 
+
+_MARKDOWN_FENCE_INFO_RE = re.compile(
+    r"(?m)^(`{3,})[ \t]*[A-Za-z0-9_+.#-]+[ \t]*$",
+)
+
+
+def _normalize_markdown_for_whatsapp(text: str) -> str:
+    """Drop Markdown code-fence language tags unsupported by WhatsApp."""
+    if "```" not in text:
+        return text
+    return _MARKDOWN_FENCE_INFO_RE.sub(r"\1", text)
+
+
 # Shared host-local timestamp formatter — same shape used by every
 # chat channel so the agent gets a single, consistent envelope
 # pattern to parse.
@@ -2389,6 +2402,7 @@ class WhatsAppChannel(BaseChannel):
                 text = text.replace(f"@+{lid_num}", f"@{phone}")
         # Also convert @+phone to @phone (neonize needs digits only after @)
         text = _re.sub(r"@\+(\d{5,16})", lambda m: "@" + m.group(1), text)
+        text = _normalize_markdown_for_whatsapp(text)
 
         meta = meta or {}
         chat_jid_str = meta.get("chat_jid") or to_handle
