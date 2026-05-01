@@ -881,6 +881,133 @@ class TestConsumeWithTracker:
 
         # Test passed if we reach here (warning was logged for is_new=False)
 
+    async def test_consume_with_tracker_steer_injects_into_active_run(
+        self,
+        base_channel,
+    ):
+        """Steer mode injects sibling msg via enqueue_pending_input."""
+        mock_workspace = MagicMock()
+        mock_workspace.config = MagicMock()
+        mock_workspace.config.running = MagicMock(same_session_mode="steer")
+        mock_chat_manager = AsyncMock()
+
+        attach_calls: list = []
+        injected: list = []
+
+        async def mock_attach_or_start(*args, **kwargs):
+            attach_calls.append((args, kwargs))
+            return (MagicMock(), True)
+
+        async def mock_enqueue_pending_input(chat_id, msgs):
+            injected.append((chat_id, msgs))
+            # Active run found → return a fake subscriber queue.
+            return MagicMock()
+
+        async def mock_stream(*args, **kwargs):
+            if False:
+                yield None
+            return
+
+        mock_task_tracker = MagicMock()
+        mock_task_tracker.attach_or_start = mock_attach_or_start
+        mock_task_tracker.enqueue_pending_input = mock_enqueue_pending_input
+        mock_task_tracker.stream_from_queue = mock_stream
+
+        mock_workspace.chat_manager = mock_chat_manager
+        mock_workspace.task_tracker = mock_task_tracker
+        mock_chat_manager.get_or_create_chat.return_value = MagicMock(
+            id="chat-grp",
+        )
+
+        base_channel.set_workspace(mock_workspace)
+        mock_request = MagicMock(
+            session_id="whatsapp:group:abc",
+            user_id="userY",
+            channel="whatsapp",
+        )
+        mock_payload = {"content_parts": []}
+
+        with patch.object(
+            base_channel,
+            "_extract_chat_name",
+            return_value="Group Chat",
+        ), patch.object(
+            base_channel,
+            "_payload_to_agentscope_msgs",
+            return_value=[MagicMock()],
+        ):
+            await base_channel._consume_with_tracker(
+                mock_request,
+                mock_payload,
+            )
+
+        assert injected, "expected enqueue_pending_input to be called"
+        assert injected[0][0] == "chat-grp"
+        # No new run should be started when steer succeeds.
+        assert not attach_calls, "attach_or_start must NOT run after steer"
+
+    async def test_consume_with_tracker_steer_falls_back_when_no_active_run(
+        self,
+        base_channel,
+    ):
+        """Steer mode with no active run starts fresh with max_concurrent=1."""
+        mock_workspace = MagicMock()
+        mock_workspace.config = MagicMock()
+        mock_workspace.config.running = MagicMock(same_session_mode="steer")
+        mock_chat_manager = AsyncMock()
+
+        attach_calls: list = []
+
+        async def mock_attach_or_start(*args, **kwargs):
+            attach_calls.append((args, kwargs))
+            return (MagicMock(), True)
+
+        async def mock_enqueue_pending_input(*args, **kwargs):
+            return None  # no active run
+
+        async def mock_stream(*args, **kwargs):
+            if False:
+                yield None
+            return
+
+        mock_task_tracker = MagicMock()
+        mock_task_tracker.attach_or_start = mock_attach_or_start
+        mock_task_tracker.enqueue_pending_input = mock_enqueue_pending_input
+        mock_task_tracker.stream_from_queue = mock_stream
+
+        mock_workspace.chat_manager = mock_chat_manager
+        mock_workspace.task_tracker = mock_task_tracker
+        mock_chat_manager.get_or_create_chat.return_value = MagicMock(
+            id="chat-fresh",
+        )
+
+        base_channel.set_workspace(mock_workspace)
+        mock_request = MagicMock(
+            session_id="whatsapp:group:fresh",
+            user_id="userX",
+            channel="whatsapp",
+        )
+        mock_payload = {"content_parts": []}
+
+        with patch.object(
+            base_channel,
+            "_extract_chat_name",
+            return_value="Group Chat",
+        ), patch.object(
+            base_channel,
+            "_payload_to_agentscope_msgs",
+            return_value=[MagicMock()],
+        ):
+            await base_channel._consume_with_tracker(
+                mock_request,
+                mock_payload,
+            )
+
+        # Steer empty -> attach_or_start gets called with max_concurrent_runs=1.
+        assert attach_calls, "attach_or_start should run when no active run"
+        kwargs = attach_calls[0][1]
+        assert kwargs.get("max_concurrent_runs") == 1
+
 
 @pytest.mark.asyncio
 class TestStreamWithTracker:

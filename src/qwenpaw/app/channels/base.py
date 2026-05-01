@@ -89,6 +89,10 @@ class BaseChannel(ABC):
     # new one to avoid resource conflicts (e.g. exclusive SQLite locks).
     requires_sequential_restart: bool = False
 
+    # GoClaw-style default: private chats stay serial, group sessions may run
+    # a small bounded number of normal agent turns concurrently.
+    group_session_max_concurrent_runs: int = 3
+
     @classmethod
     def doctor_connectivity_notes(
         cls,
@@ -179,6 +183,82 @@ class BaseChannel(ABC):
                 meta,
             )
         return getattr(payload, "session_id", "") or ""
+
+    def _extract_payload_meta(self, payload: Any) -> dict:
+        """Best-effort channel meta extraction from native or request payloads."""
+        if isinstance(payload, dict):
+            meta = payload.get("meta") or {}
+            return meta if isinstance(meta, dict) else {}
+        meta = getattr(payload, "channel_meta", None) or {}
+        return meta if isinstance(meta, dict) else {}
+
+    def is_group_payload(self, payload: Any) -> bool:
+        """Return True when payload belongs to a group/channel conversation."""
+        meta = self._extract_payload_meta(payload)
+        if isinstance(meta.get("is_group"), bool):
+            return bool(meta.get("is_group"))
+        if meta.get("is_dm") is True:
+            return False
+
+        chat_type = str(
+            meta.get("chat_type")
+            or meta.get("feishu_chat_type")
+            or meta.get("conversation_type")
+            or meta.get("room_type")
+            or "",
+        ).lower()
+        if chat_type in {"group", "supergroup", "channel"}:
+            return True
+        if chat_type in {"p2p", "dm", "direct", "private"}:
+            return False
+
+        session_id = ""
+        if isinstance(payload, dict):
+            session_id = str(payload.get("session_id") or "")
+        else:
+            session_id = str(getattr(payload, "session_id", "") or "")
+        return ":group:" in session_id or "_thread:" in session_id
+
+    def get_max_concurrent_runs(
+        self,
+        payload: Any,
+        *,
+        priority_level: int = 20,
+        query: str = "",
+    ) -> int:
+        """Bound same-session agent concurrency for this payload.
+
+        Only normal non-command group traffic is promoted. Control commands and
+        private chats keep the historical serial behavior.
+        """
+        if priority_level < 20:
+            return 1
+        if (query or "").lstrip().startswith("/"):
+            return 1
+        if not self.is_group_payload(payload):
+            return 1
+        return max(1, int(self.group_session_max_concurrent_runs or 1))
+
+    def set_payload_max_concurrent_runs(
+        self,
+        payload: Any,
+        max_concurrent_runs: int,
+    ) -> None:
+        """Attach scheduler concurrency metadata without changing user text."""
+        max_concurrent_runs = max(1, int(max_concurrent_runs or 1))
+        if isinstance(payload, dict):
+            payload["_copaw_max_concurrent_runs"] = max_concurrent_runs
+            return
+        try:
+            setattr(payload, "max_concurrent_runs", max_concurrent_runs)
+        except Exception:
+            pass
+
+    def get_payload_max_concurrent_runs(self, payload: Any) -> int:
+        """Read scheduler concurrency metadata, defaulting to serial."""
+        if isinstance(payload, dict):
+            return max(1, int(payload.get("_copaw_max_concurrent_runs") or 1))
+        return max(1, int(getattr(payload, "max_concurrent_runs", 1) or 1))
 
     def merge_native_items(self, items: List[Any]) -> Any:
         """
@@ -407,6 +487,31 @@ class BaseChannel(ABC):
             )
             return "New Chat"
 
+    def _get_same_session_mode(self) -> str:
+        """Read ``same_session_mode`` from this workspace's agent config.
+
+        Defaults to ``"parallel"`` when the config is missing or the field
+        is unset. Used by :meth:`_consume_with_tracker` to decide whether
+        a sibling message should be steered into the active run instead
+        of spawning another bounded-parallel sibling run.
+        """
+        cfg = getattr(self._workspace, "config", None)
+        running = getattr(cfg, "running", None) if cfg else None
+        mode = getattr(running, "same_session_mode", "parallel")
+        return mode or "parallel"
+
+    @staticmethod
+    def _payload_to_agentscope_msgs(request: "AgentRequest") -> list:
+        """Convert ``request.input`` to AgentScope ``Msg`` objects for steer."""
+        from agentscope_runtime.adapters.agentscope.message import (
+            message_to_agentscope_msg,
+        )
+
+        msgs = message_to_agentscope_msg(getattr(request, "input", None))
+        if msgs is None:
+            return []
+        return msgs if isinstance(msgs, list) else [msgs]
+
     async def _consume_with_tracker(
         self,
         request: "AgentRequest",
@@ -418,6 +523,14 @@ class BaseChannel(ABC):
         Message serialization is ensured by UnifiedQueueManager which queues
         messages per (channel, session, priority).
 
+        When ``same_session_mode == "steer"`` on the agent config, a sibling
+        message arriving while a run is already active for this chat is
+        injected into that run via :meth:`TaskTracker.enqueue_pending_input`
+        instead of spawning a parallel child run. The active run's reasoning
+        loop drains the steer at its next ``_reasoning`` boundary. This makes
+        group conversations land all participants' messages into one shared
+        agent turn, matching openclaw's pi-embedded steer semantic.
+
         Args:
             request: AgentRequest
             payload: Original payload
@@ -425,6 +538,11 @@ class BaseChannel(ABC):
         session_id = getattr(request, "session_id", "") or ""
         user_id = getattr(request, "user_id", "") or ""
         channel_id = getattr(request, "channel", self.channel)
+        max_concurrent_runs = self.get_payload_max_concurrent_runs(payload)
+        try:
+            setattr(request, "max_concurrent_runs", max_concurrent_runs)
+        except Exception:
+            pass
 
         chat = await self._workspace.chat_manager.get_or_create_chat(
             session_id,
@@ -438,10 +556,43 @@ class BaseChannel(ABC):
             f"session={session_id[:30]}",
         )
 
+        same_session_mode = self._get_same_session_mode()
+        pending_msgs: list = []
+        if same_session_mode == "steer":
+            try:
+                pending_msgs = self._payload_to_agentscope_msgs(request)
+            except Exception as e:
+                logger.warning(
+                    "steer: failed to convert payload to msgs (%s); "
+                    "falling back to attach_or_start",
+                    e,
+                )
+                pending_msgs = []
+
+            if pending_msgs:
+                steer_queue = (
+                    await self._workspace.task_tracker.enqueue_pending_input(
+                        chat.id,
+                        pending_msgs,
+                    )
+                )
+                if steer_queue is not None:
+                    logger.info(
+                        f"steer: injected into active run "
+                        f"chat_id={chat.id} session={session_id[:30]} "
+                        f"msgs={len(pending_msgs)}",
+                    )
+                    return
+            # No active run yet — fall through to start one. Force
+            # max_concurrent_runs=1 so subsequent siblings will steer
+            # rather than spawn a parallel child.
+            max_concurrent_runs = 1
+
         queue, is_new = await self._workspace.task_tracker.attach_or_start(
             chat.id,
             payload,
             self._stream_with_tracker,
+            max_concurrent_runs=max_concurrent_runs,
         )
 
         if is_new:
@@ -457,12 +608,28 @@ class BaseChannel(ABC):
                     f"session={session_id[:30]}",
                 )
                 raise
-        else:
-            logger.warning(
-                f"Message ignored (task already running): "
-                f"chat_id={chat.id} session={session_id[:30]}. "
-                f"This should not happen with UnifiedQueueManager.",
+            return
+
+        # is_new=False. In steer mode this means a sibling won the race
+        # to start the run between our enqueue check and our attach call;
+        # retry the inject instead of dropping the message.
+        if same_session_mode == "steer" and pending_msgs:
+            await self._workspace.task_tracker.enqueue_pending_input(
+                chat.id,
+                pending_msgs,
             )
+            logger.info(
+                f"steer: race-recovered inject into active run "
+                f"chat_id={chat.id} session={session_id[:30]} "
+                f"msgs={len(pending_msgs)}",
+            )
+            return
+
+        logger.warning(
+            f"Message ignored (task already running): "
+            f"chat_id={chat.id} session={session_id[:30]}. "
+            f"This should not happen with UnifiedQueueManager.",
+        )
 
     async def _stream_with_tracker(
         self,
@@ -480,6 +647,11 @@ class BaseChannel(ABC):
             SSE-formatted event strings
         """
         request = self._payload_to_request(payload)
+        max_concurrent_runs = self.get_payload_max_concurrent_runs(payload)
+        try:
+            setattr(request, "max_concurrent_runs", max_concurrent_runs)
+        except Exception:
+            pass
 
         if isinstance(payload, dict):
             send_meta = dict(payload.get("meta") or {})
