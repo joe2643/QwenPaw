@@ -803,17 +803,45 @@ class LightContextManager(BaseContextManager):
             )
 
             if ccc.enabled:
-                result = await self._compact_context_safe(
-                    messages=messages_to_compact,
-                    previous_summary=memory.get_compressed_summary(),
-                    as_llm=agent.model,
-                    as_llm_formatter=agent.formatter,
-                    as_token_counter=token_counter,
-                    language=agent_config.language,
-                    max_input_length=running_config.max_input_length,
-                    compact_ratio=ccc.compact_threshold_ratio,
-                    add_thinking_block=ccc.compact_with_thinking_block,
+                # Tell the task tracker we are inside the compactor LLM
+                # call. ``enqueue_pending_input`` uses this to log when a
+                # steer message arrives mid-compaction so its drain
+                # timing is observable in logs.
+                tracker = getattr(agent, "_task_tracker", None)
+                chat_id = (
+                    (agent._request_context or {}).get("chat_id")
+                    if hasattr(agent, "_request_context")
+                    else None
                 )
+                if tracker is not None and chat_id:
+                    try:
+                        await tracker.mark_compacting(chat_id, True)
+                    except Exception as e:
+                        logger.debug(
+                            "mark_compacting(True) failed: %s",
+                            e,
+                        )
+                try:
+                    result = await self._compact_context_safe(
+                        messages=messages_to_compact,
+                        previous_summary=memory.get_compressed_summary(),
+                        as_llm=agent.model,
+                        as_llm_formatter=agent.formatter,
+                        as_token_counter=token_counter,
+                        language=agent_config.language,
+                        max_input_length=running_config.max_input_length,
+                        compact_ratio=ccc.compact_threshold_ratio,
+                        add_thinking_block=ccc.compact_with_thinking_block,
+                    )
+                finally:
+                    if tracker is not None and chat_id:
+                        try:
+                            await tracker.mark_compacting(chat_id, False)
+                        except Exception as e:
+                            logger.debug(
+                                "mark_compacting(False) failed: %s",
+                                e,
+                            )
 
                 compact_content = (
                     result.get("history_compact", "")

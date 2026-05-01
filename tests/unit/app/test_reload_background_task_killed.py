@@ -285,6 +285,249 @@ async def test_register_external_task_makes_tracker_active():
 
 
 @pytest.mark.asyncio
+async def test_task_tracker_allows_bounded_parallel_child_runs_same_chat():
+    """Group-session mode can start multiple concrete runs under one chat id."""
+    tracker = TaskTracker()
+    gate = asyncio.Event()
+    started = asyncio.Event()
+    seen_payloads: list[str] = []
+
+    async def stream(payload):
+        seen_payloads.append(payload)
+        if len(seen_payloads) == 2:
+            started.set()
+        yield f"data: start:{payload}\n\n"
+        await gate.wait()
+        yield f"data: end:{payload}\n\n"
+
+    q1, is_new1 = await tracker.attach_or_start(
+        "chat-1",
+        "one",
+        stream,
+        max_concurrent_runs=2,
+    )
+    q2, is_new2 = await tracker.attach_or_start(
+        "chat-1",
+        "two",
+        stream,
+        max_concurrent_runs=2,
+    )
+    q3, is_new3 = await tracker.attach_or_start(
+        "chat-1",
+        "three",
+        stream,
+        max_concurrent_runs=2,
+    )
+
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    assert is_new1 is True
+    assert is_new2 is True
+    assert is_new3 is False
+    assert await tracker.get_status("chat-1") == "running"
+    active = await tracker.list_active_tasks()
+    assert len(active) == 2
+    assert all(key.startswith("chat-1::run:") for key in active)
+
+    gate.set()
+
+    async def drain(queue):
+        out = []
+        while True:
+            item = await queue.get()
+            if item is None:
+                return out
+            out.append(item)
+
+    assert await drain(q1) == ["data: start:one\n\n", "data: end:one\n\n"]
+    assert await drain(q2) == ["data: start:two\n\n", "data: end:two\n\n"]
+    assert (await drain(q3))[0] in {
+        "data: start:one\n\n",
+        "data: start:two\n\n",
+    }
+
+
+@pytest.mark.asyncio
+async def test_task_tracker_stop_parent_cancels_parallel_child_runs():
+    """Stopping the parent chat id cancels all concrete parallel runs."""
+    tracker = TaskTracker()
+    started = asyncio.Event()
+    cancelled: list[str] = []
+    seen_payloads: list[str] = []
+
+    async def stream(payload):
+        seen_payloads.append(payload)
+        if len(seen_payloads) == 2:
+            started.set()
+        try:
+            yield f"data: start:{payload}\n\n"
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(payload)
+            raise
+
+    await tracker.attach_or_start(
+        "chat-1",
+        "one",
+        stream,
+        max_concurrent_runs=2,
+    )
+    await tracker.attach_or_start(
+        "chat-1",
+        "two",
+        stream,
+        max_concurrent_runs=2,
+    )
+
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    assert await tracker.request_stop("chat-1") is True
+    assert await tracker.wait_all_done(timeout=1.0) is True
+    assert sorted(cancelled) == ["one", "two"]
+    assert await tracker.get_status("chat-1") == "idle"
+
+
+@pytest.mark.asyncio
+async def test_task_tracker_queues_and_drains_pending_steer_input():
+    """Steer mode stores follow-up input on the active run for next turn."""
+    tracker = TaskTracker()
+    gate = asyncio.Event()
+
+    async def stream(payload):
+        del payload
+        yield "data: start\n\n"
+        await gate.wait()
+        yield "data: done\n\n"
+
+    queue, is_new = await tracker.attach_or_start("chat-1", {}, stream)
+    assert is_new is True
+
+    attached = await tracker.enqueue_pending_input(
+        "chat-1",
+        ["first steer", "second steer"],
+    )
+    assert attached is not None
+    assert await tracker.drain_pending_input("chat-1") == [
+        "first steer",
+        "second steer",
+    ]
+    assert await tracker.drain_pending_input("chat-1") == []
+
+    gate.set()
+    async for _ in tracker.stream_from_queue(queue, "chat-1"):
+        pass
+    assert await tracker.wait_all_done(timeout=1.0) is True
+
+
+@pytest.mark.asyncio
+async def test_task_tracker_rejects_pending_steer_without_active_run():
+    """Steer input should fall back to starting a run when no run is active."""
+    tracker = TaskTracker()
+
+    assert await tracker.enqueue_pending_input("chat-1", "later") is None
+    assert await tracker.drain_pending_input("chat-1") == []
+
+
+@pytest.mark.asyncio
+async def test_streaming_started_flips_after_first_event():
+    """``is_streaming`` flips True only after the producer yields once."""
+    tracker = TaskTracker()
+    started = asyncio.Event()
+    gate = asyncio.Event()
+
+    async def stream(payload):
+        del payload
+        await started.wait()
+        yield "data: first\n\n"
+        await gate.wait()
+        yield "data: done\n\n"
+
+    queue, _ = await tracker.attach_or_start("chat-s", {}, stream)
+    # Producer is alive but has not yielded yet.
+    assert await tracker.is_streaming("chat-s") is False
+    started.set()
+    # Pull the first event to advance the producer past its first yield.
+    first = await queue.get()
+    assert first == "data: first\n\n"
+    # Allow the producer task to re-enter the loop body so the flag is
+    # set under the tracker lock.
+    for _ in range(10):
+        if await tracker.is_streaming("chat-s"):
+            break
+        await asyncio.sleep(0)
+    assert await tracker.is_streaming("chat-s") is True
+
+    gate.set()
+    async for _ in tracker.stream_from_queue(queue, "chat-s"):
+        pass
+    assert await tracker.wait_all_done(timeout=1.0) is True
+
+
+@pytest.mark.asyncio
+async def test_mark_compacting_toggles_flag_for_active_run():
+    """``mark_compacting`` only succeeds for live runs and round-trips."""
+    tracker = TaskTracker()
+    gate = asyncio.Event()
+
+    async def stream(payload):
+        del payload
+        yield "data: hi\n\n"
+        await gate.wait()
+        yield "data: bye\n\n"
+
+    queue, _ = await tracker.attach_or_start("chat-c", {}, stream)
+    assert await tracker.is_compacting("chat-c") is False
+
+    assert await tracker.mark_compacting("chat-c", True) is True
+    assert await tracker.is_compacting("chat-c") is True
+
+    assert await tracker.mark_compacting("chat-c", False) is True
+    assert await tracker.is_compacting("chat-c") is False
+
+    gate.set()
+    async for _ in tracker.stream_from_queue(queue, "chat-c"):
+        pass
+    assert await tracker.wait_all_done(timeout=1.0) is True
+
+    # No active run → both flag toggles and queries refuse.
+    assert await tracker.mark_compacting("chat-c", True) is False
+    assert await tracker.is_compacting("chat-c") is False
+    assert await tracker.is_streaming("chat-c") is False
+
+
+@pytest.mark.asyncio
+async def test_enqueue_during_compaction_still_queues(caplog):
+    """Steer arriving mid-compact is accepted but logged."""
+    import logging
+
+    tracker = TaskTracker()
+    gate = asyncio.Event()
+
+    async def stream(payload):
+        del payload
+        yield "data: streaming\n\n"
+        await gate.wait()
+
+    queue, _ = await tracker.attach_or_start("chat-x", {}, stream)
+    await tracker.mark_compacting("chat-x", True)
+
+    caplog.set_level(logging.INFO)
+    attached = await tracker.enqueue_pending_input(
+        "chat-x", "while-compacting",
+    )
+    assert attached is not None
+    assert any(
+        "Steer queued during compaction" in rec.getMessage()
+        for rec in caplog.records
+    ), [rec.getMessage() for rec in caplog.records]
+    assert await tracker.drain_pending_input("chat-x") == ["while-compacting"]
+
+    gate.set()
+    async for _ in tracker.stream_from_queue(queue, "chat-x"):
+        pass
+    assert await tracker.wait_all_done(timeout=1.0) is True
+
+
+@pytest.mark.asyncio
 async def test_unregister_external_task_clears_tracker():
     """``unregister_external_task`` removes the task and makes the tracker
     report idle again.
