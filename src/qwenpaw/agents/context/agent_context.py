@@ -42,6 +42,11 @@ class AgentContext(InMemoryMemory):
         self._dialog_path: Path | None = (
             Path(dialog_path) if dialog_path else None
         )
+        # Tombstones for compacted/cleared message ids. Persisted in
+        # state_dict so concurrent same-session saves can drop these
+        # ids from the on-disk content list and avoid resurrecting
+        # messages that auto-compaction already removed.
+        self._compressed_msg_ids: set[str] = set()
 
     async def _append_messages_to_dialog(self, messages: list[Msg]) -> int:
         """Append messages to dialog storage file.
@@ -176,6 +181,7 @@ class AgentContext(InMemoryMemory):
         return {
             "content": [[msg.to_dict(), marks] for msg, marks in self.content],
             "_compressed_summary": self._compressed_summary,
+            "_compressed_msg_ids": sorted(self._compressed_msg_ids),
         }
 
     # pylint: disable=attribute-defined-outside-init
@@ -205,6 +211,11 @@ class AgentContext(InMemoryMemory):
                 )
 
         self._compressed_summary = state_dict.get("_compressed_summary", "")
+        self._compressed_msg_ids = {
+            str(i)
+            for i in state_dict.get("_compressed_msg_ids", []) or []
+            if i
+        }
 
     async def mark_messages_compressed(
         self,
@@ -216,6 +227,8 @@ class AgentContext(InMemoryMemory):
         This method:
         1. Persists the given messages to the dialog storage
         2. Removes them from memory
+        3. Records msg ids as tombstones so a concurrent same-session
+           save cannot resurrect them from the stale on-disk state.
 
         Args:
             messages: List of messages to mark as compressed.
@@ -230,7 +243,7 @@ class AgentContext(InMemoryMemory):
         await self._append_messages_to_dialog(messages)
 
         # Remove messages from memory
-        msg_ids = {msg.id for msg in messages}
+        msg_ids = {msg.id for msg in messages if msg.id}
         initial_size = len(self.content)
         self.content = [
             (msg, marks)
@@ -238,6 +251,7 @@ class AgentContext(InMemoryMemory):
             if msg.id not in msg_ids
         ]
         removed_count = initial_size - len(self.content)
+        self._compressed_msg_ids.update(msg_ids)
 
         logger.info(
             f"Marked {removed_count} messages as compressed "
@@ -256,12 +270,17 @@ class AgentContext(InMemoryMemory):
 
         This method:
         1. Persists all messages in memory to the dialog storage
-        2. Clears the in-memory content
+        2. Records msg ids as tombstones so a concurrent same-session
+           save cannot resurrect them
+        3. Clears the in-memory content
         """
         # Persist all messages to dialog storage
         if self.content:
             messages = [msg for msg, _ in self.content]
             await self._append_messages_to_dialog(messages)
+            self._compressed_msg_ids.update(
+                msg.id for msg, _ in self.content if msg.id
+            )
 
         # Clear in-memory content
         self.content.clear()

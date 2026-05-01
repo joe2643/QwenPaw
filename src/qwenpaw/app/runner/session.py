@@ -6,6 +6,8 @@ Windows filenames cannot contain: \\ / : * ? " < > |
 This module wraps agentscope's SessionBase so that session_id and user_id
 are sanitized before being used as filenames.
 """
+import asyncio
+import copy
 import os
 import re
 import json
@@ -75,6 +77,133 @@ def sanitize_filename(name: str) -> str:
     return _UNSAFE_FILENAME_RE.sub("--", name)
 
 
+def _memory_item_id(item) -> str | None:
+    """Return the message id for a memory content entry, if present."""
+    msg = item[0] if isinstance(item, (list, tuple)) and item else item
+    if isinstance(msg, dict):
+        msg_id = msg.get("id")
+        if msg_id:
+            return str(msg_id)
+    return None
+
+
+def _memory_item_key(item) -> str:
+    """Stable-ish key for an agentscope memory content item."""
+    msg_id = _memory_item_id(item)
+    if msg_id:
+        return f"id:{msg_id}"
+    try:
+        return "json:" + json.dumps(item, sort_keys=True, ensure_ascii=False)
+    except Exception:
+        return "repr:" + repr(item)
+
+
+def _filter_content_by_tombstones(
+    content: list,
+    tombstones: set[str],
+) -> list:
+    """Drop memory entries whose msg.id is in the tombstone set."""
+    if not tombstones:
+        return list(content)
+    return [
+        item for item in content if _memory_item_id(item) not in tombstones
+    ]
+
+
+def _merge_memory_content(existing: list, incoming: list) -> list:
+    """Append incoming memory entries that are not already in existing."""
+    merged = list(existing)
+    seen = {_memory_item_key(item) for item in merged}
+    for item in incoming:
+        key = _memory_item_key(item)
+        if key in seen:
+            continue
+        merged.append(item)
+        seen.add(key)
+    return merged
+
+
+def _merge_memory_dict(existing: dict, incoming: dict) -> dict:
+    """Merge only the append-only memory content list; latest metadata wins.
+
+    Honors the ``_compressed_msg_ids`` tombstone set: messages whose ids
+    appear in either side's tombstones are dropped from both content lists
+    before merging, so an auto-compaction in one concurrent run is not
+    undone by a sibling run that still holds the pre-compaction baseline.
+    """
+    if not isinstance(existing, dict) or not isinstance(incoming, dict):
+        return incoming
+    merged = copy.deepcopy(incoming)
+
+    existing_tombstones = {
+        str(i) for i in (existing.get("_compressed_msg_ids") or []) if i
+    }
+    incoming_tombstones = {
+        str(i) for i in (incoming.get("_compressed_msg_ids") or []) if i
+    }
+    effective_tombstones = existing_tombstones | incoming_tombstones
+
+    existing_content = existing.get("content")
+    incoming_content = incoming.get("content")
+    if isinstance(existing_content, list) and isinstance(
+        incoming_content,
+        list,
+    ):
+        merged["content"] = _merge_memory_content(
+            _filter_content_by_tombstones(
+                existing_content,
+                effective_tombstones,
+            ),
+            _filter_content_by_tombstones(
+                incoming_content,
+                effective_tombstones,
+            ),
+        )
+
+    if effective_tombstones:
+        merged["_compressed_msg_ids"] = sorted(effective_tombstones)
+
+    return merged
+
+
+def _merge_concurrent_states(existing: dict, incoming: dict) -> dict:
+    """Merge session state from a concurrent same-session agent run.
+
+    The new run's non-memory state wins, while memory.content keeps entries
+    already saved by sibling runs and appends this run's unseen entries.
+    """
+    if not isinstance(existing, dict):
+        return incoming
+    if not isinstance(incoming, dict):
+        return incoming
+    merged = copy.deepcopy(existing)
+    for module_name, incoming_module in incoming.items():
+        existing_module = existing.get(module_name)
+        if not isinstance(existing_module, dict) or not isinstance(
+            incoming_module,
+            dict,
+        ):
+            merged[module_name] = copy.deepcopy(incoming_module)
+            continue
+
+        module_merged = copy.deepcopy(incoming_module)
+        if module_name == "memory":
+            module_merged = _merge_memory_dict(
+                existing_module,
+                incoming_module,
+            )
+        elif isinstance(existing_module.get("memory"), dict) and isinstance(
+            incoming_module.get("memory"),
+            dict,
+        ):
+            module_merged["memory"] = _merge_memory_dict(
+                existing_module["memory"],
+                incoming_module["memory"],
+            )
+        merged[module_name] = module_merged
+    return merged
+
+
 class SafeJSONSession(SessionBase):
     """SessionBase subclass with filename sanitization and async file I/O.
 
@@ -93,6 +222,15 @@ class SafeJSONSession(SessionBase):
                 The directory to save the session state.
         """
         self.save_dir = save_dir
+        self._path_locks: dict[str, asyncio.Lock] = {}
+
+    def _get_path_lock(self, path: str) -> asyncio.Lock:
+        """Return a per-session-file asyncio lock."""
+        lock = self._path_locks.get(path)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._path_locks[path] = lock
+        return lock
 
     def _get_save_path(self, session_id: str, user_id: str) -> str:
         """Return a filesystem-safe save path.
@@ -113,6 +251,8 @@ class SafeJSONSession(SessionBase):
         self,
         session_id: str,
         user_id: str = "",
+        *,
+        merge_concurrent: bool = False,
         **state_modules_mapping,
     ) -> None:
         """Save state modules to a JSON file using atomic write +
@@ -161,31 +301,50 @@ class SafeJSONSession(SessionBase):
         # (if rename hasn't happened) or the new primary (if it
         # has) — never a nothing-at-all window.
 
-        # Step 1: write new state to tmp
-        with open(
-            tmp_path,
-            "w",
-            encoding="utf-8",
-        ) as f:
-            f.write(json.dumps(state_dicts, ensure_ascii=False))
-
-        # Step 2: non-destructive copy of current primary to .prev
-        #         (only if primary already exists — first save skips)
-        if os.path.exists(session_save_path):
-            try:
-                import shutil
-
-                shutil.copy2(session_save_path, prev_path)
-            except Exception as e:
-                logger.warning(
-                    "save_session_state: failed to copy %s → .prev "
-                    "(backup will be stale on next load): %s",
+        async with self._get_path_lock(session_save_path):
+            self._recover_primary_from_prev_if_missing(session_save_path)
+            if merge_concurrent and os.path.exists(session_save_path):
+                async with aiofiles.open(
                     session_save_path,
-                    e,
+                    "r",
+                    encoding="utf-8",
+                    errors="surrogatepass",
+                ) as f:
+                    existing_content = await f.read()
+                existing_states = _safe_json_loads(
+                    existing_content,
+                    session_save_path,
+                )
+                state_dicts = _merge_concurrent_states(
+                    existing_states,
+                    state_dicts,
                 )
 
-        # Step 3: atomic swap tmp → primary
-        os.replace(tmp_path, session_save_path)
+            # Step 1: write new state to tmp
+            with open(
+                tmp_path,
+                "w",
+                encoding="utf-8",
+            ) as f:
+                f.write(json.dumps(state_dicts, ensure_ascii=False))
+
+            # Step 2: non-destructive copy of current primary to .prev
+            #         (only if primary already exists — first save skips)
+            if os.path.exists(session_save_path):
+                try:
+                    import shutil
+
+                    shutil.copy2(session_save_path, prev_path)
+                except Exception as e:
+                    logger.warning(
+                        "save_session_state: failed to copy %s → .prev "
+                        "(backup will be stale on next load): %s",
+                        session_save_path,
+                        e,
+                    )
+
+            # Step 3: atomic swap tmp → primary
+            os.replace(tmp_path, session_save_path)
 
         logger.info(
             "Saved session state to %s successfully.",
@@ -301,69 +460,72 @@ class SafeJSONSession(SessionBase):
         prev_path = session_save_path + ".prev"
         tmp_path = session_save_path + ".tmp"
 
-        # If primary was wiped but ``.prev`` survived, resurrect before
-        # we read — otherwise we would start from ``{}`` and the
-        # write-back below would destroy the surviving history.  This
-        # is the bug that wiped the WhatsApp DM on ``/new`` commands
-        # when the primary was missing: reader saw empty, ``/new``
-        # then stored ``memory.content=[]`` over the primary, and a
-        # later ``save_session_state`` copied that empty primary to
-        # ``.prev`` too — both files now empty.
-        self._recover_primary_from_prev_if_missing(session_save_path)
+        async with self._get_path_lock(session_save_path):
+            # If primary was wiped but ``.prev`` survived, resurrect before
+            # we read — otherwise we would start from ``{}`` and the
+            # write-back below would destroy the surviving history.  This
+            # is the bug that wiped the WhatsApp DM on ``/new`` commands
+            # when the primary was missing: reader saw empty, ``/new``
+            # then stored ``memory.content=[]`` over the primary, and a
+            # later ``save_session_state`` copied that empty primary to
+            # ``.prev`` too — both files now empty.
+            self._recover_primary_from_prev_if_missing(session_save_path)
 
-        if os.path.exists(session_save_path):
-            async with aiofiles.open(
-                session_save_path,
-                "r",
-                encoding="utf-8",
-                errors="surrogatepass",
-            ) as f:
-                content = await f.read()
-                states = _safe_json_loads(content, session_save_path)
-
-        else:
-            if not create_if_not_exist:
-                raise AgentStateError(
-                    session_id=session_id,
-                    message=f"Session file {session_save_path} does not exist",
-                )
-            states = {}
-
-        path = key.split(".") if isinstance(key, str) else list(key)
-        if not path:
-            raise ConfigurationException(
-                message="key path is empty",
-            )
-
-        cur = states
-        for k in path[:-1]:
-            if k not in cur or not isinstance(cur[k], dict):
-                cur[k] = {}
-            cur = cur[k]
-
-        cur[path[-1]] = value
-
-        # Same write ordering as save_session_state: tmp → copy2 →
-        # atomic replace.  Direct overwrite of the primary leaves a
-        # window where the primary is mid-write and reads (including
-        # concurrent Console UI history fetches) can see a truncated
-        # file or zero bytes on crash.
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            f.write(json.dumps(states, ensure_ascii=False))
-
-        if os.path.exists(session_save_path):
-            try:
-                import shutil
-
-                shutil.copy2(session_save_path, prev_path)
-            except Exception as e:
-                logger.warning(
-                    "update_session_state: failed to copy %s → .prev: %s",
+            if os.path.exists(session_save_path):
+                async with aiofiles.open(
                     session_save_path,
-                    e,
+                    "r",
+                    encoding="utf-8",
+                    errors="surrogatepass",
+                ) as f:
+                    content = await f.read()
+                    states = _safe_json_loads(content, session_save_path)
+
+            else:
+                if not create_if_not_exist:
+                    raise AgentStateError(
+                        session_id=session_id,
+                        message=(
+                            f"Session file {session_save_path} does not exist"
+                        ),
+                    )
+                states = {}
+
+            path = key.split(".") if isinstance(key, str) else list(key)
+            if not path:
+                raise ConfigurationException(
+                    message="key path is empty",
                 )
 
-        os.replace(tmp_path, session_save_path)
+            cur = states
+            for k in path[:-1]:
+                if k not in cur or not isinstance(cur[k], dict):
+                    cur[k] = {}
+                cur = cur[k]
+
+            cur[path[-1]] = value
+
+            # Same write ordering as save_session_state: tmp -> copy2 ->
+            # atomic replace.  Direct overwrite of the primary leaves a
+            # window where the primary is mid-write and reads (including
+            # concurrent Console UI history fetches) can see a truncated
+            # file or zero bytes on crash.
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(states, ensure_ascii=False))
+
+            if os.path.exists(session_save_path):
+                try:
+                    import shutil
+
+                    shutil.copy2(session_save_path, prev_path)
+                except Exception as e:
+                    logger.warning(
+                        "update_session_state: failed to copy %s -> .prev: %s",
+                        session_save_path,
+                        e,
+                    )
+
+            os.replace(tmp_path, session_save_path)
 
         logger.info(
             "Updated session state key '%s' in %s successfully.",

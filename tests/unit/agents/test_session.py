@@ -455,6 +455,148 @@ async def test_overwrite_same_session_replaces_not_appends(
     assert fresh.data["_compressed_summary"] == "summary"
 
 
+@pytest.mark.asyncio
+async def test_merge_concurrent_saves_preserves_sibling_turns(
+    sess,
+    tmp_session_dir,
+):
+    """Parallel same-session saves must not lose a sibling run's messages."""
+    base = [[{"id": "base", "role": "user", "content": "base"}, []]]
+    initial = FakeModule()
+    initial.data = {
+        "memory": {"content": base, "_compressed_summary": ""},
+        "toolkit": {"active_groups": []},
+    }
+    await sess.save_session_state("s", user_id="u", agent=initial)
+
+    run_one = FakeModule()
+    run_one.data = {
+        "memory": {
+            "content": base
+            + [[{"id": "run-one", "role": "assistant", "content": "one"}, []]],
+            "_compressed_summary": "",
+        },
+        "toolkit": {"active_groups": ["one"]},
+    }
+    run_two = FakeModule()
+    run_two.data = {
+        "memory": {
+            "content": base
+            + [[{"id": "run-two", "role": "assistant", "content": "two"}, []]],
+            "_compressed_summary": "",
+        },
+        "toolkit": {"active_groups": ["two"]},
+    }
+
+    await sess.save_session_state(
+        "s",
+        user_id="u",
+        merge_concurrent=True,
+        agent=run_one,
+    )
+    await sess.save_session_state(
+        "s",
+        user_id="u",
+        merge_concurrent=True,
+        agent=run_two,
+    )
+
+    fresh = FakeModule()
+    await sess.load_session_state("s", user_id="u", agent=fresh)
+    content = fresh.data["memory"]["content"]
+    assert [item[0]["id"] for item in content] == ["base", "run-one", "run-two"]
+    # Non-memory state still follows the latest completing run.
+    assert fresh.data["toolkit"]["active_groups"] == ["two"]
+
+
+@pytest.mark.asyncio
+async def test_merge_concurrent_honors_compressed_msg_id_tombstones(
+    sess,
+    tmp_session_dir,
+):
+    """Auto-compaction in one concurrent run must not be undone when
+    a sibling run's later save is merged with the stale on-disk state.
+
+    Repro: group session, two parallel agent runs A and B both load
+    the same baseline (msgs 1..3). A's pre_reasoning compacts msgs
+    1..2 (mark_messages_compressed → tombstones {1,2}, in-memory
+    keeps msg 3 + a new reply 4). When A saves with merge_concurrent,
+    the existing on-disk content still has 1..3 — without tombstones
+    the merge resurrects 1..2, defeating the compaction.
+    """
+    base = [
+        [{"id": "m1", "role": "user", "content": "first"}, []],
+        [{"id": "m2", "role": "assistant", "content": "second"}, []],
+        [{"id": "m3", "role": "user", "content": "third"}, []],
+    ]
+    initial = FakeModule()
+    initial.data = {
+        "memory": {
+            "content": base,
+            "_compressed_summary": "",
+            "_compressed_msg_ids": [],
+        },
+    }
+    await sess.save_session_state("s", user_id="u", agent=initial)
+
+    # Run A: compacts m1, m2 (drops them from in-memory, records
+    # tombstones), keeps m3 and adds its own reply m4.
+    run_a = FakeModule()
+    run_a.data = {
+        "memory": {
+            "content": [
+                base[2],
+                [{"id": "m4", "role": "assistant", "content": "reply-A"}, []],
+            ],
+            "_compressed_summary": "summary-from-A",
+            "_compressed_msg_ids": ["m1", "m2"],
+        },
+    }
+    await sess.save_session_state(
+        "s",
+        user_id="u",
+        merge_concurrent=True,
+        agent=run_a,
+    )
+
+    fresh = FakeModule()
+    await sess.load_session_state("s", user_id="u", agent=fresh)
+    content_ids = [item[0]["id"] for item in fresh.data["memory"]["content"]]
+    assert "m1" not in content_ids
+    assert "m2" not in content_ids
+    assert content_ids == ["m3", "m4"]
+    assert sorted(fresh.data["memory"]["_compressed_msg_ids"]) == ["m1", "m2"]
+    assert fresh.data["memory"]["_compressed_summary"] == "summary-from-A"
+
+    # Run B started before A's compaction — its in-memory still holds
+    # the pre-compaction baseline plus its own reply m5. After A's
+    # save, B's save must still honor the persisted tombstones so m1,
+    # m2 stay gone, while m5 (a genuinely new sibling reply) survives.
+    run_b = FakeModule()
+    run_b.data = {
+        "memory": {
+            "content": base
+            + [[{"id": "m5", "role": "assistant", "content": "reply-B"}, []]],
+            "_compressed_summary": "",
+            "_compressed_msg_ids": [],
+        },
+    }
+    await sess.save_session_state(
+        "s",
+        user_id="u",
+        merge_concurrent=True,
+        agent=run_b,
+    )
+
+    fresh2 = FakeModule()
+    await sess.load_session_state("s", user_id="u", agent=fresh2)
+    final_ids = [item[0]["id"] for item in fresh2.data["memory"]["content"]]
+    assert "m1" not in final_ids
+    assert "m2" not in final_ids
+    assert final_ids == ["m3", "m4", "m5"]
+    assert sorted(fresh2.data["memory"]["_compressed_msg_ids"]) == ["m1", "m2"]
+
+
 class _FakeTaskTracker:
     """Minimal stand-in for ``TaskTracker`` — just enough surface
     for ``Runner.shutdown_handler`` to exercise its drain logic
