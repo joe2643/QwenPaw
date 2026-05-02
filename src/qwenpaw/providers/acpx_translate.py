@@ -422,13 +422,20 @@ async def translate_acp_updates_to_chat_chunks(
         result = msg.get("result")
         if isinstance(result, dict) and "stopReason" in result:
             stop = result.get("stopReason") or "end_turn"
-            # ``tool_calls`` finish_reason wins if any tool call
-            # was actually emitted this turn — matches OpenAI
-            # contract.  Otherwise map per StopReason.
-            if state.tool_calls and state.finish_reason is None:
-                state.finish_reason = "tool_calls"
-            else:
-                state.finish_reason = state.finish_reason or _STOP_REASON_MAP.get(stop, "stop")
+            # In ACPX hybrid mode Claude Code executes its own tools
+            # via ACP reverse-RPC (``fs/*``/``terminal/*`` handlers in
+            # claude_acpx_handlers); the ``tool_call`` notifications we
+            # observe are informational. We MUST NOT translate them
+            # into OpenAI ``tool_calls`` because agentscope's ReAct
+            # loop would then try to dispatch a function named
+            # "Terminal" / "Read" / "Bash" through CoPaw's toolkit and
+            # raise ``FunctionNotFoundError`` — there's no CoPaw-side
+            # function to bind to (the work is done over reverse-RPC).
+            # finish_reason therefore maps from ``stopReason`` only.
+            state.finish_reason = (
+                state.finish_reason
+                or _STOP_REASON_MAP.get(stop, "stop")
+            )
             break
 
         # Error response: {"jsonrpc":"2.0","id":...,"error":{...}}
@@ -462,26 +469,30 @@ async def translate_acp_updates_to_chat_chunks(
             continue
 
         if kind == "tool_call":
-            tool_call_id = update.get("toolCallId") or f"call_{uuid.uuid4().hex[:12]}"
-            name = update.get("title") or ""
-            # ACP ``rawInput`` is unstructured JSON.  OpenAI's
-            # tool_calls expects ``arguments`` as a JSON string;
-            # serialize whatever we got.  ACP also has a ``kind``
-            # (file/edit/execute/...) that doesn't map cleanly to
-            # function-call semantics — drop it.
+            # Surface for visibility (filtered like thinking via the
+            # channel renderer's ``filter_thinking`` flag) but do NOT
+            # emit ``tool_calls`` — see the matching note above on
+            # finish_reason. Bookkeep for ``tool_call_update``
+            # status-lookup so a later ``failed`` event can be
+            # narrated, even though we never dispatch.
+            tool_call_id = update.get("toolCallId") or (
+                f"call_{uuid.uuid4().hex[:12]}"
+            )
+            name = update.get("title") or "tool"
             args = update.get("rawInput")
-            args_str = json.dumps(args) if args is not None else ""
+            args_repr = (
+                json.dumps(args, ensure_ascii=False)
+                if args is not None else ""
+            )
             idx = len(state.tool_calls)
-            state.tool_calls[idx] = {"id": tool_call_id, "name": name, "args": args_str}
+            state.tool_calls[idx] = {
+                "id": tool_call_id,
+                "name": name,
+                "args": args_repr,
+            }
             state.tool_call_id_to_index[tool_call_id] = idx
-            yield _chat_chunk(state, {
-                "tool_calls": [{
-                    "index": idx,
-                    "id": tool_call_id,
-                    "type": "function",
-                    "function": {"name": name, "arguments": args_str},
-                }],
-            })
+            preview = f"\n[claude-code: {name}({args_repr})]\n"
+            yield _chat_chunk(state, {"reasoning_content": preview})
             continue
 
         if kind == "tool_call_update":
@@ -513,8 +524,6 @@ async def collect_as_chat_completion(
     """
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
-    tool_calls: list[dict] = []
-    tool_call_id_to_index: dict[str, int] = {}
 
     async for raw_line in line_reader:
         line = raw_line.strip()
@@ -528,7 +537,12 @@ async def collect_as_chat_completion(
         result = msg.get("result")
         if isinstance(result, dict) and "stopReason" in result:
             stop = result.get("stopReason") or "end_turn"
-            state.finish_reason = "tool_calls" if tool_calls else _STOP_REASON_MAP.get(stop, "stop")
+            # See the streaming branch's note: in ACPX hybrid mode the
+            # ``tool_call`` notifications are informational only (work
+            # executes via ACP reverse-RPC), so finish_reason maps
+            # from ``stopReason`` directly. We never produce
+            # ``tool_calls`` for agentscope to dispatch.
+            state.finish_reason = _STOP_REASON_MAP.get(stop, "stop")
             break
 
         err = msg.get("error")
@@ -549,15 +563,16 @@ async def collect_as_chat_completion(
             if text:
                 reasoning_parts.append(text)
         elif kind == "tool_call":
-            tcid = update.get("toolCallId") or f"call_{uuid.uuid4().hex[:12]}"
+            # Surface as reasoning_content; do NOT populate tool_calls.
+            name = update.get("title") or "tool"
             args = update.get("rawInput")
-            args_str = json.dumps(args) if args is not None else ""
-            tool_call_id_to_index[tcid] = len(tool_calls)
-            tool_calls.append({
-                "id": tcid,
-                "type": "function",
-                "function": {"name": update.get("title") or "", "arguments": args_str},
-            })
+            args_repr = (
+                json.dumps(args, ensure_ascii=False)
+                if args is not None else ""
+            )
+            reasoning_parts.append(
+                f"\n[claude-code: {name}({args_repr})]\n",
+            )
         # everything else: drop.
 
     message: dict[str, Any] = {
@@ -566,9 +581,6 @@ async def collect_as_chat_completion(
     }
     if reasoning_parts:
         message["reasoning_content"] = "".join(reasoning_parts)
-    if tool_calls:
-        message["tool_calls"] = tool_calls
-        state.finish_reason = "tool_calls"
 
     return {
         "id": state.response_id,

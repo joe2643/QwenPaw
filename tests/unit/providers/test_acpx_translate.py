@@ -242,7 +242,13 @@ class TestTranslateAcpUpdates:
         assert content_chunks[0]["choices"][0]["delta"]["content"] == "Done."
 
     @pytest.mark.asyncio
-    async def test_tool_call_to_tool_calls_delta(self) -> None:
+    async def test_tool_call_emits_reasoning_not_tool_calls(self) -> None:
+        """In ACPX hybrid mode Claude Code executes its own tools via
+        ACP reverse-RPC; the ``tool_call`` notifications are
+        informational. Translator must NOT surface them as OpenAI
+        ``tool_calls`` (would cause agentscope ReAct to dispatch a
+        non-existent function and raise ``FunctionNotFoundError:
+        Cannot find the function named Terminal``)."""
         lines = [
             json.dumps(_msg_update(
                 "tool_call",
@@ -254,20 +260,35 @@ class TestTranslateAcpUpdates:
         ]
         state = StreamState(model="claude-acpx")
         chunks = []
-        async for c in translate_acp_updates_to_chat_chunks(_line_iter(lines), state):
+        async for c in translate_acp_updates_to_chat_chunks(
+            _line_iter(lines), state,
+        ):
             chunks.append(c)
 
+        # No chunk should carry ``tool_calls``.
         tool_chunks = [
             c for c in chunks if "tool_calls" in c["choices"][0]["delta"]
         ]
-        assert len(tool_chunks) == 1
-        tc = tool_chunks[0]["choices"][0]["delta"]["tool_calls"][0]
-        assert tc["id"] == "tc_1"
-        assert tc["function"]["name"] == "read_file"
-        assert tc["function"]["arguments"] == '{"path": "x.py"}'
+        assert not tool_chunks, (
+            "tool_call notifications must not become OpenAI tool_calls"
+        )
+        # Tool call surfaces as reasoning_content with the call shape.
+        reasoning_chunks = [
+            c for c in chunks
+            if "reasoning_content" in c["choices"][0]["delta"]
+        ]
+        assert reasoning_chunks
+        body = reasoning_chunks[0]["choices"][0]["delta"]["reasoning_content"]
+        assert "claude-code" in body
+        assert "read_file" in body
+        assert "x.py" in body
 
     @pytest.mark.asyncio
-    async def test_finish_reason_tool_calls_when_tool_emitted(self) -> None:
+    async def test_finish_reason_maps_from_stop_reason_only(self) -> None:
+        """Even when a ``tool_call`` was observed, finish_reason must
+        come from ``stopReason`` — not ``tool_calls`` (the work has
+        already executed via reverse-RPC, agentscope has nothing to
+        dispatch)."""
         lines = [
             json.dumps(_msg_update(
                 "tool_call",
@@ -279,10 +300,11 @@ class TestTranslateAcpUpdates:
         ]
         state = StreamState(model="claude-acpx")
         chunks = []
-        async for c in translate_acp_updates_to_chat_chunks(_line_iter(lines), state):
+        async for c in translate_acp_updates_to_chat_chunks(
+            _line_iter(lines), state,
+        ):
             chunks.append(c)
-        # Tool call wins finish_reason regardless of stop reason.
-        assert chunks[-1]["choices"][0]["finish_reason"] == "tool_calls"
+        assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
 
     @pytest.mark.asyncio
     async def test_stop_reason_max_tokens_to_length(self) -> None:
@@ -418,7 +440,13 @@ class TestCollectAsChatCompletion:
         assert msg["reasoning_content"] == "think A think B"
 
     @pytest.mark.asyncio
-    async def test_tool_calls_force_finish_reason(self) -> None:
+    async def test_tool_call_does_not_emit_openai_tool_calls(self) -> None:
+        """Non-streaming path: ACPX ``tool_call`` notifications must
+        surface only as ``reasoning_content`` and never as OpenAI
+        ``tool_calls``. Otherwise agentscope's ReAct loop would try
+        to dispatch a function named ``run_shell``/``Terminal``/etc.
+        through CoPaw's toolkit and raise ``FunctionNotFoundError``.
+        finish_reason maps from ``stopReason`` only."""
         lines = [
             json.dumps(_msg_update(
                 "tool_call",
@@ -426,9 +454,12 @@ class TestCollectAsChatCompletion:
                 title="run_shell",
                 rawInput={"cmd": "ls"},
             )),
-            json.dumps(_final("end_turn")),  # not tool_calls!
+            json.dumps(_final("end_turn")),
         ]
         state = StreamState(model="claude-acpx")
         out = await collect_as_chat_completion(_line_iter(lines), state)
-        assert out["choices"][0]["finish_reason"] == "tool_calls"
-        assert len(out["choices"][0]["message"]["tool_calls"]) == 1
+        assert out["choices"][0]["finish_reason"] == "stop"
+        msg = out["choices"][0]["message"]
+        assert "tool_calls" not in msg
+        assert "claude-code" in (msg.get("reasoning_content") or "")
+        assert "run_shell" in (msg.get("reasoning_content") or "")
