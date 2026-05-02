@@ -111,6 +111,18 @@ _DEFAULT_TURN_TIMEOUT_SECONDS: float = 300.0
 # realistic seed_full through the file path with comfortable headroom.
 _ARGV_PROMPT_THRESHOLD: int = 64 * 1024
 
+# Per-line buffer cap for ``proc.stdout``. asyncio's ``StreamReader``
+# defaults to 64 KB, which trips on a single ACP JSON-RPC message
+# bigger than that (observed 2026-05-02 ``ValueError: Separator is not
+# found, and chunk exceed the limit`` after Claude executed a Read
+# tool against a moderately large file — the ``tool_call_update``
+# carries the entire file content as one newline-delimited JSON line).
+# 16 MB covers realistic file-Read results, long thinking dumps and
+# big rawInput tool_call payloads without leaving the kernel pipe
+# buffer over-committed; per-process memory cost is bounded by the
+# actual line size, not the limit.
+_STDOUT_LINE_LIMIT: int = 16 * 1024 * 1024
+
 
 # ----------------------------------------------------------------- #
 # Errors
@@ -629,6 +641,13 @@ class AcpxDaemon:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
+                # Bump the ``StreamReader`` per-line buffer above the
+                # asyncio default (64 KB) so a single big ACP JSON-RPC
+                # message — typically a ``tool_call_update`` carrying
+                # a large file Read result — does not blow up with
+                # ``ValueError: Separator is not found, and chunk
+                # exceed the limit``.  See ``_STDOUT_LINE_LIMIT``.
+                limit=_STDOUT_LINE_LIMIT,
             )
         except FileNotFoundError as e:
             raise AcpxDaemonError(f"acpx spawn failed: {e}") from e

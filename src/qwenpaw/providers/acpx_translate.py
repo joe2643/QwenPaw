@@ -635,6 +635,13 @@ async def spawn_acpx_and_stream(
         cwd=cwd,
         env=env,
         start_new_session=True,
+        # Mirror :data:`claude_acpx_daemon._STDOUT_LINE_LIMIT` so
+        # large tool_call_update lines don't trip ``readline()``'s
+        # 64 KB default cap. Stateless one-shot mode rarely sees
+        # giant lines (no client-side fs/terminal handlers wired
+        # up here) but keeping the two paths symmetric removes a
+        # subtle divergence-by-default trap.
+        limit=16 * 1024 * 1024,
     )
     assert proc.stdin is not None
     assert proc.stdout is not None

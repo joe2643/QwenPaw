@@ -367,6 +367,57 @@ class TestSubmitTurnBasic:
         )
 
     @pytest.mark.asyncio
+    async def test_long_stdout_line_does_not_overrun_buffer(self) -> None:
+        """A single ACP JSON-RPC line bigger than asyncio's default 64 KB
+        StreamReader buffer must not raise ``ValueError: Separator is
+        not found, and chunk exceed the limit`` — the daemon bumps the
+        per-line limit on subprocess spawn so large tool_call_update
+        payloads (file Read results, big rawInput, etc.) pass through."""
+        big_blob_size = 200 * 1024  # 200 KB > asyncio default 64 KB
+        long_line_script = (
+            r"""
+import json, sys
+big = "x" * """
+            + str(big_blob_size)
+            + r"""
+sys.stdout.write(json.dumps({
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+        "sessionId": "sess_x",
+        "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": big},
+        },
+    },
+}) + "\n")
+sys.stdout.flush()
+sys.stdout.write(json.dumps({
+    "jsonrpc": "2.0", "id": "1",
+    "result": {"stopReason": "end_turn"},
+}) + "\n")
+sys.stdout.flush()
+"""
+        )
+        daemon = AcpxDaemon(
+            auto_ensure_session=False,
+            cmd_builder=_python_cmd_builder(long_line_script),
+        )
+        lines: list[str] = []
+        async for raw in daemon.submit_turn(
+            session_name="copaw-test",
+            prompt_blocks=[{"type": "text", "text": "hi"}],
+            is_seed=True,
+        ):
+            lines.append(raw)
+        # First line carries the big payload — must not have raised.
+        assert lines, "expected at least one line yielded"
+        msg = json.loads(lines[0])
+        assert (
+            len(msg["params"]["update"]["content"]["text"]) == big_blob_size
+        )
+
+    @pytest.mark.asyncio
     async def test_short_prompt_keeps_argv_path(self, monkeypatch) -> None:
         """A small prompt continues to ride argv — the file-path branch
         only kicks in past the threshold."""
