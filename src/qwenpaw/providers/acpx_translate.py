@@ -51,6 +51,17 @@ logger = logging.getLogger(__name__)
 # during the alpha.
 _PINNED_ACPX_VERSION: str = "0.6.1"
 
+# Per-line buffer cap for subprocess stdout. asyncio's ``StreamReader``
+# defaults to 64 KB; a single ACP JSON-RPC message bigger than that
+# (typically a ``tool_call_update`` carrying a file Read result, a
+# long thinking dump, or a big rawInput) raises ``ValueError:
+# Separator is not found, and chunk exceed the limit`` (observed
+# 2026-05-02). 16 MB covers realistic worst cases without keeping
+# the kernel pipe buffer over-committed; per-process memory cost is
+# bounded by the actual line size, not the limit.  Daemon and
+# stateless one-shot paths both import this constant.
+_STDOUT_LINE_LIMIT: int = 16 * 1024 * 1024
+
 # Stateless one-shot exec — used for the legacy fire-and-forget path
 # and for unit tests that don't care about session lifecycle.
 #
@@ -648,29 +659,72 @@ def _image_attach_marker(uri_or_path: str, *, label: str = "image") -> str:
     media. ``file://`` URIs are normalized to plain paths so the
     Read tool can take them directly; HTTP/HTTPS pass through and
     Claude can use WebFetch (or Read if its current build resolves
-    URLs)."""
+    URLs).
+
+    Sanitizes the path/URL before interpolating so a hostile or
+    badly-named source (containing ``]`` — the marker terminator —
+    or a literal newline) cannot break the marker boundary and
+    confuse Claude Code's parser.
+    """
     if uri_or_path.startswith("file://"):
         from urllib.parse import urlparse, unquote
 
         parsed = urlparse(uri_or_path)
         local_path = unquote(parsed.path)
         return (
-            f"[{label} attached at local path: {local_path} — "
+            f"[{label} attached at local path: "
+            f"{_sanitize_for_marker(local_path)} — "
             f"use the Read tool on this path if you need to view it]"
         )
     return (
-        f"[{label} attached at: {uri_or_path} — "
+        f"[{label} attached at: {_sanitize_for_marker(uri_or_path)} — "
         f"use the Read tool (for local paths) or WebFetch "
         f"(for http/https URLs) if you need to view it]"
     )
 
 
+def _sanitize_for_marker(value: str) -> str:
+    """Strip characters that would break the bracketed marker form.
+
+    ``]`` would close the marker prematurely; control characters
+    (newlines, tabs, carriage returns) would split the line in
+    Claude's view. Replace them with safe placeholders. Path
+    semantics are preserved for any remotely sane filename — the
+    only paths this would corrupt are ones containing literal ``]``
+    or newlines, which Read couldn't open anyway.
+    """
+    if not value:
+        return ""
+    # ``str.translate`` with a single-pass map is faster than chained
+    # ``replace`` and avoids holding extra intermediate strings.
+    return value.translate(_MARKER_TRANSLATE)
+
+
+_MARKER_TRANSLATE = str.maketrans({
+    "]": "_RBRACK_",
+    "\n": " ",
+    "\r": " ",
+    "\t": " ",
+    "\x00": "",
+})
+
+
 # Per-process cache for base64-image spills. Keyed by SHA-256 of the
 # raw bytes so the same image attached across multiple turns reuses a
-# single file on disk. Bounded LRU keeps the cache from growing
-# without limit on long-running daemons.
+# single file on disk. FIFO eviction (insertion order, not recency —
+# we don't refresh on cached hits) keeps the cache bounded; on
+# eviction the underlying file is unlinked too so the spill directory
+# does not grow without limit.
 _IMAGE_SPILL_CACHE: "dict[str, str]" = {}
 _IMAGE_SPILL_CACHE_CAP: int = 128
+
+# Hard ceiling on a single image's decoded size. A misbehaving caller
+# emitting a 1 GB inline image would fill ``/tmp`` and spike memory;
+# 32 MB covers typical phone photos plus comfortable headroom while
+# refusing the pathological case. Larger images should arrive via the
+# normal media pipeline (which already saves to local disk and
+# rewrites source to ``file:///``) and never hit this fallback.
+_MAX_INLINE_IMAGE_BYTES: int = 32 * 1024 * 1024
 
 
 def _spill_base64_image(b64_data: str, mime: str) -> str:
@@ -683,11 +737,31 @@ def _spill_base64_image(b64_data: str, mime: str) -> str:
     import tempfile
     from pathlib import Path as _Path
 
+    # Cheap pre-decode size check — base64 inflates ~4/3 vs raw, so
+    # we can refuse oversized payloads before paying the decode cost.
+    if len(b64_data) > (_MAX_INLINE_IMAGE_BYTES * 4) // 3 + 16:
+        logger.warning(
+            "acpx _spill_base64_image: refusing %d-byte base64 "
+            "payload (decoded would exceed %d MB cap)",
+            len(b64_data),
+            _MAX_INLINE_IMAGE_BYTES // (1024 * 1024),
+        )
+        return ""
+
     try:
         raw = base64.b64decode(b64_data, validate=False)
     except Exception:  # noqa: BLE001
         logger.warning("acpx _spill_base64_image: invalid base64; skipping")
         return ""
+    if len(raw) > _MAX_INLINE_IMAGE_BYTES:
+        logger.warning(
+            "acpx _spill_base64_image: refusing %d-byte image "
+            "(exceeds %d MB cap)",
+            len(raw),
+            _MAX_INLINE_IMAGE_BYTES // (1024 * 1024),
+        )
+        return ""
+
     digest = hashlib.sha256(raw).hexdigest()
     cached = _IMAGE_SPILL_CACHE.get(digest)
     if cached and _Path(cached).exists():
@@ -712,12 +786,25 @@ def _spill_base64_image(b64_data: str, mime: str) -> str:
         )
         return ""
 
-    # FIFO-trim the dedup cache. We don't unlink old files here — the
-    # cache_dir is /tmp on most systems and gets reaped at boot; a
-    # separate cleanup pass is tracked as v2 work.
+    # FIFO-evict the oldest entry once over cap, AND unlink the file
+    # on disk — earlier the dict entry was popped but the file leaked,
+    # so the spill directory grew without bound across many distinct
+    # images.
     if len(_IMAGE_SPILL_CACHE) >= _IMAGE_SPILL_CACHE_CAP:
-        oldest = next(iter(_IMAGE_SPILL_CACHE))
-        _IMAGE_SPILL_CACHE.pop(oldest, None)
+        oldest_key = next(iter(_IMAGE_SPILL_CACHE))
+        oldest_path = _IMAGE_SPILL_CACHE.pop(oldest_key, None)
+        if oldest_path:
+            try:
+                _Path(oldest_path).unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                logger.warning(
+                    "acpx _spill_base64_image: failed to unlink "
+                    "evicted cache file %s: %s",
+                    oldest_path,
+                    e,
+                )
     _IMAGE_SPILL_CACHE[digest] = str(target)
     return str(target)
 
@@ -783,13 +870,13 @@ async def spawn_acpx_and_stream(
         cwd=cwd,
         env=env,
         start_new_session=True,
-        # Mirror :data:`claude_acpx_daemon._STDOUT_LINE_LIMIT` so
-        # large tool_call_update lines don't trip ``readline()``'s
-        # 64 KB default cap. Stateless one-shot mode rarely sees
-        # giant lines (no client-side fs/terminal handlers wired
-        # up here) but keeping the two paths symmetric removes a
-        # subtle divergence-by-default trap.
-        limit=16 * 1024 * 1024,
+        # Use the shared :data:`_STDOUT_LINE_LIMIT` so large
+        # tool_call_update lines don't trip ``readline()``'s 64 KB
+        # default. Stateless one-shot mode rarely sees giant lines
+        # (no client-side fs/terminal handlers wired up here) but
+        # keeping the two paths symmetric removes a subtle
+        # divergence-by-default trap.
+        limit=_STDOUT_LINE_LIMIT,
     )
     assert proc.stdin is not None
     assert proc.stdout is not None

@@ -454,6 +454,61 @@ sys.stdout.flush()
         )
 
     @pytest.mark.asyncio
+    async def test_tempfile_cleaned_when_spawn_fails(
+        self,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        """Spawn-time failure (e.g. binary missing on PATH) must still
+        unlink the prompt tempfile — earlier the cleanup only ran
+        after a successful ``_spawn``, so a binary-missing exec path
+        leaked the tempfile."""
+        import os as _os
+
+        from qwenpaw.providers import claude_acpx_daemon as daemon_mod
+
+        # Lower threshold so the file path is taken with a small payload.
+        monkeypatch.setattr(daemon_mod, "_ARGV_PROMPT_THRESHOLD", 16)
+
+        captured_paths: list[str] = []
+
+        # Wrap mkstemp so we can observe the path created.
+        import tempfile as _tempfile
+
+        real_mkstemp = _tempfile.mkstemp
+
+        def _spy_mkstemp(*args, **kwargs):
+            fd, path = real_mkstemp(*args, **kwargs)
+            captured_paths.append(path)
+            return fd, path
+
+        monkeypatch.setattr(_tempfile, "mkstemp", _spy_mkstemp)
+
+        # cmd_builder returns a binary that does not exist; _spawn
+        # raises ``AcpxDaemonError`` from ``FileNotFoundError``.
+        def _missing_builder(_session_name, **_kw):
+            return ("/nonexistent-binary-xyz", "ignore")
+
+        daemon = AcpxDaemon(
+            auto_ensure_session=False,
+            cmd_builder=_missing_builder,
+        )
+        with pytest.raises(AcpxDaemonError):
+            async for _ in daemon.submit_turn(
+                session_name="copaw-test",
+                prompt_blocks=[{"type": "text", "text": "x" * 256}],
+                is_seed=True,
+            ):
+                pass
+
+        assert captured_paths, "tempfile must have been created"
+        for p in captured_paths:
+            assert not _os.path.exists(p), (
+                f"tempfile {p} should have been unlinked even though "
+                f"spawn failed"
+            )
+
+    @pytest.mark.asyncio
     async def test_short_prompt_keeps_argv_path(self, monkeypatch) -> None:
         """A small prompt continues to ride argv — the file-path branch
         only kicks in past the threshold."""

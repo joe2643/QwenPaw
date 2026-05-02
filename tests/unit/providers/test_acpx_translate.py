@@ -463,3 +463,81 @@ class TestCollectAsChatCompletion:
         assert "tool_calls" not in msg
         assert "claude-code" in (msg.get("reasoning_content") or "")
         assert "run_shell" in (msg.get("reasoning_content") or "")
+
+
+class TestImageMarker:
+    """Tests for ``_image_attach_marker`` + ``_spill_base64_image``."""
+
+    def test_marker_sanitizes_unsafe_chars(self) -> None:
+        """A path containing the marker terminator ``]`` or a literal
+        newline cannot break the marker boundary — those characters
+        are mapped to safe placeholders so Claude Code's parser
+        cannot be tricked into mis-reading the marker."""
+        from qwenpaw.providers.acpx_translate import _image_attach_marker
+
+        marker = _image_attach_marker(
+            "/tmp/weird]name\nwith\\junk.png",
+            label="image",
+        )
+        assert "]name" not in marker  # ``]`` was replaced
+        assert "\n" not in marker      # newline was replaced
+        # The marker is still well-formed: opens with ``[`` and ends
+        # with the SINGLE closing ``]``.
+        assert marker.startswith("[")
+        assert marker.count("]") == 1
+        assert marker.endswith("]")
+
+    def test_spill_refuses_oversized_payload(self, monkeypatch) -> None:
+        """Inline base64 images above the byte cap must be refused
+        rather than spilling a 1 GB file to disk."""
+        from qwenpaw.providers import acpx_translate as mod
+
+        # Lower the cap to 1 KB so we can exercise the guard cheaply.
+        monkeypatch.setattr(mod, "_MAX_INLINE_IMAGE_BYTES", 1024)
+
+        # 4 KB raw bytes encoded ⇒ ~5.5 KB base64 ⇒ above the 1 KB cap.
+        import base64
+
+        b64 = base64.b64encode(b"x" * 4096).decode("ascii")
+        path = mod._spill_base64_image(b64, "image/png")
+        assert path == "", (
+            "oversized base64 should be refused (empty path returned)"
+        )
+
+    def test_eviction_unlinks_evicted_file(self, monkeypatch) -> None:
+        """When the FIFO cache evicts an entry, the underlying file
+        must be unlinked too — earlier the dict entry was popped but
+        the file leaked, so the spill directory grew without bound."""
+        from pathlib import Path as _Path
+        import base64
+
+        from qwenpaw.providers import acpx_translate as mod
+
+        # Lower cap to 2 so we evict deterministically with 3 distinct
+        # images.
+        monkeypatch.setattr(mod, "_IMAGE_SPILL_CACHE_CAP", 2)
+        monkeypatch.setattr(mod, "_IMAGE_SPILL_CACHE", {})
+
+        paths: list[str] = []
+        for i in range(3):
+            b64 = base64.b64encode(b"img-" + bytes(str(i), "ascii")).decode(
+                "ascii",
+            )
+            path = mod._spill_base64_image(b64, "image/png")
+            assert path
+            paths.append(path)
+
+        # First entry must be evicted (cap=2, three insertions).
+        assert not _Path(paths[0]).exists(), (
+            "first cache entry's file should be unlinked on FIFO eviction"
+        )
+        # Second and third entries still present.
+        assert _Path(paths[1]).exists()
+        assert _Path(paths[2]).exists()
+
+        # Cleanup files we created so the test doesn't leave artefacts.
+        for p in paths[1:]:
+            try:
+                _Path(p).unlink()
+            except FileNotFoundError:
+                pass

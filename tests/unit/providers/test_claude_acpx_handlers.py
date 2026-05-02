@@ -179,6 +179,55 @@ class TestBuildEnv:
         assert env["HOME"] == "/home/test"
         assert env["LANG"] == "en_US.UTF-8"
 
+    def test_acp_env_denylist_drops_execution_hijack_hooks(self) -> None:
+        """Codex 2026-04-28 review caught that the guardian inspects
+        ``command``/``cwd`` only — ACP-supplied env entries flow to the
+        child unguarded.  ``BASH_ENV`` / ``NODE_OPTIONS`` /
+        ``LD_PRELOAD`` etc. would let the model hijack any otherwise-
+        allowed command's semantics.  Deny-list drops them; legitimate
+        env entries still flow through."""
+        env = _build_env([
+            {"name": "BASH_ENV", "value": "/tmp/evil.sh"},
+            {"name": "NODE_OPTIONS", "value": "--require=/tmp/evil.js"},
+            {"name": "LD_PRELOAD", "value": "/tmp/evil.so"},
+            {"name": "DYLD_INSERT_LIBRARIES", "value": "/tmp/evil.dylib"},
+            {"name": "PYTHONSTARTUP", "value": "/tmp/evil.py"},
+            {"name": "RUBYOPT", "value": "-r/tmp/evil.rb"},
+            {"name": "PERL5OPT", "value": "-Mevil"},
+            {"name": "GIT_CONFIG_GLOBAL", "value": "/tmp/.evilgit"},
+            {"name": "GIT_SSH_COMMAND", "value": "/tmp/evil-ssh"},
+            # Legitimate variables — should pass through.
+            {"name": "MY_TOOL_FLAG", "value": "yes"},
+            {"name": "DEBUG", "value": "1"},
+        ])
+        # Deny-list entries must NOT be in the env.
+        for hijack in (
+            "BASH_ENV",
+            "NODE_OPTIONS",
+            "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES",
+            "PYTHONSTARTUP",
+            "RUBYOPT",
+            "PERL5OPT",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_SSH_COMMAND",
+        ):
+            assert hijack not in env, (
+                f"deny-list breach: {hijack} flowed to child env"
+            )
+        # Legitimate entries flow through.
+        assert env["MY_TOOL_FLAG"] == "yes"
+        assert env["DEBUG"] == "1"
+
+    def test_acp_env_denylist_does_not_block_other_overrides(self) -> None:
+        """Deny-list is targeted — generic var overrides still work."""
+        env = _build_env([
+            {"name": "PATH", "value": "/custom/path"},
+            {"name": "FOO", "value": "bar"},
+        ])
+        assert env["PATH"] == "/custom/path"
+        assert env["FOO"] == "bar"
+
 
 # ----------------------------------------------------------------- #
 # _join_argv_for_guard

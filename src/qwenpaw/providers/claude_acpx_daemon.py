@@ -111,17 +111,12 @@ _DEFAULT_TURN_TIMEOUT_SECONDS: float = 300.0
 # realistic seed_full through the file path with comfortable headroom.
 _ARGV_PROMPT_THRESHOLD: int = 64 * 1024
 
-# Per-line buffer cap for ``proc.stdout``. asyncio's ``StreamReader``
-# defaults to 64 KB, which trips on a single ACP JSON-RPC message
-# bigger than that (observed 2026-05-02 ``ValueError: Separator is not
-# found, and chunk exceed the limit`` after Claude executed a Read
-# tool against a moderately large file — the ``tool_call_update``
-# carries the entire file content as one newline-delimited JSON line).
-# 16 MB covers realistic file-Read results, long thinking dumps and
-# big rawInput tool_call payloads without leaving the kernel pipe
-# buffer over-committed; per-process memory cost is bounded by the
-# actual line size, not the limit.
-_STDOUT_LINE_LIMIT: int = 16 * 1024 * 1024
+# Per-line buffer cap re-exported from ``acpx_translate`` so both
+# spawn sites (daemon-driven stateful + legacy stateless one-shot)
+# share one source of truth.
+from qwenpaw.providers.acpx_translate import (
+    _STDOUT_LINE_LIMIT,  # noqa: F401  re-exported for back-compat
+)
 
 
 # ----------------------------------------------------------------- #
@@ -361,8 +356,14 @@ class AcpxDaemon:
         else:
             cmd = cmd_prefix + (text_payload,)
 
-        proc = await self._spawn(cmd)
+        # Outer try/finally ensures the tempfile is unlinked even if
+        # ``_spawn`` itself raises (binary missing on PATH, exec
+        # failure) — earlier the cleanup was only inside the
+        # post-spawn try block, so a spawn-time exception leaked
+        # the tempfile.
+        proc: asyncio.subprocess.Process | None = None
         try:
+            proc = await self._spawn(cmd)
             assert proc.stdin is not None
             # No stdin payload — prompt is either in argv or in the
             # tempfile passed via ``-f``.  Stdin stays open so handler
@@ -371,13 +372,17 @@ class AcpxDaemon:
             async for line in self._stream_lines(proc):
                 yield line
         finally:
-            # Close stdin now (defensive — acpx is already done).
-            try:
-                if proc.stdin is not None and not proc.stdin.is_closing():
-                    proc.stdin.close()
-            except Exception:  # noqa: BLE001
-                pass
-            await self._reap(proc)
+            if proc is not None:
+                # Close stdin now (defensive — acpx is already done).
+                try:
+                    if (
+                        proc.stdin is not None
+                        and not proc.stdin.is_closing()
+                    ):
+                        proc.stdin.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                await self._reap(proc)
             if prompt_file is not None:
                 try:
                     os.unlink(prompt_file)
