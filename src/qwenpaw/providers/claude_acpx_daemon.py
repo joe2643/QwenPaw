@@ -99,6 +99,18 @@ _DEFAULT_TTL_SECONDS: int = 600
 # as a daemon failure: kill, count restart, surface to caller.
 _DEFAULT_TURN_TIMEOUT_SECONDS: float = 300.0
 
+# Threshold (bytes of UTF-8 encoded prompt) above which we route the
+# prompt through ``acpx claude -f <path>`` instead of an argv string.
+# System ARG_MAX is typically 2 MB on Linux but the budget is shared
+# with environment variables AND the entire argv tuple — and on cold-
+# mint/seed_full a long WhatsApp group history easily exceeds that
+# combined budget, producing ``OSError: [Errno 7] Argument list too
+# long`` (observed 2026-05-02). Routing through a tempfile sidesteps
+# the kernel exec budget entirely. 64 KB keeps the fast argv path for
+# the common ship_tail case (a turn or two) while routing every
+# realistic seed_full through the file path with comfortable headroom.
+_ARGV_PROMPT_THRESHOLD: int = 64 * 1024
+
 
 # ----------------------------------------------------------------- #
 # Errors
@@ -276,31 +288,74 @@ class AcpxDaemon:
             await self._ensure_session(session_name)
 
         text_payload = _payload_text(prompt_blocks)
-        # The prompt rides as a positional CLI argument so stdin stays
-        # free for ACP reply traffic (Claude→client requests like
-        # ``fs/read_text_file`` are answered by writing JSON-RPC reply
-        # envelopes back on the same stdin channel).  acpx accepts
-        # ``[prompt...]`` positional args under ``acpx claude``.  Going
-        # via ``-f -`` would need us to half-close stdin to signal EOF
-        # of the prompt while keeping it open for replies, which the
-        # Python asyncio.subprocess API doesn't expose without unsafe
-        # tricks.  Argv route is simpler and matches the real CLI.
+        # Two prompt-delivery modes:
+        #
+        # 1. **Short prompt → argv positional.** The prompt rides as a
+        #    positional CLI argument under ``acpx claude [prompt...]``
+        #    so stdin stays free for ACP reply traffic (Claude→client
+        #    requests like ``fs/read_text_file`` are answered by
+        #    writing JSON-RPC reply envelopes back on the same stdin
+        #    channel). Going via ``-f -`` would need us to half-close
+        #    stdin to signal EOF of the prompt while keeping it open
+        #    for replies, which the Python asyncio.subprocess API
+        #    doesn't expose without unsafe tricks.
+        #
+        # 2. **Long prompt → ``-f <tempfile>``.** Linux ARG_MAX caps
+        #    the combined size of argv + envp; cold-mint/seed_full
+        #    routinely exceeds it for WhatsApp group histories
+        #    (observed 2026-05-02 ``OSError: [Errno 7] Argument list
+        #    too long``). A tempfile keeps argv tiny regardless of
+        #    history size, while stdin stays free for ACP replies.
         #
         # ttl rides in the global-options slot via ``cmd_builder`` so
         # acpx's queue-owner inherits it; appending after the
         # subcommand triggers ``error: unknown option --ttl`` (smoke
         # test 2026-04-27).
-        cmd = self._cmd_builder(
+        encoded_payload = text_payload.encode("utf-8")
+        cmd_prefix = self._cmd_builder(
             session_name,
             ttl_seconds=self._ttl_seconds,
-        ) + (text_payload,)
+        )
+        prompt_file: str | None = None
+        if len(encoded_payload) > _ARGV_PROMPT_THRESHOLD:
+            # Tempfile path: write payload to disk, pass ``-f <path>``.
+            # We deliberately do NOT use ``-f -`` (stdin) because the
+            # daemon needs stdin for client-side ACP request replies.
+            import tempfile  # local import — only seed_full hits this
+
+            fd, prompt_file = tempfile.mkstemp(
+                prefix="qwenpaw-acpx-prompt-",
+                suffix=".txt",
+            )
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(encoded_payload)
+            except Exception:
+                # If write itself fails, clean up before re-raising —
+                # otherwise we'd leak the tempfile.
+                try:
+                    os.unlink(prompt_file)
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
+            cmd = cmd_prefix + ("-f", prompt_file)
+            logger.info(
+                "acpx submit_turn: prompt %d bytes > %d threshold; "
+                "routed via tempfile %s",
+                len(encoded_payload),
+                _ARGV_PROMPT_THRESHOLD,
+                prompt_file,
+            )
+        else:
+            cmd = cmd_prefix + (text_payload,)
 
         proc = await self._spawn(cmd)
         try:
             assert proc.stdin is not None
-            # No stdin payload — prompt is in argv.  Stdin stays open
-            # so handler replies (written by _dispatch_request) land
-            # on the channel acpx is reading for ACP replies.
+            # No stdin payload — prompt is either in argv or in the
+            # tempfile passed via ``-f``.  Stdin stays open so handler
+            # replies (written by _dispatch_request) land on the channel
+            # acpx is reading for ACP replies.
             async for line in self._stream_lines(proc):
                 yield line
         finally:
@@ -311,6 +366,18 @@ class AcpxDaemon:
             except Exception:  # noqa: BLE001
                 pass
             await self._reap(proc)
+            if prompt_file is not None:
+                try:
+                    os.unlink(prompt_file)
+                except FileNotFoundError:
+                    pass
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "acpx submit_turn: failed to unlink prompt "
+                        "tempfile %s: %s",
+                        prompt_file,
+                        e,
+                    )
 
     # ----- Auxiliary ACP control surface -------------------------- #
 
@@ -455,11 +522,21 @@ class AcpxDaemon:
             claude_acpx_metrics.record_tear_down()
 
     async def shutdown(self) -> None:
-        """Stop the daemon — kill any in-flight subprocesses.  Called
-        on agent stop / process exit.  Idempotent: subsequent calls
-        and any further :meth:`submit_turn` raise.
+        """Stop the daemon — kill any in-flight subprocesses + cancel
+        any in-flight ACP request dispatches.  Called on agent stop /
+        process exit.  Idempotent: subsequent calls and any further
+        :meth:`submit_turn` raise.
         """
         self._closed = True
+        # Cancel handler-dispatch tasks first so a slow handler (e.g.
+        # ``terminal/wait_for_exit``) doesn't outlive the subprocess
+        # whose stdin it was supposed to reply to.  Without this they'd
+        # be retained by ``_pending_dispatches`` forever — strong-ref
+        # cleanup keeps the GC away but doesn't unblock a stuck await.
+        pending = list(self._pending_dispatches)
+        for task in pending:
+            if not task.done():
+                task.cancel()
         # Snapshot because _reap mutates the set.
         for proc in list(self._inflight):
             if proc.returncode is None:
@@ -472,6 +549,11 @@ class AcpxDaemon:
                     "acpx subprocess %s did not exit after kill",
                     proc.pid,
                 )
+        # Drain cancelled dispatch tasks so they exit cleanly before
+        # we return.  Use return_exceptions so a CancelledError from
+        # any task doesn't propagate out of shutdown().
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         self._inflight.clear()
 
     # ----- Internal helpers --------------------------------------- #
@@ -811,7 +893,13 @@ def _kill_proc_tree(proc: asyncio.subprocess.Process) -> None:
     try:
         os.killpg(pgid, signal.SIGKILL)
     except ProcessLookupError:
-        pass
+        # Group leader was reaped between getpgid and killpg.  Try a
+        # per-pid kill as a fallback for any grandchild that outlived
+        # the leader.
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
 
 
 def _binary_available() -> bool:

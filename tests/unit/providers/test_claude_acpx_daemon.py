@@ -156,6 +156,45 @@ sys.exit(7)
 """
 
 
+# Script: reads prompt from the path passed via ``-f <path>`` and echoes
+# its content + the path itself as a session/update.  Lets the test
+# verify (a) the daemon switched to the tempfile route and (b) the
+# tempfile contained the expected payload.
+_FILE_PROMPT_SCRIPT = r"""
+import sys, json
+argv = sys.argv
+try:
+    idx = argv.index("-f")
+    path = argv[idx + 1]
+except (ValueError, IndexError):
+    path = ""
+content = ""
+if path:
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+sys.stdout.write(json.dumps({
+    "jsonrpc": "2.0",
+    "method": "session/update",
+    "params": {
+        "sessionId": "sess_x",
+        "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {
+                "type": "text",
+                "text": "PATH=" + path + " LEN=" + str(len(content)),
+            },
+        },
+    },
+}) + "\n")
+sys.stdout.flush()
+sys.stdout.write(json.dumps({
+    "jsonrpc": "2.0", "id": "1",
+    "result": {"stopReason": "end_turn"},
+}) + "\n")
+sys.stdout.flush()
+"""
+
+
 _STALL_SCRIPT = r"""
 import time
 # Sleep longer than the test timeout.
@@ -282,6 +321,78 @@ class TestSubmitTurnBasic:
             lines.append(raw.strip())
         msg = json.loads(lines[0])
         assert "(empty prompt)" in msg["params"]["update"]["content"]["text"]
+
+    @pytest.mark.asyncio
+    async def test_large_prompt_routes_via_tempfile(
+        self,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        """Prompts larger than ``_ARGV_PROMPT_THRESHOLD`` go via
+        ``-f <tempfile>`` instead of argv to avoid the kernel ARG_MAX
+        limit (observed 2026-05-02 ``OSError: [Errno 7] Argument list
+        too long`` on cold-mint of long WhatsApp group histories)."""
+        import os as _os
+
+        from qwenpaw.providers import claude_acpx_daemon as daemon_mod
+
+        # Lower the threshold so the test stays fast (4 KB instead of
+        # 64 KB) and force the file-path branch with a 5 KB payload.
+        monkeypatch.setattr(daemon_mod, "_ARGV_PROMPT_THRESHOLD", 4 * 1024)
+
+        daemon = AcpxDaemon(
+            auto_ensure_session=False,
+            cmd_builder=_python_cmd_builder(_FILE_PROMPT_SCRIPT),
+        )
+        big_text = "x" * (5 * 1024)
+        lines: list[str] = []
+        async for raw in daemon.submit_turn(
+            session_name="copaw-test",
+            prompt_blocks=[{"type": "text", "text": big_text}],
+            is_seed=True,
+        ):
+            lines.append(raw.strip())
+
+        msg = json.loads(lines[0])
+        text = msg["params"]["update"]["content"]["text"]
+        # Script reports "PATH=<tmpfile> LEN=<bytes>".
+        assert text.startswith("PATH="), text
+        path_part, len_part = text.split(" LEN=")
+        path = path_part[len("PATH="):]
+        assert path  # non-empty → -f was honored
+        assert int(len_part) == len(big_text)
+        # Tempfile cleaned up after the generator drained.
+        assert not _os.path.exists(path), (
+            f"tempfile {path} should be unlinked after submit_turn ends"
+        )
+
+    @pytest.mark.asyncio
+    async def test_short_prompt_keeps_argv_path(self, monkeypatch) -> None:
+        """A small prompt continues to ride argv — the file-path branch
+        only kicks in past the threshold."""
+        from qwenpaw.providers import claude_acpx_daemon as daemon_mod
+
+        # Threshold 1 MB, payload 16 bytes → argv path.
+        monkeypatch.setattr(
+            daemon_mod,
+            "_ARGV_PROMPT_THRESHOLD",
+            1024 * 1024,
+        )
+
+        daemon = AcpxDaemon(
+            auto_ensure_session=False,
+            cmd_builder=_python_cmd_builder(_ECHO_PROMPT_SCRIPT),
+        )
+        lines: list[str] = []
+        async for raw in daemon.submit_turn(
+            session_name="copaw-test",
+            prompt_blocks=[{"type": "text", "text": "PING"}],
+            is_seed=False,
+        ):
+            lines.append(raw.strip())
+        msg = json.loads(lines[0])
+        # Echo script reads argv[-1]; gets "PING" only when argv path used.
+        assert msg["params"]["update"]["content"]["text"] == "PING"
 
 
 # ----------------------------------------------------------------- #
@@ -817,3 +928,52 @@ class TestRegisterHandlersWiredOnGetOrSpawn:
         assert daemon.has_handler("fs/write_text_file")
         assert daemon.has_handler("terminal/create")
         assert daemon.has_handler("session/request_permission")
+
+
+class TestShutdownCancelsPendingDispatches:
+    """Codex 2026-04-28 review caught that ``_pending_dispatches``
+    strong-refs in-flight handler tasks but ``shutdown`` never
+    cancels them — a slow ``terminal/wait_for_exit`` would outlive
+    the subprocess whose stdin it was supposed to reply to and leak
+    the task on the process-singleton daemon forever."""
+
+    @pytest.mark.asyncio
+    async def test_shutdown_cancels_inflight_dispatch(self) -> None:
+        daemon = AcpxDaemon(auto_ensure_session=False)
+
+        gate = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def slow_handler(params: dict) -> dict:  # noqa: ARG001
+            try:
+                await gate.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            return {}
+
+        daemon.set_handler("fs/slow", slow_handler)
+
+        # Manually inject a dispatch task into _pending_dispatches —
+        # mirrors what _maybe_dispatch_request does when a Claude→
+        # client request arrives.
+        async def fake_dispatch() -> None:
+            await slow_handler({})
+
+        task = asyncio.create_task(fake_dispatch())
+        daemon._pending_dispatches.add(task)
+        task.add_done_callback(daemon._pending_dispatches.discard)
+
+        # Yield so the task starts and blocks on gate.
+        await asyncio.sleep(0)
+        assert task in daemon._pending_dispatches
+
+        await daemon.shutdown()
+
+        assert task.done()
+        assert task.cancelled() or cancelled.is_set(), (
+            "shutdown must cancel in-flight dispatches; otherwise "
+            "a slow handler leaks indefinitely"
+        )
+        # _pending_dispatches drained via done-callback.
+        assert task not in daemon._pending_dispatches
