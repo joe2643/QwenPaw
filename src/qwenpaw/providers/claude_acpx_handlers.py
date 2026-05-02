@@ -129,6 +129,25 @@ def _acpx_trust_mode_enabled() -> bool:
     return raw.strip().lower() in _TRUTHY
 
 
+_DEFAULT_TERMINAL_WAIT_SECONDS: float = 600.0
+
+
+def _resolve_terminal_wait_timeout() -> float:
+    """Read ``acpx_provider.terminal_wait_seconds`` from live config.
+
+    ``load_config`` is mtime-cached, so calling this on every
+    ``terminal/wait_for_exit`` is cheap.  Falls back to the module
+    default on any load error so a corrupt config doesn't pin the
+    handler forever.
+    """
+    try:
+        from qwenpaw.config import load_config
+
+        return float(load_config().acpx_provider.terminal_wait_seconds)
+    except Exception:  # noqa: BLE001
+        return _DEFAULT_TERMINAL_WAIT_SECONDS
+
+
 def _short_repr(params: dict[str, Any], cap: int = 200) -> str:
     """Compress params dict to a one-liner for the audit log.
 
@@ -471,9 +490,63 @@ class AcpxTerminalHandlers:
         return result
 
     async def wait_for_exit(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Block until the subprocess exits; return its exit status."""
+        """Block until the subprocess exits; return its exit status.
+
+        Honours ``acpx_provider.terminal_wait_seconds`` from config.
+        Default 600s; ``0`` means wait forever (legacy behaviour).
+        Without this cap a runaway Bash spawned by Claude Code in
+        bypassPermissions mode would pin the entire prompt subprocess
+        until the daemon-level turn timeout fires (observed
+        2026-05-02 — a tool stalled, the prompt hit 300s and was
+        killed only after the user's whole turn was lost)."""
         session = await self._require_terminal(params)
-        rc = await session.process.wait()
+        timeout = _resolve_terminal_wait_timeout()
+        try:
+            if timeout > 0:
+                rc = await asyncio.wait_for(
+                    session.process.wait(),
+                    timeout=timeout,
+                )
+            else:
+                rc = await session.process.wait()
+        except asyncio.TimeoutError:
+            # SIGTERM the process group; the next release call (or
+            # this exception bubbling up) is responsible for cleanup.
+            logger.warning(
+                "terminal/wait_for_exit: process %s exceeded %.0fs; "
+                "killing process group",
+                session.process.pid,
+                timeout,
+            )
+            try:
+                os.killpg(
+                    os.getpgid(session.process.pid),
+                    signal.SIGTERM,
+                )
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
+                rc = await asyncio.wait_for(
+                    session.process.wait(),
+                    timeout=5,
+                )
+            except asyncio.TimeoutError:
+                try:
+                    os.killpg(
+                        os.getpgid(session.process.pid),
+                        signal.SIGKILL,
+                    )
+                except (ProcessLookupError, PermissionError):
+                    pass
+                rc = await session.process.wait()
+            raise AcpxHandlerError(
+                code=_ERR_INTERNAL,
+                message=(
+                    f"terminal/wait_for_exit: process exceeded "
+                    f"{timeout:.0f}s timeout (acpx_provider."
+                    f"terminal_wait_seconds); killed"
+                ),
+            )
         # Make sure both drain tasks settle so subsequent .output
         # snapshots include the tail.
         for t in (session.drain_task, session.stderr_drain_task):

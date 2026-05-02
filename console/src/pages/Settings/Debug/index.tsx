@@ -13,7 +13,7 @@ import {
 import dayjs from "dayjs";
 import { PageHeader } from "@/components/PageHeader";
 import { useDebugLogs, backendLevelColor } from "./useDebugLogs";
-import { LogViewer } from "./components";
+import { LogViewer, AcpxProviderTuning } from "./components";
 import styles from "./index.module.less";
 
 const { Text } = Typography;
@@ -54,6 +54,7 @@ export default function DebugPage() {
             "View backend daemon log file to help diagnose issues. Logs refresh automatically while this page is open.",
           )}
         />
+        <AcpxProviderTuning />
         <Card
           title={t("debug.backend.title", "Backend logs")}
           extra={

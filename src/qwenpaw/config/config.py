@@ -122,6 +122,34 @@ class ACPConfig(BaseModel):
         return self
 
 
+class AcpxProviderConfig(BaseModel):
+    """Operational knobs for the claude-acpx provider.
+
+    Live-read on each turn by :class:`AcpxDaemon` and the terminal
+    handler — changing these via the Console UI takes effect on the
+    next turn without restarting the service.
+    """
+
+    turn_timeout_seconds: float = Field(
+        default=300.0,
+        ge=10.0,
+        le=3600.0,
+        description="Hard cap on a single acpx prompt subprocess. "
+        "If the subprocess produces no stdout for this long the daemon "
+        "kills it and surfaces an AcpxDaemonError. Default 300s; bump "
+        "for slow tool chains, lower for snappy human-cadence chats.",
+    )
+    terminal_wait_seconds: float = Field(
+        default=600.0,
+        ge=0.0,
+        le=7200.0,
+        description="Cap on terminal/wait_for_exit (a single Bash/"
+        "command spawned by Claude Code in bypassPermissions mode). "
+        "0 disables the timeout (legacy behaviour: wait forever — "
+        "matches the pre-2026-05-02 default). Default 600s.",
+    )
+
+
 # Agent ID validation: alphanumeric, hyphens, underscores.
 _AGENT_ID_PATTERN = re.compile(
     r"^[a-zA-Z0-9][a-zA-Z0-9_-]*[a-zA-Z0-9]$",
@@ -903,6 +931,25 @@ class AgentsRunningConfig(BaseModel):
         ),
     )
 
+    same_session_mode: Literal["parallel", "steer"] = Field(
+        default="parallel",
+        description=(
+            "How the Console UI handles a new message while the same chat is "
+            "already running. 'parallel' starts another bounded run; 'steer' "
+            "queues the message into the active run and inserts all pending "
+            "messages before the next model call."
+        ),
+    )
+
+    same_session_parallel_max_runs: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Maximum number of concurrent Console UI runs for the same chat "
+            "when same_session_mode is 'parallel'."
+        ),
+    )
+
     llm_retry_enabled: bool = Field(
         default=LLM_MAX_RETRIES > 0,
         description="Whether to auto-retry transient LLM API errors",
@@ -1167,6 +1214,52 @@ class SkillClawCaptureConfig(BaseModel):
             "(http mode) Optional bearer token if the SkillClaw "
             "server enforces auth.  Sent as ``Authorization: Bearer "
             "<key>``."
+        ),
+    )
+    inject_catalog: bool = Field(
+        default=True,
+        description=(
+            "Inject a SkillClaw/OpenClaw-style skill catalog in the "
+            "pre_reasoning hook and emit attribution from that catalog "
+            "instead of CoPaw's native workspace skill manifest."
+        ),
+    )
+    disable_native_skill_prompt: bool = Field(
+        default=True,
+        description=(
+            "When SkillClaw catalog injection is enabled, skip CoPaw's "
+            "native AgentScope skill prompt registration so the model sees "
+            "one skill catalog format."
+        ),
+    )
+    skills_dir: str = Field(
+        default="",
+        description=(
+            "SkillClaw skill root for catalog injection. Empty means read "
+            "~/.skillclaw/config.yaml skills.dir, then fall back to "
+            "~/.copaw/skill_pool."
+        ),
+    )
+    skills_public_root: str = Field(
+        default="",
+        description=(
+            "Optional public skill root to list in <location>. Empty matches "
+            "SkillClaw proxy behavior when skills.public_root is unset."
+        ),
+    )
+    max_skills_prompt_chars: int = Field(
+        default=30_000,
+        ge=1,
+        description=(
+            "Maximum full catalog size before falling back to compact "
+            "SkillClaw skill format."
+        ),
+    )
+    read_tool_name: str = Field(
+        default="read_file",
+        description=(
+            "Tool name used in SkillClaw's mandatory skill instruction. "
+            "CoPaw exposes read_file, while OpenClaw commonly exposes read."
         ),
     )
     session_id_prefix: str = Field(
@@ -1833,6 +1926,12 @@ class Config(BaseModel):
         description="Global media server configuration for signed URL serving",
     )
     acp: ACPConfig = Field(default_factory=ACPConfig)
+    acpx_provider: "AcpxProviderConfig" = Field(
+        default_factory=lambda: AcpxProviderConfig(),
+        description="Operational tuning for the claude-acpx provider "
+        "(per-turn timeout, terminal wait_for_exit timeout). Live-"
+        "reloaded on each turn — no service restart required.",
+    )
     show_tool_details: bool = True
     user_timezone: str = Field(
         default_factory=detect_system_timezone,

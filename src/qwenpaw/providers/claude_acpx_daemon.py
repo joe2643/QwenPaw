@@ -201,7 +201,11 @@ class AcpxDaemon:
         self,
         *,
         ttl_seconds: int = _DEFAULT_TTL_SECONDS,
-        turn_timeout_seconds: float = _DEFAULT_TURN_TIMEOUT_SECONDS,
+        # ``None`` (production default) means "live-read from config on
+        # each turn so the operator can tune via Console UI without a
+        # service restart".  A numeric override pins the value — tests
+        # use this to keep timeouts deterministic.
+        turn_timeout_seconds: float | None = None,
         # Test seam: override how we materialise the argv tuple.
         # Production uses :func:`acpx_translate.stateful_acpx_cmd`
         # with ttl + cwd parameters.
@@ -216,7 +220,7 @@ class AcpxDaemon:
         auto_ensure_session: bool = True,
     ) -> None:
         self._ttl_seconds = ttl_seconds
-        self._turn_timeout = turn_timeout_seconds
+        self._turn_timeout_override = turn_timeout_seconds
         self._cmd_builder = cmd_builder
         self._auto_ensure_session = auto_ensure_session
         # Method-name → handler.  Populated by
@@ -292,6 +296,25 @@ class AcpxDaemon:
         return method in self._handlers
 
     # ----- Core: submit_turn ------------------------------------- #
+
+    def _resolve_turn_timeout(self) -> float:
+        """Return the per-turn stdout-stall cap in seconds.
+
+        Constructor override (used by tests) wins.  Otherwise read
+        ``acpx_provider.turn_timeout_seconds`` from the live config —
+        :func:`qwenpaw.config.load_config` is mtime-cached, so calling
+        this on every turn is cheap.  Falls back to the module-level
+        default when config load fails (corrupt JSON, transient I/O
+        error) so a runtime hiccup doesn't pin the prompt forever.
+        """
+        if self._turn_timeout_override is not None:
+            return float(self._turn_timeout_override)
+        try:
+            from qwenpaw.config import load_config
+
+            return float(load_config().acpx_provider.turn_timeout_seconds)
+        except Exception:  # noqa: BLE001
+            return _DEFAULT_TURN_TIMEOUT_SECONDS
 
     async def submit_turn(
         self,
@@ -802,14 +825,17 @@ class AcpxDaemon:
         """
         assert proc.stdout is not None
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._turn_timeout
+        # Resolve once per turn — operator can change the knob via
+        # Console UI mid-session and the next turn picks it up.
+        turn_timeout = self._resolve_turn_timeout()
+        deadline = loop.time() + turn_timeout
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 claude_acpx_metrics.record_error()
                 raise AcpxDaemonError(
                     f"acpx subprocess (pid={proc.pid}) exceeded "
-                    f"{self._turn_timeout}s turn timeout",
+                    f"{turn_timeout}s turn timeout",
                 )
             try:
                 raw = await asyncio.wait_for(
@@ -820,7 +846,7 @@ class AcpxDaemon:
                 claude_acpx_metrics.record_error()
                 raise AcpxDaemonError(
                     f"acpx subprocess (pid={proc.pid}) stalled past "
-                    f"{self._turn_timeout}s",
+                    f"{turn_timeout}s",
                 ) from e
             if not raw:
                 # EOF.  Either acpx terminated cleanly (final

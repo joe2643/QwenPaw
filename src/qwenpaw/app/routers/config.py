@@ -638,6 +638,58 @@ async def put_user_timezone(
     return {"timezone": resolved}
 
 
+# ── ACPX Provider (claude-acpx) ──────────────────────────────────────
+
+
+@router.get(
+    "/acpx-provider",
+    summary="Get acpx provider operational tuning",
+    description=(
+        "Return the per-turn timeout and terminal wait_for_exit timeout "
+        "used by the claude-acpx provider. Live-applied: changes take "
+        "effect on the next turn without a service restart."
+    ),
+)
+async def get_acpx_provider_config() -> dict:
+    from qwenpaw.config.config import AcpxProviderConfig
+
+    config = load_config()
+    return config.acpx_provider.model_dump()
+
+
+@router.put(
+    "/acpx-provider",
+    summary="Update acpx provider operational tuning",
+)
+async def put_acpx_provider_config(
+    body: dict = Body(
+        ...,
+        description=(
+            "Body with optional 'turn_timeout_seconds' and "
+            "'terminal_wait_seconds' keys. Either or both may be "
+            "supplied; missing keys keep their current values."
+        ),
+    ),
+) -> dict:
+    from qwenpaw.config.config import AcpxProviderConfig
+
+    config = load_config()
+    current = config.acpx_provider.model_dump()
+    merged = {**current, **{
+        k: v for k, v in body.items()
+        if k in ("turn_timeout_seconds", "terminal_wait_seconds")
+    }}
+    try:
+        config.acpx_provider = AcpxProviderConfig(**merged)
+    except Exception as e:  # noqa: BLE001 — pydantic ValidationError
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid acpx_provider config: {e}",
+        ) from e
+    save_config(config)
+    return config.acpx_provider.model_dump()
+
+
 # ── Security / Tool Guard ────────────────────────────────────────────
 
 
