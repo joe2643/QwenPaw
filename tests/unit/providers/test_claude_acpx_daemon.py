@@ -234,14 +234,50 @@ class TestPayloadText:
         assert _payload_text([]) == "(empty prompt)"
         assert _payload_text([{"type": "text", "text": ""}]) == "(empty prompt)"
 
-    def test_image_block_collapses_to_placeholder(self) -> None:
+    def test_image_block_spills_to_path_and_emits_read_marker(self) -> None:
+        """ACP image blocks with inline base64 data spill to a per-process
+        cache file; the prompt carries an actionable instruction with
+        the path so Claude Code can Read it on demand. Previously this
+        flattened to ``[image attached]`` and the image was unreachable."""
+        import os as _os
+
         out = _payload_text([
             {"type": "text", "text": "describe"},
             {"type": "image", "mimeType": "image/png", "data": "AAAA"},
         ])
-        # Image folds via _content_text → "[image attached]"
         assert "describe" in out
-        assert "[image attached]" in out
+        # Marker contains an actionable Read instruction.
+        assert "use the Read tool" in out
+        # Path is real and points to a file in the spill cache.
+        # Marker shape: "[image attached at local path: <path> — ...]"
+        marker = out.split("describe")[-1]
+        assert "qwenpaw-acpx-images" in marker
+        # Pull the path out of the marker for existence check.
+        for tok in marker.split():
+            if tok.endswith(".png"):
+                assert _os.path.exists(tok), (
+                    f"spilled image {tok} should exist on disk"
+                )
+                break
+        else:
+            raise AssertionError(f"no .png path found in marker: {marker}")
+
+    def test_image_resource_link_uri_emits_read_marker(self) -> None:
+        """ACP resource_link blocks (used for url-style images after
+        ``content_to_acp_blocks``) emit the URI in a Read-instruction
+        marker rather than a flat placeholder."""
+        out = _payload_text([
+            {"type": "text", "text": "look at"},
+            {
+                "type": "resource_link",
+                "uri": "file:///home/joe/.copaw/media/abc.jpg",
+            },
+        ])
+        assert "look at" in out
+        # The file:// URI is unwrapped to a plain local path so Read
+        # can take it directly.
+        assert "/home/joe/.copaw/media/abc.jpg" in out
+        assert "Read tool" in out
 
 
 # ----------------------------------------------------------------- #

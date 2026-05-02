@@ -279,8 +279,34 @@ def _plain(content: Any) -> str:
             t = item.get("type")
             if t in ("text", "input_text", "output_text"):
                 parts.append(str(item.get("text", "")))
-            elif t in ("image_url", "image", "input_image"):
-                parts.append("[image attached]")
+            elif t in ("image_url", "input_image"):
+                # OpenAI-style: ``image_url={"url": "..."}``; the url
+                # is usually a ``file://`` after ``process_file_and_
+                # media_blocks_in_message`` has run. Surface it so
+                # Claude Code can Read on demand.
+                iu = item.get("image_url")
+                url = iu.get("url", "") if isinstance(iu, dict) else (
+                    str(iu) if iu else ""
+                )
+                if url and not url.startswith("data:"):
+                    parts.append(_image_attach_marker(url, label="image"))
+                else:
+                    # Inline data: too big to spill here; fall back to
+                    # placeholder and let the upstream message-pipeline
+                    # download it on the next turn.
+                    parts.append("[image attached]")
+            elif t == "image":
+                source = item.get("source") or {}
+                src_t = source.get("type")
+                if src_t == "url" and source.get("url"):
+                    parts.append(
+                        _image_attach_marker(
+                            str(source["url"]),
+                            label="image",
+                        ),
+                    )
+                else:
+                    parts.append("[image attached]")
         return "".join(parts)
     return ""
 
@@ -558,20 +584,130 @@ async def collect_as_chat_completion(
 
 
 def _content_text(block: Any) -> str:
-    """Extract plain text from an ACP ContentBlock.  Non-text
-    blocks (image/audio/resource) collapse to a placeholder so
-    downstream channels still see something.
+    """Extract plain text from an ACP ContentBlock. Non-text blocks
+    are converted into an actionable instruction so Claude Code can
+    decide to call its Read tool on the path/URL when the image
+    matters for the turn.
+
+    Why an instruction instead of a placeholder: ACP's stdin only
+    carries plain text (see :class:`ClaudeAcpxChatModel` v1
+    limitations), so multimodal payloads cannot ride the wire as
+    binary. CoPaw's :func:`process_file_and_media_blocks_in_message`
+    already downloads base64 and remote URLs to a local file and
+    rewrites the source to ``file:///...``, so by the time we get
+    here the path is usually present — we just need to surface it
+    in a form Claude will actually act on.
+
+    For ACP ``image`` blocks that still carry inline base64 (rare —
+    only when the agentscope-side media pipeline didn't get a
+    chance to run), spill the bytes to a per-process cache file
+    and emit that path.
     """
     if not isinstance(block, dict):
         return ""
     t = block.get("type")
     if t == "text":
         return str(block.get("text", ""))
-    if t in ("image", "audio"):
-        return f"[{t} attached]"
     if t in ("resource_link", "resource"):
-        return f"[resource {block.get('uri','')}]"
+        uri = str(block.get("uri", "") or "")
+        if not uri:
+            return f"[{t} (missing uri)]"
+        return _image_attach_marker(uri, label=t)
+    if t == "image":
+        # Prefer URI when present (resource_link-style images), then
+        # fall back to base64 → tempfile.
+        uri = str(block.get("uri", "") or "")
+        if uri:
+            return _image_attach_marker(uri, label="image")
+        data = block.get("data")
+        if isinstance(data, str) and data:
+            mime = str(block.get("mimeType", "image/png"))
+            path = _spill_base64_image(data, mime)
+            if path:
+                return _image_attach_marker(path, label="image")
+        return "[image attached]"
+    if t == "audio":
+        return "[audio attached]"
     return ""
+
+
+def _image_attach_marker(uri_or_path: str, *, label: str = "image") -> str:
+    """Render an actionable instruction for Claude Code to fetch the
+    media. ``file://`` URIs are normalized to plain paths so the
+    Read tool can take them directly; HTTP/HTTPS pass through and
+    Claude can use WebFetch (or Read if its current build resolves
+    URLs)."""
+    if uri_or_path.startswith("file://"):
+        from urllib.parse import urlparse, unquote
+
+        parsed = urlparse(uri_or_path)
+        local_path = unquote(parsed.path)
+        return (
+            f"[{label} attached at local path: {local_path} — "
+            f"use the Read tool on this path if you need to view it]"
+        )
+    return (
+        f"[{label} attached at: {uri_or_path} — "
+        f"use the Read tool (for local paths) or WebFetch "
+        f"(for http/https URLs) if you need to view it]"
+    )
+
+
+# Per-process cache for base64-image spills. Keyed by SHA-256 of the
+# raw bytes so the same image attached across multiple turns reuses a
+# single file on disk. Bounded LRU keeps the cache from growing
+# without limit on long-running daemons.
+_IMAGE_SPILL_CACHE: "dict[str, str]" = {}
+_IMAGE_SPILL_CACHE_CAP: int = 128
+
+
+def _spill_base64_image(b64_data: str, mime: str) -> str:
+    """Write a base64 image to a process-local cache file and return
+    the path, or empty string on failure. Idempotent per-content via
+    a SHA-256 dedup cache.
+    """
+    import base64
+    import hashlib
+    import tempfile
+    from pathlib import Path as _Path
+
+    try:
+        raw = base64.b64decode(b64_data, validate=False)
+    except Exception:  # noqa: BLE001
+        logger.warning("acpx _spill_base64_image: invalid base64; skipping")
+        return ""
+    digest = hashlib.sha256(raw).hexdigest()
+    cached = _IMAGE_SPILL_CACHE.get(digest)
+    if cached and _Path(cached).exists():
+        return cached
+
+    # Pick an extension from mime: ``image/png`` → ``.png``.
+    ext = ".bin"
+    if "/" in mime:
+        sub = mime.rsplit("/", 1)[-1]
+        if sub:
+            ext = "." + sub.lower()
+    cache_dir = _Path(tempfile.gettempdir()) / "qwenpaw-acpx-images"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    target = cache_dir / f"{digest[:16]}{ext}"
+    try:
+        target.write_bytes(raw)
+    except OSError as e:
+        logger.warning(
+            "acpx _spill_base64_image: write %s failed: %s",
+            target,
+            e,
+        )
+        return ""
+
+    # FIFO-trim the dedup cache. We don't unlink old files here — the
+    # cache_dir is /tmp on most systems and gets reaped at boot; a
+    # separate cleanup pass is tracked as v2 work.
+    if len(_IMAGE_SPILL_CACHE) >= _IMAGE_SPILL_CACHE_CAP:
+        oldest = next(iter(_IMAGE_SPILL_CACHE))
+        _IMAGE_SPILL_CACHE.pop(oldest, None)
+    _IMAGE_SPILL_CACHE[digest] = str(target)
+    return str(target)
 
 
 # =========================================================================
