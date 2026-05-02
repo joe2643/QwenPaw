@@ -381,6 +381,28 @@ _STOP_REASON_MAP = {
 }
 
 
+# Tool-call status values that mean "this call is over" — once we hit
+# one of these without ever seeing meaningful rawInput, flush a
+# fallback preview so the trail is not silently lost.
+_TERMINAL_TOOL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
+def _has_meaningful_args(args: Any) -> bool:
+    """Return True iff ``args`` is something we can show usefully.
+
+    ``rawInput`` arrives as ``{}`` on the initial ``tool_call``
+    notification (claude-agent-acp emits at ``content_block_start``
+    before ``input_json_delta`` events accumulate the actual JSON).
+    Treat empty dicts and missing values the same: not yet meaningful.
+    """
+    if args is None:
+        return False
+    if isinstance(args, dict):
+        return bool(args)
+    # Lists / strings / numbers — any truthy primitive value counts.
+    return bool(args)
+
+
 async def translate_acp_updates_to_chat_chunks(
     line_reader: AsyncIterator[str],
     state: StreamState,
@@ -486,33 +508,68 @@ async def translate_acp_updates_to_chat_chunks(
             # finish_reason. Bookkeep for ``tool_call_update``
             # status-lookup so a later ``failed`` event can be
             # narrated, even though we never dispatch.
+            #
+            # **Defer preview emission until rawInput is non-empty.**
+            # claude-agent-acp emits the first ``tool_call`` notification
+            # on ``content_block_start`` when ``chunk.input`` is still
+            # ``{}`` — the actual JSON args stream in via subsequent
+            # ``input_json_delta`` events and only land in a second
+            # notification (``tool_call_update`` with the full rawInput)
+            # when the assistant message replays.  Emitting at the
+            # first event would lock in ``Terminal({})`` previews.
             tool_call_id = update.get("toolCallId") or (
                 f"call_{uuid.uuid4().hex[:12]}"
             )
             name = update.get("title") or "tool"
             args = update.get("rawInput")
-            args_repr = (
-                json.dumps(args, ensure_ascii=False)
-                if args is not None else ""
-            )
             idx = len(state.tool_calls)
             state.tool_calls[idx] = {
                 "id": tool_call_id,
                 "name": name,
-                "args": args_repr,
+                "args": "",
+                "preview_emitted": False,
             }
             state.tool_call_id_to_index[tool_call_id] = idx
-            preview = f"\n[claude-code: {name}({args_repr})]\n"
-            yield _chat_chunk(state, {"reasoning_content": preview})
+            if _has_meaningful_args(args):
+                args_repr = json.dumps(args, ensure_ascii=False)
+                state.tool_calls[idx]["args"] = args_repr
+                state.tool_calls[idx]["preview_emitted"] = True
+                preview = f"\n[claude-code: {name}({args_repr})]\n"
+                yield _chat_chunk(state, {"reasoning_content": preview})
             continue
 
         if kind == "tool_call_update":
-            # Status-only events; we don't forward result content
-            # because Claude narrates results via subsequent
-            # agent_message_chunk events.  Bookkeeping only.
+            # Refines the matching ``tool_call`` once Claude has
+            # finished streaming the JSON args.  We use this both to
+            # (a) flush a deferred preview with the now-available
+            # rawInput and (b) log terminal-status transitions for
+            # debugging.
             tcid = update.get("toolCallId")
             if tcid and tcid in state.tool_call_id_to_index:
+                idx = state.tool_call_id_to_index[tcid]
+                tc = state.tool_calls[idx]
+                args = update.get("rawInput")
                 status = update.get("status")
+                if not tc["preview_emitted"]:
+                    if _has_meaningful_args(args):
+                        args_repr = json.dumps(args, ensure_ascii=False)
+                        tc["args"] = args_repr
+                        tc["preview_emitted"] = True
+                        preview = (
+                            f"\n[claude-code: {tc['name']}({args_repr})]\n"
+                        )
+                        yield _chat_chunk(
+                            state, {"reasoning_content": preview},
+                        )
+                    elif status in _TERMINAL_TOOL_STATUSES:
+                        # Tool reached a terminal state without ever
+                        # surfacing rawInput — emit a fallback so the
+                        # call is at least visible in the trail.
+                        tc["preview_emitted"] = True
+                        preview = f"\n[claude-code: {tc['name']}({{}})]\n"
+                        yield _chat_chunk(
+                            state, {"reasoning_content": preview},
+                        )
                 if status == "failed":
                     logger.info("acpx: tool_call %s failed", tcid)
             continue
@@ -575,15 +632,47 @@ async def collect_as_chat_completion(
                 reasoning_parts.append(text)
         elif kind == "tool_call":
             # Surface as reasoning_content; do NOT populate tool_calls.
+            # Same defer-on-empty-rawInput rule as the streaming path.
+            tcid = update.get("toolCallId") or (
+                f"call_{uuid.uuid4().hex[:12]}"
+            )
             name = update.get("title") or "tool"
             args = update.get("rawInput")
-            args_repr = (
-                json.dumps(args, ensure_ascii=False)
-                if args is not None else ""
-            )
-            reasoning_parts.append(
-                f"\n[claude-code: {name}({args_repr})]\n",
-            )
+            idx = len(state.tool_calls)
+            state.tool_calls[idx] = {
+                "id": tcid,
+                "name": name,
+                "args": "",
+                "preview_emitted": False,
+            }
+            state.tool_call_id_to_index[tcid] = idx
+            if _has_meaningful_args(args):
+                args_repr = json.dumps(args, ensure_ascii=False)
+                state.tool_calls[idx]["args"] = args_repr
+                state.tool_calls[idx]["preview_emitted"] = True
+                reasoning_parts.append(
+                    f"\n[claude-code: {name}({args_repr})]\n",
+                )
+        elif kind == "tool_call_update":
+            tcid = update.get("toolCallId")
+            if tcid and tcid in state.tool_call_id_to_index:
+                idx = state.tool_call_id_to_index[tcid]
+                tc = state.tool_calls[idx]
+                args = update.get("rawInput")
+                status = update.get("status")
+                if not tc["preview_emitted"]:
+                    if _has_meaningful_args(args):
+                        args_repr = json.dumps(args, ensure_ascii=False)
+                        tc["args"] = args_repr
+                        tc["preview_emitted"] = True
+                        reasoning_parts.append(
+                            f"\n[claude-code: {tc['name']}({args_repr})]\n",
+                        )
+                    elif status in _TERMINAL_TOOL_STATUSES:
+                        tc["preview_emitted"] = True
+                        reasoning_parts.append(
+                            f"\n[claude-code: {tc['name']}({{}})]\n",
+                        )
         # everything else: drop.
 
     message: dict[str, Any] = {

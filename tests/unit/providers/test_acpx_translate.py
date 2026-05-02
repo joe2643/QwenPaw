@@ -284,6 +284,100 @@ class TestTranslateAcpUpdates:
         assert "x.py" in body
 
     @pytest.mark.asyncio
+    async def test_tool_call_preview_deferred_until_rawinput_filled(
+        self,
+    ) -> None:
+        """claude-agent-acp emits the first ``tool_call`` notification
+        on ``content_block_start`` with ``rawInput={}`` — actual args
+        stream in via ``input_json_delta`` and only land in a later
+        ``tool_call_update`` with the full input.  Without a defer the
+        preview locks in ``Terminal({})`` and the user never sees what
+        Claude actually ran.  Regression test for the empty-args
+        complaint observed 2026-05-02 in WhatsApp output."""
+        lines = [
+            json.dumps(_msg_update(
+                "tool_call",
+                toolCallId="tc_42",
+                title="Terminal",
+                rawInput={},
+                status="pending",
+            )),
+            json.dumps(_msg_update(
+                "tool_call_update",
+                toolCallId="tc_42",
+                rawInput={"command": "ls -la /tmp"},
+                status="in_progress",
+            )),
+            json.dumps(_msg_update(
+                "tool_call_update",
+                toolCallId="tc_42",
+                status="completed",
+            )),
+            json.dumps(_final()),
+        ]
+        state = StreamState(model="claude-acpx")
+        chunks = []
+        async for c in translate_acp_updates_to_chat_chunks(
+            _line_iter(lines), state,
+        ):
+            chunks.append(c)
+
+        previews = [
+            c["choices"][0]["delta"].get("reasoning_content")
+            for c in chunks
+            if "reasoning_content" in c["choices"][0]["delta"]
+        ]
+        # Exactly one preview — emitted on the update that filled in
+        # rawInput, NOT on the initial empty tool_call notification.
+        assert len(previews) == 1, (
+            f"expected exactly one preview, got: {previews!r}"
+        )
+        assert "Terminal" in previews[0]
+        assert "ls -la /tmp" in previews[0]
+        assert "({})" not in previews[0], (
+            "empty-args preview leaked through despite later update"
+        )
+
+    @pytest.mark.asyncio
+    async def test_tool_call_preview_fallback_when_rawinput_never_arrives(
+        self,
+    ) -> None:
+        """If a tool call reaches a terminal status without ever
+        surfacing meaningful rawInput, flush a fallback preview so the
+        call is still visible in the trail (instead of vanishing
+        entirely)."""
+        lines = [
+            json.dumps(_msg_update(
+                "tool_call",
+                toolCallId="tc_silent",
+                title="MysteryTool",
+                rawInput={},
+                status="pending",
+            )),
+            json.dumps(_msg_update(
+                "tool_call_update",
+                toolCallId="tc_silent",
+                status="failed",
+            )),
+            json.dumps(_final()),
+        ]
+        state = StreamState(model="claude-acpx")
+        chunks = []
+        async for c in translate_acp_updates_to_chat_chunks(
+            _line_iter(lines), state,
+        ):
+            chunks.append(c)
+
+        previews = [
+            c["choices"][0]["delta"].get("reasoning_content")
+            for c in chunks
+            if "reasoning_content" in c["choices"][0]["delta"]
+        ]
+        assert len(previews) == 1
+        assert "MysteryTool" in previews[0]
+        assert "({})" in previews[0]
+
+    @pytest.mark.asyncio
     async def test_finish_reason_maps_from_stop_reason_only(self) -> None:
         """Even when a ``tool_call`` was observed, finish_reason must
         come from ``stopReason`` — not ``tool_calls`` (the work has
