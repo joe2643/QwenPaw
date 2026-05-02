@@ -448,3 +448,80 @@ def test_extra_content_original_preserved(monkeypatch) -> None:
     )
 
     assert msgs[0].content[0] == original_block
+
+
+# ----------------------------------------------------------------- #
+# Anthropic thinking-block signature handling
+# ----------------------------------------------------------------- #
+
+
+def test_format_anthropic_drops_unsigned_thinking_block() -> None:
+    """Anthropic API rejects replayed thinking blocks without
+    ``signature`` (returned via ``signature_delta`` during streaming).
+    A stream interrupted before that delta arrives leaves an empty
+    signature in the persisted block; a subsequent turn would 400 the
+    whole history. Drop unsigned blocks instead."""
+    msgs = [
+        Msg(
+            name="assistant",
+            role="assistant",
+            content=[
+                {"type": "thinking", "thinking": "let me think...", "signature": ""},
+                {"type": "text", "text": "Here is the answer."},
+            ],
+        ),
+    ]
+    out = model_factory._format_anthropic_messages(msgs)
+    # Only the text block survives; the unsigned thinking is gone.
+    assert len(out) == 1
+    types = [b.get("type") for b in out[0]["content"]]
+    assert "thinking" not in types
+    assert "text" in types
+
+
+def test_format_anthropic_keeps_signed_thinking_block() -> None:
+    """Signed thinking blocks must pass through with their signature
+    intact — that's how Anthropic ties the prior turn's reasoning to
+    the API's server-side validation."""
+    msgs = [
+        Msg(
+            name="assistant",
+            role="assistant",
+            content=[
+                {
+                    "type": "thinking",
+                    "thinking": "reasoning...",
+                    "signature": "ZXhhbXBsZS1zaWctdmFsdWU=",
+                },
+                {"type": "text", "text": "Done."},
+            ],
+        ),
+    ]
+    out = model_factory._format_anthropic_messages(msgs)
+    assert len(out) == 1
+    blocks = out[0]["content"]
+    thinking_blocks = [b for b in blocks if b.get("type") == "thinking"]
+    assert len(thinking_blocks) == 1
+    assert thinking_blocks[0]["signature"] == "ZXhhbXBsZS1zaWctdmFsdWU="
+    assert thinking_blocks[0]["thinking"] == "reasoning..."
+
+
+def test_format_anthropic_drops_thinking_with_missing_signature_field() -> None:
+    """A thinking block with NO ``signature`` key at all (e.g. legacy
+    saved data) must also be dropped — Anthropic API treats missing
+    and empty the same way (``Field required``)."""
+    msgs = [
+        Msg(
+            name="assistant",
+            role="assistant",
+            content=[
+                {"type": "thinking", "thinking": "old data"},
+                {"type": "text", "text": "Hello."},
+            ],
+        ),
+    ]
+    out = model_factory._format_anthropic_messages(msgs)
+    assert len(out) == 1
+    assert all(
+        b.get("type") != "thinking" for b in out[0]["content"]
+    )

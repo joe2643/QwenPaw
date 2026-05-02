@@ -414,7 +414,21 @@ def _format_anthropic_messages(  # pylint: disable=too-many-branches
 
         for block in msg.get_content_blocks():
             typ = block.get("type")
-            if typ in ["thinking", "text"]:
+            if typ == "thinking":
+                # Anthropic API requires a non-empty ``signature`` on every
+                # replayed thinking block — the server returns it via
+                # ``signature_delta`` during streaming, but if the stream
+                # was interrupted (cancellation, upstream timeout, acpx
+                # stall) before that delta arrived, the block we persisted
+                # has an empty signature. Replaying then fails with
+                # ``messages.<i>.content.<j>.thinking.signature: Field
+                # required`` (observed 2026-05-02 after an acpx stall
+                # poisoned a session's history). Drop unsigned thinking
+                # blocks rather than send them and 400 the whole turn.
+                if not block.get("signature"):
+                    continue
+                content_blocks.append({**block})
+            elif typ == "text":
                 content_blocks.append({**block})
 
             elif typ in ("image", "video"):
