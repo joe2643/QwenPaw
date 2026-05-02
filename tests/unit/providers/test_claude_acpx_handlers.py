@@ -716,3 +716,43 @@ class TestTrustModeBypass:
             assert _acpx_trust_mode_enabled(), (
                 f"value {truthy!r} should enable trust mode"
             )
+
+    def test_register_handlers_logs_startup_warning_when_bypass_on(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Codex round-6 finding: bypass should be visible at process
+        startup, not just per-call.  ``register_handlers`` must emit a
+        WARNING the first time it runs with the env flag set, then go
+        quiet on subsequent calls (idempotent re-registration is the
+        common path under daemon teardown/spin-up cycles)."""
+        import qwenpaw.providers.claude_acpx_handlers as handlers_mod
+        from qwenpaw.providers.claude_acpx_handlers import register_handlers
+
+        monkeypatch.setenv("COPAW_ACPX_SKIP_GUARDIAN", "1")
+        monkeypatch.setattr(handlers_mod, "_BYPASS_STARTUP_WARNED", False)
+
+        warning_log: list[str] = []
+
+        def _record(msg, *args, **kwargs):  # noqa: ARG001
+            warning_log.append(msg % args if args else msg)
+
+        monkeypatch.setattr(handlers_mod.logger, "warning", _record)
+
+        class _FakeDaemon:
+            def __init__(self) -> None:
+                self.handlers: dict[str, Any] = {}
+
+            def set_handler(self, method: str, fn) -> None:
+                self.handlers[method] = fn
+
+        register_handlers(_FakeDaemon())
+        assert any("ENABLED at startup" in m for m in warning_log), (
+            f"expected startup WARNING, got: {warning_log!r}"
+        )
+
+        warning_log.clear()
+        register_handlers(_FakeDaemon())
+        assert not any("ENABLED at startup" in m for m in warning_log), (
+            "startup WARNING must not re-fire on second registration"
+        )

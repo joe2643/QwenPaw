@@ -933,6 +933,10 @@ class TestEnsureSessionCache:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # Avoid the dev-machine case where the user has trust mode on
+        # globally — set-mode would shell out a second process here and
+        # break the spawn-count contract this test enforces.
+        monkeypatch.delenv("COPAW_ACPX_SKIP_GUARDIAN", raising=False)
         spawn_count = {"n": 0}
 
         class _OkProc:
@@ -973,6 +977,7 @@ class TestEnsureSessionCache:
         must collapse to a single subprocess — the lock + post-lock
         re-check is the safety net.  Without that, racing first turns
         for a fresh session would each shell out."""
+        monkeypatch.delenv("COPAW_ACPX_SKIP_GUARDIAN", raising=False)
         spawn_count = {"n": 0}
         gate = asyncio.Event()
 
@@ -1015,6 +1020,8 @@ class TestEnsureSessionCache:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        monkeypatch.delenv("COPAW_ACPX_SKIP_GUARDIAN", raising=False)
+
         async def fake_exec(*args: Any, **kwargs: Any):  # noqa: ARG001
             raise FileNotFoundError("npx missing")
 
@@ -1026,6 +1033,177 @@ class TestEnsureSessionCache:
         daemon = AcpxDaemon(auto_ensure_session=True)
         with pytest.raises(AcpxDaemonError, match="sessions ensure"):
             await daemon._ensure_session("copaw-x")
+
+
+class TestSessionBypassMode:
+    """``COPAW_ACPX_SKIP_GUARDIAN=1`` must trigger a per-session
+    ``acpx claude set-mode -s <name> bypassPermissions`` after the
+    initial ``sessions ensure``.  Without that, Claude Code's internal
+    permission gate refuses Write/Bash even though our ACP fs/terminal
+    handlers are wide open (observed 2026-05-02 — Claude self-reported
+    deny in WhatsApp reply text, no ``request_permission`` traffic in
+    logs)."""
+
+    @pytest.mark.asyncio
+    async def test_bypass_mode_pushed_when_env_enabled(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("COPAW_ACPX_SKIP_GUARDIAN", "1")
+        spawn_log: list[tuple[str, ...]] = []
+
+        class _OkProc:
+            returncode = 0
+            pid = 1234
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                return b"ok", b""
+
+            async def wait(self) -> int:
+                return 0
+
+        async def fake_exec(*args: Any, **kwargs: Any) -> _OkProc:  # noqa: ARG001
+            spawn_log.append(tuple(args))
+            return _OkProc()
+
+        monkeypatch.setattr(
+            "qwenpaw.providers.claude_acpx_daemon.asyncio."
+            "create_subprocess_exec",
+            fake_exec,
+        )
+        daemon = AcpxDaemon(auto_ensure_session=True)
+        await daemon._ensure_session("copaw-trust")
+
+        # First spawn = sessions ensure, second = set-mode bypass.
+        assert len(spawn_log) == 2
+        assert "ensure" in spawn_log[0]
+        assert "set-mode" in spawn_log[1]
+        assert "bypassPermissions" in spawn_log[1]
+        assert "copaw-trust" in daemon._bypass_set_sessions
+
+    @pytest.mark.asyncio
+    async def test_bypass_mode_skipped_when_env_disabled(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("COPAW_ACPX_SKIP_GUARDIAN", raising=False)
+        spawn_log: list[tuple[str, ...]] = []
+
+        class _OkProc:
+            returncode = 0
+            pid = 1234
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                return b"ok", b""
+
+            async def wait(self) -> int:
+                return 0
+
+        async def fake_exec(*args: Any, **kwargs: Any) -> _OkProc:  # noqa: ARG001
+            spawn_log.append(tuple(args))
+            return _OkProc()
+
+        monkeypatch.setattr(
+            "qwenpaw.providers.claude_acpx_daemon.asyncio."
+            "create_subprocess_exec",
+            fake_exec,
+        )
+        daemon = AcpxDaemon(auto_ensure_session=True)
+        await daemon._ensure_session("copaw-no-trust")
+
+        assert len(spawn_log) == 1
+        assert "ensure" in spawn_log[0]
+        assert daemon._bypass_set_sessions == set()
+
+    @pytest.mark.asyncio
+    async def test_bypass_mode_cached_per_session(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Repeated ``_ensure_session`` calls must NOT re-shell out for
+        set-mode after the first one — the per-process cache is the
+        whole point of avoiding a fork/exec on every turn."""
+        monkeypatch.setenv("COPAW_ACPX_SKIP_GUARDIAN", "1")
+        spawn_log: list[tuple[str, ...]] = []
+
+        class _OkProc:
+            returncode = 0
+            pid = 1234
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                return b"ok", b""
+
+            async def wait(self) -> int:
+                return 0
+
+        async def fake_exec(*args: Any, **kwargs: Any) -> _OkProc:  # noqa: ARG001
+            spawn_log.append(tuple(args))
+            return _OkProc()
+
+        monkeypatch.setattr(
+            "qwenpaw.providers.claude_acpx_daemon.asyncio."
+            "create_subprocess_exec",
+            fake_exec,
+        )
+        daemon = AcpxDaemon(auto_ensure_session=True)
+        await daemon._ensure_session("copaw-warm")
+        await daemon._ensure_session("copaw-warm")
+        await daemon._ensure_session("copaw-warm")
+
+        # ensure once + set-mode once, regardless of repeat calls.
+        assert len(spawn_log) == 2
+
+    @pytest.mark.asyncio
+    async def test_bypass_mode_failure_does_not_block_turn(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A non-zero set-mode rc must log a WARNING but NOT raise —
+        the turn should still go through (even if Claude Code may
+        self-deny tools).  Wedging the turn on a transient acpx
+        hiccup would be a strict regression vs. the pre-fix behavior."""
+        monkeypatch.setenv("COPAW_ACPX_SKIP_GUARDIAN", "1")
+        call_log: list[str] = []
+
+        class _OkProc:
+            returncode = 0
+            pid = 1234
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                return b"ok", b""
+
+            async def wait(self) -> int:
+                return 0
+
+        class _FailProc:
+            returncode = 1
+            pid = 5678
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                return b"", b"set-mode unsupported"
+
+            async def wait(self) -> int:
+                return 1
+
+        async def fake_exec(*args: Any, **kwargs: Any):  # noqa: ARG001
+            if "set-mode" in args:
+                call_log.append("set-mode")
+                return _FailProc()
+            call_log.append("ensure")
+            return _OkProc()
+
+        monkeypatch.setattr(
+            "qwenpaw.providers.claude_acpx_daemon.asyncio."
+            "create_subprocess_exec",
+            fake_exec,
+        )
+        daemon = AcpxDaemon(auto_ensure_session=True)
+        # Should NOT raise.
+        await daemon._ensure_session("copaw-flaky")
+
+        assert call_log == ["ensure", "set-mode"]
+        # Failure means we did NOT cache — next turn will retry.
+        assert daemon._bypass_set_sessions == set()
 
 
 class TestUnknownMethodDispatch:

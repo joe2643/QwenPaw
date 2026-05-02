@@ -120,6 +120,46 @@ from qwenpaw.providers.acpx_translate import (
 
 
 # ----------------------------------------------------------------- #
+# Permission bypass (``COPAW_ACPX_SKIP_GUARDIAN``)
+# ----------------------------------------------------------------- #
+#
+# When the user has opted in to ``COPAW_ACPX_SKIP_GUARDIAN=1``, two
+# layers need to be neutralised:
+#
+# 1. **CoPaw's tool guard** (``claude_acpx_handlers``) — the existing
+#    ``_acpx_trust_mode_enabled`` check short-circuits ``fs/*`` and
+#    ``terminal/*`` ACP requests before they hit the guardian.
+#
+# 2. **Claude Code's *internal* permission flow** (this file).  Even
+#    with our handlers wide open, the Claude Code SDK refuses Write/
+#    Bash by default and never even sends ``session/request_permission``
+#    over ACP — the deny happens entirely inside the SDK.  Symptom:
+#    Claude narrates "Write/Bash got denied" in its reply text but no
+#    ``request_permission``/``fs/write_text_file``/``terminal/create``
+#    traffic appears in our logs.  The SDK gates this on the session's
+#    permission *mode* — ``default`` asks (and the ask is suppressed
+#    by claude-agent-acp for some tool families), ``bypassPermissions``
+#    skips entirely.
+#
+# Fix: after ``acpx claude sessions ensure`` succeeds, run
+# ``acpx claude set-mode -s <name> bypassPermissions`` so the on-disk
+# session is in bypassPermissions mode for every subsequent prompt.
+# The mode persists across queue-owner restarts because ``setMode`` in
+# acpx defaults to ``sessionMode="persistent"``.
+#
+# Same gate as the handler-side trust mode so a single env var controls
+# the whole bypass surface.
+_ACPX_TRUST_ENV_VAR: str = "COPAW_ACPX_SKIP_GUARDIAN"
+_ACPX_BYPASS_MODE_ID: str = "bypassPermissions"
+_TRUTHY = frozenset({"1", "true", "yes", "on", "y", "t"})
+
+
+def _acpx_trust_mode_enabled() -> bool:
+    raw = os.environ.get(_ACPX_TRUST_ENV_VAR, "")
+    return raw.strip().lower() in _TRUTHY
+
+
+# ----------------------------------------------------------------- #
 # Errors
 # ----------------------------------------------------------------- #
 
@@ -191,6 +231,13 @@ class AcpxDaemon:
         # smoke test 2026-04-27.  Per-process cache; a daemon restart
         # re-runs ensure (idempotent on disk).
         self._ensured_sessions: set[str] = set()
+        # Sessions for which we've already pushed
+        # ``set-mode bypassPermissions`` this process — only populated
+        # when ``COPAW_ACPX_SKIP_GUARDIAN`` is truthy.  acpx persists
+        # the mode on disk so re-running on a daemon restart is
+        # cheap-but-redundant; the per-process cache avoids the round
+        # trip on the warm path.
+        self._bypass_set_sessions: set[str] = set()
         self._ensure_lock = asyncio.Lock()
         self._closed = False
         # Strong refs for fire-and-forget handler-dispatch tasks.
@@ -634,6 +681,84 @@ class AcpxDaemon:
                     f"failed (rc={proc.returncode}): {err_msg[:500]}",
                 )
             self._ensured_sessions.add(session_name)
+        # Outside the ensure lock — set-mode talks to a different
+        # subprocess and uses its own lock-free per-process cache.
+        if _acpx_trust_mode_enabled():
+            await self._set_session_bypass_mode(session_name)
+
+    async def _set_session_bypass_mode(self, session_name: str) -> None:
+        """Push ``acpx claude set-mode -s <name> bypassPermissions``.
+
+        Idempotent on disk (acpx overwrites any prior mode) and cached
+        per process so we don't shell out on every turn.  Failure is
+        logged at WARNING but does NOT block the prompt — the worst
+        case is that Claude Code self-denies a tool call, which is
+        the *current* behaviour without this fix.  We don't want to
+        wedge a turn on a transient acpx hiccup just because the
+        bypass flip didn't take.
+        """
+        if session_name in self._bypass_set_sessions:
+            return
+        version = acpx_translate._PINNED_ACPX_VERSION
+        cmd = (
+            "npx",
+            f"acpx@{version}",
+            "claude",
+            "set-mode",
+            "-s",
+            session_name,
+            _ACPX_BYPASS_MODE_ID,
+        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+        except FileNotFoundError as e:
+            logger.warning(
+                "acpx set-mode bypassPermissions: spawn failed for "
+                "session %s: %s",
+                session_name,
+                e,
+            )
+            return
+        try:
+            _, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=30,
+            )
+        except asyncio.TimeoutError:
+            _kill_proc_tree(proc)
+            await proc.wait()
+            logger.warning(
+                "acpx set-mode bypassPermissions: timed out for "
+                "session %s",
+                session_name,
+            )
+            return
+        if proc.returncode != 0:
+            err_msg = (stderr or b"").decode("utf-8", errors="replace")
+            logger.warning(
+                "acpx set-mode bypassPermissions: rc=%s for session "
+                "%s: %s",
+                proc.returncode,
+                session_name,
+                err_msg[:500],
+            )
+            return
+        # Mark cached so we don't re-shell on every turn.  Log at
+        # WARNING (not INFO) so the bypass shows up in any prod scan
+        # for "elevated permissions in effect" — codex round-6 finding.
+        self._bypass_set_sessions.add(session_name)
+        logger.warning(
+            "acpx set-mode bypassPermissions: ACTIVE for session %s "
+            "(COPAW_ACPX_SKIP_GUARDIAN=1) — Claude Code internal "
+            "permission gate disabled for this session",
+            session_name,
+        )
 
     async def _spawn(
         self,

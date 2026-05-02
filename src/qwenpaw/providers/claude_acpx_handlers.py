@@ -625,6 +625,9 @@ class AcpxPermissionHandler:
 # ----------------------------------------------------------------- #
 
 
+_BYPASS_STARTUP_WARNED: bool = False
+
+
 def register_handlers(daemon: "AcpxDaemon") -> None:
     """Wire handler instances into ``daemon`` so ACP requests from
     Claude get dispatched correctly.
@@ -646,6 +649,21 @@ def register_handlers(daemon: "AcpxDaemon") -> None:
         "session/request_permission",
         permission.request_permission,
     )
+    # Codex round-6 finding: surface the bypass at startup, not just
+    # per-call.  One-time module-scoped flag so repeated handler
+    # re-registration (test fixtures, daemon restarts) does not flood
+    # the log.
+    global _BYPASS_STARTUP_WARNED
+    if _acpx_trust_mode_enabled() and not _BYPASS_STARTUP_WARNED:
+        logger.warning(
+            "acpx trust-mode bypass ENABLED at startup "
+            "(COPAW_ACPX_SKIP_GUARDIAN=1): CoPaw ToolGuard short-"
+            "circuited for fs/* and terminal/* AND Claude Code "
+            "internal permission gate disabled via ACP set-mode "
+            "bypassPermissions on every session.  USE ONLY in "
+            "trusted single-user setups.",
+        )
+        _BYPASS_STARTUP_WARNED = True
 
 
 # ----------------------------------------------------------------- #
