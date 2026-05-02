@@ -98,6 +98,54 @@ class AcpxHandlerError(_HandlerError):
 
 
 # ----------------------------------------------------------------- #
+# Trust-mode bypass
+# ----------------------------------------------------------------- #
+#
+# **DANGEROUS — use only in trusted single-user setups.** When the
+# env var ``COPAW_ACPX_SKIP_GUARDIAN`` is truthy (``1``, ``true``,
+# ``yes``, ``on``, case-insensitive), the guardian engine is
+# bypassed for every ``fs/*`` and ``terminal/*`` ACP request from
+# Claude Code. This trades the file_path / shell_evasion / rule
+# guardian protections for ergonomic flow when Claude Code wants
+# to iterate on real local work (writing scratch files under
+# ``/tmp``, running helper scripts, etc.).
+#
+# Each bypass logs a WARNING with the tool name and short params so
+# the audit trail still records what got through.
+
+_ACPX_TRUST_ENV_VAR: str = "COPAW_ACPX_SKIP_GUARDIAN"
+_TRUTHY = frozenset({"1", "true", "yes", "on", "y", "t"})
+
+
+def _acpx_trust_mode_enabled() -> bool:
+    """Return True if the trust-mode bypass is active.
+
+    Read on every call rather than cached so the operator can flip
+    the flag without restarting the service (fish: ``set -gx
+    COPAW_ACPX_SKIP_GUARDIAN 1`` in the qwenpaw shell, then send a
+    SIGHUP-equivalent or just toggle through the next turn).
+    """
+    raw = os.environ.get(_ACPX_TRUST_ENV_VAR, "")
+    return raw.strip().lower() in _TRUTHY
+
+
+def _short_repr(params: dict[str, Any], cap: int = 200) -> str:
+    """Compress params dict to a one-liner for the audit log.
+
+    Long ``content`` payloads (file writes) or long ``args`` lists
+    (shell commands) get truncated mid-value rather than being
+    spelled out in full.
+    """
+    try:
+        text = repr(params)
+    except Exception:  # noqa: BLE001
+        return "<unrepr>"
+    if len(text) <= cap:
+        return text
+    return text[:cap] + "...(truncated)"
+
+
+# ----------------------------------------------------------------- #
 # Filesystem handlers
 # ----------------------------------------------------------------- #
 
@@ -208,7 +256,20 @@ class AcpxFsHandlers:
         Imports inside the function so a test that doesn't care about
         guarding can supply a no-op factory and avoid the engine's
         config / filesystem touch.
+
+        Honours :func:`_acpx_trust_mode_enabled` — when the trust-mode
+        env var is set, the guardian is bypassed entirely. Use ONLY
+        in trusted single-user setups; this gives Claude Code
+        unrestricted local fs/terminal access.
         """
+        if _acpx_trust_mode_enabled():
+            logger.warning(
+                "acpx trust-mode bypass: %s allowed without guardian "
+                "check (params=%s)",
+                tool_name,
+                _short_repr(tool_params),
+            )
+            return
         if self._guard_engine_factory is not None:
             engine = self._guard_engine_factory()
         else:
@@ -478,6 +539,14 @@ class AcpxTerminalHandlers:
         tool_name: str,
         tool_params: dict[str, Any],
     ) -> None:
+        if _acpx_trust_mode_enabled():
+            logger.warning(
+                "acpx trust-mode bypass: %s allowed without guardian "
+                "check (params=%s)",
+                tool_name,
+                _short_repr(tool_params),
+            )
+            return
         if self._guard_engine_factory is not None:
             engine = self._guard_engine_factory()
         else:
@@ -631,7 +700,8 @@ def _slice_lines(
 # CoPaw process holds and that a compromised or curious tool turn
 # could otherwise exfiltrate via stdout.  ACP-specified env entries
 # (per the env_raw list) are layered on top and can override anything
-# in this baseline.
+# in this baseline — except for the high-leverage names called out in
+# :data:`_ENV_DENYLIST` below.
 _ENV_ALLOWLIST: tuple[str, ...] = (
     "PATH",
     "HOME",
@@ -647,6 +717,49 @@ _ENV_ALLOWLIST: tuple[str, ...] = (
 )
 
 
+# Deny-list of ACP-supplied env names that would let the model hijack
+# an otherwise-allowed command's semantics.  The terminal-create
+# guardian inspects ``command``/``cwd`` only; an ACP entry like
+# ``BASH_ENV=/tmp/x.sh`` or ``NODE_OPTIONS=--require=/tmp/x.js`` would
+# slip code execution past that check.  Same goes for the dynamic-
+# linker hooks (``LD_PRELOAD``, ``LD_LIBRARY_PATH``, ``DYLD_*``) which
+# can override library resolution to inject behavior, and the various
+# language-runtime ``*OPT`` / ``*PATH`` knobs that auto-execute or
+# import on startup.  We log + drop these rather than raising so a
+# benign pass-through with one bad entry still runs.
+_ENV_DENYLIST: frozenset[str] = frozenset(
+    {
+        # POSIX shells.
+        "BASH_ENV",
+        "ENV",
+        "PROMPT_COMMAND",
+        # Dynamic linker overrides.
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "LD_AUDIT",
+        # macOS dynamic linker overrides.
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "DYLD_FRAMEWORK_PATH",
+        "DYLD_FALLBACK_LIBRARY_PATH",
+        "DYLD_FALLBACK_FRAMEWORK_PATH",
+        # Language runtime auto-execute / import hooks.
+        "NODE_OPTIONS",
+        "PYTHONSTARTUP",
+        "PYTHONPATH",
+        "RUBYOPT",
+        "RUBYLIB",
+        "PERL5OPT",
+        "PERL5LIB",
+        # Git config redirection (lets the model rewrite hooks/aliases).
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_COUNT",
+        "GIT_SSH_COMMAND",
+    },
+)
+
+
 def _kill_terminal_pg(
     proc: asyncio.subprocess.Process,
     sig: signal.Signals,
@@ -657,8 +770,7 @@ def _kill_terminal_pg(
     process is a session leader and ``killpg(pgid, sig)`` reaps both
     the leader and any forked workers in one call.  Falls back to a
     per-pid signal if the pgid is unreadable (process already gone or
-    permission lost), and silently swallows ``ProcessLookupError`` so
-    a tear-down race doesn't error the release path.
+    permission lost), or if ``killpg`` itself races with reap.
     """
     if proc.pid is None:
         return
@@ -673,7 +785,14 @@ def _kill_terminal_pg(
     try:
         os.killpg(pgid, sig)
     except ProcessLookupError:
-        pass
+        # Group leader was reaped between getpgid and killpg.  Try a
+        # per-pid signal as a best-effort fallback in case some grand-
+        # child outlived the leader; ProcessLookupError there means
+        # everything is already gone, which is the desired end state.
+        try:
+            proc.send_signal(sig)
+        except ProcessLookupError:
+            pass
 
 
 def _build_env(env_raw: list[Any]) -> dict[str, str]:
@@ -684,7 +803,11 @@ def _build_env(env_raw: list[Any]) -> dict[str, str]:
     specified entries.  We deliberately do NOT inherit the full
     parent env — this process holds API keys (OPENAI_API_KEY,
     ANTHROPIC_API_KEY) that a tool-spawned subprocess has no business
-    seeing.  ACP entries always win over the allowlist baseline.
+    seeing.  ACP entries always win over the allowlist baseline,
+    except for high-leverage names in :data:`_ENV_DENYLIST` (shell
+    init hooks, dynamic-linker overrides, language-runtime auto-
+    execute knobs) — those are dropped so the model can't hijack an
+    otherwise-allowed command's semantics through env injection.
     """
     env_map: dict[str, str] = {}
     for key in _ENV_ALLOWLIST:
@@ -698,8 +821,16 @@ def _build_env(env_raw: list[Any]) -> dict[str, str]:
             continue
         name = item.get("name")
         value = item.get("value")
-        if isinstance(name, str) and isinstance(value, str):
-            env_map[name] = value
+        if not (isinstance(name, str) and isinstance(value, str)):
+            continue
+        if name in _ENV_DENYLIST:
+            logger.warning(
+                "acpx terminal/create: dropping ACP-supplied env %r "
+                "(in deny-list — execution-hijack hook)",
+                name,
+            )
+            continue
+        env_map[name] = value
     return env_map
 
 

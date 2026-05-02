@@ -641,3 +641,78 @@ class TestHandlerError:
         e = AcpxHandlerError(code=-32001, message="denied")
         assert e.code == -32001
         assert "denied" in str(e)
+
+
+# ----------------------------------------------------------------- #
+# Trust-mode bypass (COPAW_ACPX_SKIP_GUARDIAN)
+# ----------------------------------------------------------------- #
+
+
+class TestTrustModeBypass:
+    """When ``COPAW_ACPX_SKIP_GUARDIAN`` is set, fs/* and terminal/*
+    requests skip the guardian engine entirely and log a WARNING."""
+
+    @pytest.mark.asyncio
+    async def test_trust_mode_bypasses_fs_write_guardian(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        from qwenpaw.providers.claude_acpx_handlers import (
+            AcpxFsHandlers,
+        )
+
+        # Guardian would normally deny ``write_text_file``.
+        engine = _FakeGuardEngine(deny_tools={"write_text_file"})
+        fs = AcpxFsHandlers(guard_engine_factory=_factory(engine))
+
+        # Without trust mode → denied.
+        target = tmp_path / "blocked.txt"
+        with pytest.raises(AcpxHandlerError):
+            await fs.write_text_file({
+                "sessionId": "s",
+                "path": str(target),
+                "content": "x",
+            })
+        assert not target.exists()
+
+        # With trust mode → allowed (engine NOT consulted).
+        monkeypatch.setenv("COPAW_ACPX_SKIP_GUARDIAN", "1")
+        bypassed = tmp_path / "allowed.txt"
+        await fs.write_text_file({
+            "sessionId": "s",
+            "path": str(bypassed),
+            "content": "y",
+        })
+        assert bypassed.read_text() == "y"
+        # Engine wasn't called for the bypass turn (only the first
+        # call was recorded; the second one was bypassed entirely).
+        assert len(engine.calls) == 1
+
+    def test_trust_mode_disabled_for_falsy_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from qwenpaw.providers.claude_acpx_handlers import (
+            _acpx_trust_mode_enabled,
+        )
+
+        for falsy in ("", "0", "false", "no", "off", "  "):
+            monkeypatch.setenv("COPAW_ACPX_SKIP_GUARDIAN", falsy)
+            assert not _acpx_trust_mode_enabled(), (
+                f"value {falsy!r} should NOT enable trust mode"
+            )
+
+    def test_trust_mode_enabled_for_truthy_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from qwenpaw.providers.claude_acpx_handlers import (
+            _acpx_trust_mode_enabled,
+        )
+
+        for truthy in ("1", "true", "TRUE", "yes", "on", "y", "t"):
+            monkeypatch.setenv("COPAW_ACPX_SKIP_GUARDIAN", truthy)
+            assert _acpx_trust_mode_enabled(), (
+                f"value {truthy!r} should enable trust mode"
+            )
