@@ -21,6 +21,11 @@ class TokenUsageStats(BaseModel):
 
     prompt_tokens: int = Field(0, ge=0)
     completion_tokens: int = Field(0, ge=0)
+    # Anthropic prompt-cache fields.  ``prompt_tokens`` excludes cached
+    # input — cache reads are tracked here separately so the panel can
+    # show savings without double-counting.
+    cache_creation_tokens: int = Field(0, ge=0)
+    cache_read_tokens: int = Field(0, ge=0)
     call_count: int = Field(0, ge=0)
 
 
@@ -44,6 +49,8 @@ class TokenUsageSummary(BaseModel):
 
     total_prompt_tokens: int = Field(0, ge=0)
     total_completion_tokens: int = Field(0, ge=0)
+    total_cache_creation_tokens: int = Field(0, ge=0)
+    total_cache_read_tokens: int = Field(0, ge=0)
     total_calls: int = Field(0, ge=0)
     by_model: dict[str, TokenUsageByModel] = Field(
         default_factory=dict,
@@ -105,6 +112,8 @@ class TokenUsageManager:
         prompt_tokens: int,
         completion_tokens: int,
         at_date: Optional[date] = None,
+        cache_creation_tokens: int = 0,
+        cache_read_tokens: int = 0,
     ) -> None:
         """Record token usage for a given provider, model and date.
 
@@ -117,6 +126,8 @@ class TokenUsageManager:
             prompt_tokens: Number of input/prompt tokens.
             completion_tokens: Number of output/completion tokens.
             at_date: Date to record under. Defaults to today (local).
+            cache_creation_tokens: Anthropic prompt-cache write count.
+            cache_read_tokens: Anthropic prompt-cache hit count.
         """
         from datetime import datetime, timezone
 
@@ -132,6 +143,8 @@ class TokenUsageManager:
                 now_iso=datetime.now(tz=timezone.utc).isoformat(
                     timespec="seconds",
                 ),
+                cache_creation_tokens=cache_creation_tokens,
+                cache_read_tokens=cache_read_tokens,
             ),
         )
 
@@ -164,6 +177,10 @@ class TokenUsageManager:
                         model=rec_model,
                         prompt_tokens=entry.get("prompt_tokens", 0),
                         completion_tokens=entry.get("completion_tokens", 0),
+                        cache_creation_tokens=entry.get(
+                            "cache_creation_tokens", 0,
+                        ),
+                        cache_read_tokens=entry.get("cache_read_tokens", 0),
                         call_count=entry.get("call_count", 0),
                     ),
                 )
@@ -206,17 +223,32 @@ class TokenUsageManager:
 
         total_prompt = 0
         total_completion = 0
+        total_cache_creation = 0
+        total_cache_read = 0
         total_calls = 0
         by_model_raw: dict[str, dict] = {}
         by_provider_raw: dict[str, dict] = {}
         by_date_raw: dict[str, dict] = {}
 
+        def _empty_bucket() -> dict[str, int]:
+            return {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "cache_creation_tokens": 0,
+                "cache_read_tokens": 0,
+                "call_count": 0,
+            }
+
         for r in records:
             pt = r.prompt_tokens
             ct = r.completion_tokens
+            cct = r.cache_creation_tokens
+            crt = r.cache_read_tokens
             calls = r.call_count
             total_prompt += pt
             total_completion += ct
+            total_cache_creation += cct
+            total_cache_read += crt
             total_calls += calls
 
             model = r.model
@@ -224,37 +256,33 @@ class TokenUsageManager:
             composite = f"{prov}:{model}" if prov else model
             bm = by_model_raw.setdefault(
                 composite,
-                {
-                    "provider_id": prov,
-                    "model": model,
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "call_count": 0,
-                },
+                {"provider_id": prov, "model": model, **_empty_bucket()},
             )
             bm["prompt_tokens"] += pt
             bm["completion_tokens"] += ct
+            bm["cache_creation_tokens"] += cct
+            bm["cache_read_tokens"] += crt
             bm["call_count"] += calls
 
-            bp = by_provider_raw.setdefault(
-                prov,
-                {"prompt_tokens": 0, "completion_tokens": 0, "call_count": 0},
-            )
+            bp = by_provider_raw.setdefault(prov, _empty_bucket())
             bp["prompt_tokens"] += pt
             bp["completion_tokens"] += ct
+            bp["cache_creation_tokens"] += cct
+            bp["cache_read_tokens"] += crt
             bp["call_count"] += calls
 
-            bd = by_date_raw.setdefault(
-                r.date,
-                {"prompt_tokens": 0, "completion_tokens": 0, "call_count": 0},
-            )
+            bd = by_date_raw.setdefault(r.date, _empty_bucket())
             bd["prompt_tokens"] += pt
             bd["completion_tokens"] += ct
+            bd["cache_creation_tokens"] += cct
+            bd["cache_read_tokens"] += crt
             bd["call_count"] += calls
 
         return TokenUsageSummary(
             total_prompt_tokens=total_prompt,
             total_completion_tokens=total_completion,
+            total_cache_creation_tokens=total_cache_creation,
+            total_cache_read_tokens=total_cache_read,
             total_calls=total_calls,
             by_model={
                 k: TokenUsageByModel.model_validate(v)

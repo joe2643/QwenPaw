@@ -104,6 +104,18 @@ function TokenUsagePage() {
         render: (n: number) => formatCompact(n),
       },
       {
+        title: t("tokenUsage.cacheReadTokens"),
+        dataIndex: "cache_read_tokens",
+        key: "cache_read_tokens",
+        render: (n: number | undefined) => formatCompact(n ?? 0),
+      },
+      {
+        title: t("tokenUsage.cacheCreationTokens"),
+        dataIndex: "cache_creation_tokens",
+        key: "cache_creation_tokens",
+        render: (n: number | undefined) => formatCompact(n ?? 0),
+      },
+      {
         title: t("tokenUsage.totalCalls"),
         dataIndex: "call_count",
         key: "call_count",
@@ -127,6 +139,18 @@ function TokenUsagePage() {
         dataIndex: "completion_tokens",
         key: "completion_tokens",
         render: (n: number) => formatCompact(n),
+      },
+      {
+        title: t("tokenUsage.cacheReadTokens"),
+        dataIndex: "cache_read_tokens",
+        key: "cache_read_tokens",
+        render: (n: number | undefined) => formatCompact(n ?? 0),
+      },
+      {
+        title: t("tokenUsage.cacheCreationTokens"),
+        dataIndex: "cache_creation_tokens",
+        key: "cache_creation_tokens",
+        render: (n: number | undefined) => formatCompact(n ?? 0),
       },
       {
         title: t("tokenUsage.totalCalls"),
@@ -178,6 +202,22 @@ function TokenUsagePage() {
                     </div>
                     <div className={styles.cardLabel}>
                       {t("tokenUsage.completionTokens")}
+                    </div>
+                  </Card>
+                  <Card className={styles.card}>
+                    <div className={styles.cardValue}>
+                      {formatCompact(data.total_cache_read_tokens ?? 0)}
+                    </div>
+                    <div className={styles.cardLabel}>
+                      {t("tokenUsage.cacheReadTokens")}
+                    </div>
+                  </Card>
+                  <Card className={styles.card}>
+                    <div className={styles.cardValue}>
+                      {formatCompact(data.total_cache_creation_tokens ?? 0)}
+                    </div>
+                    <div className={styles.cardLabel}>
+                      {t("tokenUsage.cacheCreationTokens")}
                     </div>
                   </Card>
                 </div>

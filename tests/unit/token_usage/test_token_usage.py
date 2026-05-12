@@ -20,7 +20,10 @@ from qwenpaw.token_usage.manager import (
     TokenUsageStats,
     TokenUsageSummary,
 )
-from qwenpaw.token_usage.model_wrapper import TokenRecordingModelWrapper
+from qwenpaw.token_usage.model_wrapper import (
+    TokenRecordingModelWrapper,
+    _extract_cache_tokens,
+)
 from qwenpaw.token_usage.storage import load_data, save_data_sync
 
 
@@ -378,6 +381,73 @@ class TestTokenUsageManagerCore:
         assert summary.total_calls == 0
 
         await manager.stop()
+
+
+# =============================================================================
+# Test _extract_cache_tokens
+# =============================================================================
+
+
+class TestExtractCacheTokens:
+    """Cache-token extraction must handle both Anthropic dict shape and
+    OpenAI Pydantic-object shape without crashing on anything else."""
+
+    def test_none_metadata(self):
+        assert _extract_cache_tokens(None) == (0, 0)
+
+    def test_anthropic_dict_full(self):
+        md = {
+            "cache_creation_input_tokens": 200,
+            "cache_read_input_tokens": 1500,
+        }
+        assert _extract_cache_tokens(md) == (200, 1500)
+
+    def test_anthropic_dict_partial(self):
+        # Only read populated — first cache hit on a brand-new session
+        # writes 0 (nothing to write to) but reads from prior bp.
+        md = {"cache_read_input_tokens": 1500}
+        assert _extract_cache_tokens(md) == (0, 1500)
+
+    def test_openai_shape_with_cached_tokens(self):
+        # Mirror agentscope's parser: ``metadata=response.usage`` where
+        # response.usage is a CompletionUsage object exposing
+        # ``prompt_tokens_details.cached_tokens``.  OpenAI handles caching
+        # server-side so cache_creation is always 0 here.
+        from types import SimpleNamespace
+
+        usage = SimpleNamespace(
+            prompt_tokens=2000,
+            completion_tokens=500,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=1800),
+        )
+        assert _extract_cache_tokens(usage) == (0, 1800)
+
+    def test_openai_shape_without_cached_tokens(self):
+        # Sub-1024-token prefix: OpenAI doesn't activate caching and
+        # ``cached_tokens`` is 0 / absent.  Should not crash.
+        from types import SimpleNamespace
+
+        usage = SimpleNamespace(
+            prompt_tokens=500,
+            completion_tokens=100,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=0),
+        )
+        assert _extract_cache_tokens(usage) == (0, 0)
+
+    def test_openai_shape_no_details_attr(self):
+        # Older openai SDK versions may omit the details object entirely
+        # on responses with no cache activity.  Still no crash.
+        from types import SimpleNamespace
+
+        usage = SimpleNamespace(prompt_tokens=500, completion_tokens=100)
+        assert _extract_cache_tokens(usage) == (0, 0)
+
+    def test_unknown_shape_returns_zero(self):
+        # Defensive: a string / int / random object never crashes the
+        # recording hot path — returns (0, 0) and lets the caller
+        # continue to record prompt/completion as usual.
+        assert _extract_cache_tokens("garbage") == (0, 0)
+        assert _extract_cache_tokens(42) == (0, 0)
 
 
 # =============================================================================

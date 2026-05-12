@@ -24,6 +24,12 @@ class _UsageEvent(NamedTuple):
     completion_tokens: int
     date_str: str  # YYYY-MM-DD, pre-computed by producer
     now_iso: str  # ISO-8601 timestamp, pre-computed by producer
+    # Anthropic prompt-cache fields, defaulted so older callers and
+    # non-Anthropic providers can keep using positional / abbreviated
+    # kwargs.  ``cache_read_tokens`` are billed at 0.10× input;
+    # ``cache_creation_tokens`` at 1.25× on first miss.
+    cache_creation_tokens: int = 0
+    cache_read_tokens: int = 0
 
 
 class TokenUsageBuffer:
@@ -196,13 +202,22 @@ def _apply_event(cache: dict, ev: _UsageEvent) -> None:
             "model_name": ev.model_name,
             "prompt_tokens": 0,
             "completion_tokens": 0,
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 0,
             "call_count": 0,
         },
     )
 
-    # Accumulate the tokens
+    # Accumulate the tokens.  ``.get(..., 0) + …`` keeps us forward-compat
+    # with on-disk cache entries written before cache fields existed.
     entry["prompt_tokens"] += ev.prompt_tokens
     entry["completion_tokens"] += ev.completion_tokens
+    entry["cache_creation_tokens"] = (
+        entry.get("cache_creation_tokens", 0) + ev.cache_creation_tokens
+    )
+    entry["cache_read_tokens"] = (
+        entry.get("cache_read_tokens", 0) + ev.cache_read_tokens
+    )
     entry["call_count"] += 1
 
 
