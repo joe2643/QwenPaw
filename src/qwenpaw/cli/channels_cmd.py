@@ -26,7 +26,7 @@ from ..config.config import (
     IMessageChannelConfig,
     QQConfig,
     VoiceChannelConfig,
-    WeChatConfig,
+    WeixinConfig,
     load_agent_config,
     save_agent_config,
 )
@@ -387,7 +387,7 @@ def configure_feishu(current_config: FeishuConfig) -> FeishuConfig:
     return current_config
 
 
-def configure_wechat(current_config: WeChatConfig) -> WeChatConfig:
+def configure_wechat(current_config: WeixinConfig) -> WeixinConfig:
     """Configure WeChat (iLink Bot) personal account channel interactively.
 
     ``bot_token`` is intentionally not prompted: it is a short-lived bearer
@@ -694,7 +694,7 @@ _ALL_CHANNEL_CONFIGURATORS = {
     "telegram": ("Telegram", configure_telegram),
     "dingtalk": ("DingTalk", configure_dingtalk),
     "feishu": ("Feishu", configure_feishu),
-    "wechat": ("WeChat (iLink Bot)", configure_wechat),
+    "weixin": ("WeChat (iLink Bot)", configure_wechat),
     "qq": ("QQ", configure_qq),
     "console": ("Console", configure_console),
     "voice": ("Twilio", configure_voice),

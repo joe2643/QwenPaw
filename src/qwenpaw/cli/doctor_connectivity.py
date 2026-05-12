@@ -28,7 +28,7 @@ from ..config.config import (
     VoiceChannelConfig,
     WecomConfig,
     XiaoYiConfig,
-    WeChatConfig,
+    WeixinConfig,
 )
 from .doctor_checks import _effective_channels_mcp, _read_workspace_agent_json
 
@@ -208,7 +208,7 @@ def _probe_xiaoyi(
 
 def _probe_wechat(
     agent_id: str,
-    cfg: WeChatConfig,
+    cfg: WeixinConfig,
     timeout: float,
 ) -> list[str]:
     base = (cfg.base_url or "").strip().rstrip("/")
