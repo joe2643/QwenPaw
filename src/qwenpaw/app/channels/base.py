@@ -228,16 +228,27 @@ class BaseChannel(ABC):
     ) -> int:
         """Bound same-session agent concurrency for this payload.
 
-        Only normal non-command group traffic is promoted. Control commands and
-        private chats keep the historical serial behavior.
+        Only normal non-command group traffic is promoted. Control commands
+        keep the historical serial behavior. Private chats are also serial,
+        EXCEPT when ``same_session_mode == "steer"`` — there the unified
+        queue must allow concurrent workers so a sibling DM that arrives
+        mid-run can reach :meth:`_consume_with_tracker` and be injected via
+        ``enqueue_pending_input``.  With a single worker the consumer is
+        blocked inside the active run's ``_process_batch`` and the steer
+        opportunity is lost.  ``_consume_with_tracker`` still forces
+        ``start_max_concurrent=1`` in steer mode, so this only widens the
+        delivery path — it does not spawn parallel agent runs.
         """
         if priority_level < 20:
             return 1
         if (query or "").lstrip().startswith("/"):
             return 1
+        promoted = max(1, int(self.group_session_max_concurrent_runs or 1))
         if not self.is_group_payload(payload):
+            if self._get_same_session_mode() == "steer":
+                return promoted
             return 1
-        return max(1, int(self.group_session_max_concurrent_runs or 1))
+        return promoted
 
     def set_payload_max_concurrent_runs(
         self,

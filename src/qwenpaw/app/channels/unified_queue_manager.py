@@ -6,13 +6,14 @@ QueueKey: (channel_id, session_id, priority_level). It enables:
 
 1. Concurrent processing for different sessions
 2. Concurrent processing for different priority levels within the same session
-3. Strict serialization for messages with the same QueueKey
+3. Strict serialization for messages with the same QueueKey by default
+   (optionally bounded concurrency for group sessions)
 4. On-demand consumer creation (no fixed worker pools)
 5. Automatic cleanup of idle queues
 
 Architecture:
     - QueueKey = (channel_id, session_id, priority_level)
-    - Each QueueKey has its own asyncio.Queue and consumer asyncio.Task
+    - Each QueueKey has its own asyncio.Queue and consumer task set
     - Consumers are created on-demand when first message arrives
     - Idle queues are automatically cleaned up after timeout
 """
@@ -33,7 +34,7 @@ QueueKey = Tuple[str, str, int]  # (channel_id, session_id, priority_level)
 # Consumer function signature: (queue, channel_id, session_id, priority)
 # Must be an async function (coroutine)
 ConsumerFn = Callable[
-    [asyncio.Queue, str, str, int],
+    [asyncio.Queue, str, str, int, int],
     Coroutine[Any, Any, None],
 ]
 
@@ -44,14 +45,16 @@ class QueueState:
 
     Attributes:
         queue: The asyncio.Queue for this QueueKey
-        consumer_task: The asyncio.Task running the consumer
+        consumer_tasks: The asyncio.Tasks running the consumers
+        max_concurrent: Maximum concurrent consumers for this queue
         created_at: Timestamp when queue was created
         last_activity: Timestamp of last message (enqueue or dequeue)
         processed_count: Number of messages processed
     """
 
     queue: asyncio.Queue
-    consumer_task: asyncio.Task[None]
+    consumer_tasks: set[asyncio.Task[None]] = field(default_factory=set)
+    max_concurrent: int = 1
     created_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     processed_count: int = 0
@@ -122,6 +125,7 @@ class UnifiedQueueManager:
         session_id: str,
         priority_level: int,
         payload: Any,
+        max_concurrent: int = 1,
     ) -> None:
         """Enqueue a message for processing.
 
@@ -130,6 +134,8 @@ class UnifiedQueueManager:
             session_id: Normalized session ID (e.g. "console:user1")
             priority_level: Priority level (0 = critical, 20 = normal)
             payload: Message payload
+            max_concurrent: Bounded number of concurrent consumers for this
+                QueueKey. Values below 1 are treated as 1.
 
         Note:
             Creates queue and consumer on-demand if not exists
@@ -137,7 +143,7 @@ class UnifiedQueueManager:
         queue_key = (channel_id, session_id, priority_level)
 
         # Get or create queue and consumer
-        state = await self._get_or_create_queue(queue_key)
+        state = await self._get_or_create_queue(queue_key, max_concurrent)
 
         # Update activity timestamp
         state.last_activity = time.time()
@@ -162,7 +168,11 @@ class UnifiedQueueManager:
             f"qsize={state.queue.qsize()}",
         )
 
-    async def _get_or_create_queue(self, queue_key: QueueKey) -> QueueState:
+    async def _get_or_create_queue(
+        self,
+        queue_key: QueueKey,
+        max_concurrent: int = 1,
+    ) -> QueueState:
         """Get or create queue and consumer for the given key.
 
         Args:
@@ -173,43 +183,66 @@ class UnifiedQueueManager:
         """
         async with self._lock:
             # Check if already exists
+            max_concurrent = max(1, int(max_concurrent or 1))
             if queue_key in self._queues:
-                return self._queues[queue_key]
+                state = self._queues[queue_key]
+                if max_concurrent > state.max_concurrent:
+                    state.max_concurrent = max_concurrent
+                    self._ensure_worker_count_locked(queue_key, state)
+                return state
 
             # Create new queue
             queue = asyncio.Queue(maxsize=self._queue_maxsize)
 
-            # Create consumer task
-            channel_id, session_id, priority_level = queue_key
-            consumer_task = asyncio.create_task(
-                self._run_consumer(
-                    queue,
-                    channel_id,
-                    session_id,
-                    priority_level,
-                ),
-                name=(
-                    f"consumer_{channel_id}_"
-                    f"{session_id[:20]}_{priority_level}"
-                ),
-            )
-
             # Create state
             state = QueueState(
                 queue=queue,
-                consumer_task=consumer_task,
+                max_concurrent=max_concurrent,
             )
 
             # Store state
             self._queues[queue_key] = state
+            self._ensure_worker_count_locked(queue_key, state)
 
+            channel_id, session_id, priority_level = queue_key
             logger.info(
                 f"Created queue: channel={channel_id} "
                 f"session={session_id[:30]} "
-                f"priority={priority_level}",
+                f"priority={priority_level} "
+                f"max_concurrent={max_concurrent}",
             )
 
             return state
+
+    def _ensure_worker_count_locked(
+        self,
+        queue_key: QueueKey,
+        state: QueueState,
+    ) -> None:
+        """Start consumers until ``state.max_concurrent`` is satisfied.
+
+        Caller holds ``self._lock``.
+        """
+        channel_id, session_id, priority_level = queue_key
+        live_tasks = {t for t in state.consumer_tasks if not t.done()}
+        state.consumer_tasks = live_tasks
+        while len(state.consumer_tasks) < state.max_concurrent:
+            worker_idx = len(state.consumer_tasks) + 1
+            consumer_task = asyncio.create_task(
+                self._run_consumer(
+                    state.queue,
+                    channel_id,
+                    session_id,
+                    priority_level,
+                    worker_idx,
+                    state.max_concurrent,
+                ),
+                name=(
+                    f"consumer_{channel_id}_"
+                    f"{session_id[:20]}_{priority_level}_{worker_idx}"
+                ),
+            )
+            state.consumer_tasks.add(consumer_task)
 
     async def _run_consumer(
         self,
@@ -217,6 +250,8 @@ class UnifiedQueueManager:
         channel_id: str,
         session_id: str,
         priority_level: int,
+        worker_idx: int = 1,
+        max_concurrent: int = 1,
     ) -> None:
         """Run consumer loop for a single queue.
 
@@ -234,7 +269,8 @@ class UnifiedQueueManager:
         logger.info(
             f"Consumer started: channel={channel_id} "
             f"session={session_id[:30]} "
-            f"priority={priority_level}",
+            f"priority={priority_level} "
+            f"worker={worker_idx}/{max_concurrent}",
         )
 
         try:
@@ -244,13 +280,15 @@ class UnifiedQueueManager:
                 channel_id,
                 session_id,
                 priority_level,
+                max_concurrent,
             )
         except asyncio.CancelledError:
             logger.debug(
                 f"Consumer cancelled: "
                 f"channel={channel_id} "
                 f"session={session_id[:30]} "
-                f"priority={priority_level}",
+                f"priority={priority_level} "
+                f"worker={worker_idx}",
             )
             raise
         except Exception:
@@ -258,17 +296,25 @@ class UnifiedQueueManager:
                 f"Consumer failed: "
                 f"channel={channel_id} "
                 f"session={session_id[:30]} "
-                f"priority={priority_level}",
+                f"priority={priority_level} "
+                f"worker={worker_idx}",
             )
         finally:
-            # Remove from queues dict when consumer exits
+            # Remove this consumer.  The queue is dropped only when the last
+            # worker exits; cleanup may already have popped it.
+            current = asyncio.current_task()
             async with self._lock:
-                self._queues.pop(queue_key, None)
+                state = self._queues.get(queue_key)
+                if state is not None and current is not None:
+                    state.consumer_tasks.discard(current)
+                    if not state.consumer_tasks:
+                        self._queues.pop(queue_key, None)
 
             logger.info(
                 f"Consumer stopped: channel={channel_id} "
                 f"session={session_id[:30]} "
-                f"priority={priority_level}",
+                f"priority={priority_level} "
+                f"worker={worker_idx}",
             )
 
     def start_cleanup_loop(self) -> None:
@@ -346,7 +392,9 @@ class UnifiedQueueManager:
         # Cancel all consumer tasks
         async with self._lock:
             consumer_tasks = [
-                state.consumer_task for state in self._queues.values()
+                task
+                for state in self._queues.values()
+                for task in state.consumer_tasks
             ]
             queue_count = len(self._queues)
 
@@ -405,9 +453,13 @@ class UnifiedQueueManager:
                             cleanup_state = self._queues.pop(key)
 
                     if cleanup_state is not None:
-                        cleanup_state.consumer_task.cancel()
+                        for task in cleanup_state.consumer_tasks:
+                            task.cancel()
                         try:
-                            await cleanup_state.consumer_task
+                            await asyncio.gather(
+                                *cleanup_state.consumer_tasks,
+                                return_exceptions=True,
+                            )
                         except asyncio.CancelledError:
                             pass
 
@@ -460,6 +512,7 @@ class UnifiedQueueManager:
                         "priority_level": priority_level,
                         "qsize": state.queue.qsize(),
                         "processed_count": state.processed_count,
+                        "max_concurrent": state.max_concurrent,
                         "age_seconds": now - state.created_at,
                         "idle_seconds": now - state.last_activity,
                     },

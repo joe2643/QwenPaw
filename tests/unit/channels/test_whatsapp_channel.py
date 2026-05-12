@@ -7,6 +7,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -174,6 +175,201 @@ class TestExtractMessageContent:
         # PTT uses .ogg extension
         assert audio_parts[0].data.endswith(".ogg")
 
+    async def test_location_static(self):
+        # Static pin shared via WhatsApp's "Attach > Location" → Send
+        # current location.  Without explicit handling these arrive
+        # with empty body and get silently dropped before group-history
+        # storage; the agent then truthfully replies "I can't see any
+        # location" because none ever reached it.
+        ch = _make_channel()
+        loc = MagicMock()
+        loc.degreesLatitude = 35.6586
+        loc.degreesLongitude = 139.7454
+        loc.name = "Tokyo Tower"
+        loc.address = "4-2-8 Shibakoen, Minato City"
+        loc.URL = ""
+        loc.accuracyInMeters = 0
+        loc.speedInMps = 0.0
+        loc.isLive = False
+        loc.comment = ""
+        msg = _make_proto_message(locationMessage=loc)
+        msg.conversation = ""
+
+        body, parts = await ch._extract_message_content(
+            MagicMock(),
+            msg,
+            "loc1",
+        )
+        # Coords + place name must reach body so the per-message
+        # log line and the agent both see something non-empty.
+        assert "35.658600,139.745400" in body
+        assert "Tokyo Tower" in body
+        assert "[Location]" in body
+        # Same payload as a TextContent block in content_parts so
+        # text-only and multimodal models both have it.
+        text_parts = [p for p in parts if p.type == ContentType.TEXT]
+        assert any("[Location]" in p.text for p in text_parts)
+        # Google Maps URL appended for one-click open by humans
+        # reading logs and any tool the agent might call.
+        assert any("maps.google.com" in p.text for p in text_parts)
+
+    async def test_live_location_standalone_is_suppressed(self):
+        # Live location streams every ~5-15s during an active share.
+        # Forwarding each one as its own agent turn pollutes history
+        # and balloons input token cost.  Standalone updates must be
+        # cached only — body+parts empty so the caller's
+        # ``if not content_parts: return`` skips dispatch.
+        ch = _make_channel()
+        loc = MagicMock()
+        loc.degreesLatitude = 35.0
+        loc.degreesLongitude = 139.0
+        loc.accuracyInMeters = 12
+        loc.speedInMps = 1.5
+        loc.caption = "on the way"
+        msg = _make_proto_message(liveLocationMessage=loc)
+        msg.conversation = ""
+
+        body, parts = await ch._extract_message_content(
+            MagicMock(),
+            msg,
+            "live1",
+            sender_str="alice@s.whatsapp.net",
+            chat_str="grp@g.us",
+        )
+        assert body == ""
+        assert parts == []
+        # But the fix IS cached for the next real message from alice.
+        cached = ch._live_location_cache.get(
+            ("grp@g.us", "alice@s.whatsapp.net"),
+        )
+        assert cached is not None
+        cached_text, _ts = cached
+        assert "[Live Location]" in cached_text
+        assert "on the way" in cached_text
+
+    async def test_live_location_piggybacks_on_next_text(self):
+        # The whole point of suppression: when alice TEXTS after
+        # streaming her location, the agent sees what she said WITH
+        # her position, in one message — not 30 location turns plus
+        # one text turn.
+        ch = _make_channel()
+        sender = "alice@s.whatsapp.net"
+        chat = "grp@g.us"
+        # First: a live-location update (suppressed, cached)
+        loc = MagicMock()
+        loc.degreesLatitude = 35.0
+        loc.degreesLongitude = 139.0
+        loc.accuracyInMeters = 5
+        loc.speedInMps = 0.0
+        loc.caption = ""
+        await ch._extract_message_content(
+            MagicMock(),
+            _make_proto_message(liveLocationMessage=loc),
+            "live1",
+            sender_str=sender,
+            chat_str=chat,
+        )
+        # Then: a regular text from the same sender
+        text_msg = _make_proto_message(conversation="I'm here, look")
+        body, parts = await ch._extract_message_content(
+            MagicMock(),
+            text_msg,
+            "txt1",
+            sender_str=sender,
+            chat_str=chat,
+        )
+        assert "I'm here, look" in body
+        # Cached fix attached as a separate text block.
+        text_parts = [p for p in parts if p.type == ContentType.TEXT]
+        assert any("[Live location" in p.text for p in text_parts)
+        assert any("[Live Location]" in p.text for p in text_parts)
+        assert any("35.000000,139.000000" in p.text for p in text_parts)
+
+    async def test_live_location_no_piggyback_for_other_sender(self):
+        # Bob's text must NOT carry alice's cached live location —
+        # cache key is (chat, sender), so cross-sender bleed is
+        # impossible by construction, but assert it explicitly so a
+        # future refactor that flattens to chat-only is caught.
+        ch = _make_channel()
+        chat = "grp@g.us"
+        loc = MagicMock()
+        loc.degreesLatitude = 35.0
+        loc.degreesLongitude = 139.0
+        loc.accuracyInMeters = 0
+        loc.speedInMps = 0.0
+        loc.caption = ""
+        await ch._extract_message_content(
+            MagicMock(),
+            _make_proto_message(liveLocationMessage=loc),
+            "live1",
+            sender_str="alice@s.whatsapp.net",
+            chat_str=chat,
+        )
+        body, parts = await ch._extract_message_content(
+            MagicMock(),
+            _make_proto_message(conversation="hi"),
+            "txt1",
+            sender_str="bob@s.whatsapp.net",
+            chat_str=chat,
+        )
+        assert body == "hi"
+        # No piggyback — bob never shared a location.
+        text_parts = [p for p in parts if p.type == ContentType.TEXT]
+        assert not any("[Live location" in p.text for p in text_parts)
+
+    async def test_live_location_stale_entry_evicted_on_read(self):
+        # 30-min TTL: a fix older than the window must NOT piggyback,
+        # AND must be removed from the cache so the dict stays bounded
+        # over a long-running session without explicit eviction.
+        ch = _make_channel()
+        sender = "alice@s.whatsapp.net"
+        chat = "grp@g.us"
+        # Inject a stale entry directly: 31 minutes old.
+        ch._live_location_cache[(chat, sender)] = (
+            "[Live Location] 35.0,139.0\nhttps://maps.google.com/?q=35.0,139.0",
+            time.monotonic() - 31 * 60,
+        )
+        body, parts = await ch._extract_message_content(
+            MagicMock(),
+            _make_proto_message(conversation="hi"),
+            "txt1",
+            sender_str=sender,
+            chat_str=chat,
+        )
+        assert body == "hi"
+        text_parts = [p for p in parts if p.type == ContentType.TEXT]
+        assert not any("[Live location" in p.text for p in text_parts)
+        # Stale entry cleaned up.
+        assert (chat, sender) not in ch._live_location_cache
+
+    async def test_location_uses_proto_url_when_present(self):
+        # When WhatsApp's own ``URL`` field is populated (manually-
+        # attached link or a third-party share that knows the canonical
+        # URL) prefer it over the synthesized maps.google.com fallback
+        # — the original may be a maps.app.goo.gl short link the user
+        # actually wants to surface.
+        ch = _make_channel()
+        loc = MagicMock()
+        loc.degreesLatitude = 35.0
+        loc.degreesLongitude = 139.0
+        loc.name = ""
+        loc.address = ""
+        loc.URL = "https://maps.app.goo.gl/abc123"
+        loc.accuracyInMeters = 0
+        loc.speedInMps = 0.0
+        loc.isLive = False
+        loc.comment = ""
+        msg = _make_proto_message(locationMessage=loc)
+        msg.conversation = ""
+
+        body, _parts = await ch._extract_message_content(
+            MagicMock(),
+            msg,
+            "loc2",
+        )
+        assert "https://maps.app.goo.gl/abc123" in body
+        assert "maps.google.com" not in body
+
     async def test_audio_non_ptt(self):
         ch = _make_channel()
         audio = MagicMock()
@@ -278,6 +474,84 @@ class TestExtractQuoteContent:
         combined = " ".join(p.text for p in text_parts)
         assert "UNTRUSTED reply-to" in combined
         assert "image" in combined.lower()
+
+    async def test_quote_to_static_location(self):
+        # Replying to a static pin: WhatsApp embeds the locationMessage
+        # proto into the reply's contextInfo, so the quote extractor has
+        # raw lat/lng even when the original was an old message.  Quote
+        # block must surface coords + place name + a maps URL.
+        ch = _make_channel()
+        ctx = MagicMock()
+        ctx.HasField = lambda name: name == "quotedMessage"
+        ctx.participant = "sender@s.whatsapp.net"
+        ctx.stanzaId = "stanza_loc"
+
+        loc = MagicMock()
+        loc.degreesLatitude = 35.6586
+        loc.degreesLongitude = 139.7454
+        loc.name = "Tokyo Tower"
+        loc.address = "Shibakoen"
+        loc.URL = ""
+        loc.accuracyInMeters = 0
+        loc.speedInMps = 0.0
+        loc.isLive = False
+        loc.comment = ""
+
+        quoted = MagicMock()
+        quoted.conversation = ""
+        quoted.HasField = lambda name: name == "locationMessage"
+        quoted.locationMessage = loc
+        ctx.quotedMessage = quoted
+
+        etm = MagicMock()
+        etm.text = "going there"
+        etm.contextInfo = ctx
+        msg = _make_proto_message(extendedTextMessage=etm)
+
+        parts = await ch._extract_quote_content(MagicMock(), msg)
+        text = next(p.text for p in parts if hasattr(p, "text"))
+        assert "[Location]" in text
+        assert "35.658600,139.745400" in text
+        assert "Tokyo Tower" in text
+        assert "maps.google.com" in text
+
+    async def test_quote_to_live_location_works_even_when_suppressed(self):
+        # The whole point of suppression: standalone liveLocationMessage
+        # updates never reach agent history.  But when the user replies
+        # to one in WhatsApp's UI later, contextInfo carries a snapshot
+        # of the original proto — the quote extractor reads that proto
+        # directly, NOT history, so suppression doesn't break this.
+        # Reply text must come through alongside the snapshot location.
+        ch = _make_channel()
+        ctx = MagicMock()
+        ctx.HasField = lambda name: name == "quotedMessage"
+        ctx.participant = "sender@s.whatsapp.net"
+        ctx.stanzaId = "stanza_live"
+
+        loc = MagicMock()
+        loc.degreesLatitude = 35.0
+        loc.degreesLongitude = 139.0
+        loc.accuracyInMeters = 8
+        loc.speedInMps = 2.1
+        loc.caption = "moving"
+
+        quoted = MagicMock()
+        quoted.conversation = ""
+        quoted.HasField = lambda name: name == "liveLocationMessage"
+        quoted.liveLocationMessage = loc
+        ctx.quotedMessage = quoted
+
+        etm = MagicMock()
+        etm.text = "you were here"
+        etm.contextInfo = ctx
+        msg = _make_proto_message(extendedTextMessage=etm)
+
+        parts = await ch._extract_quote_content(MagicMock(), msg)
+        text = next(p.text for p in parts if hasattr(p, "text"))
+        assert "[Live Location]" in text
+        assert "35.000000,139.000000" in text
+        assert "±8m" in text
+        assert "moving" in text
 
     async def test_quote_with_image_download_success_emits_path(self):
         # On a successful download the reply-to block MUST surface
@@ -1053,6 +1327,202 @@ class TestSend:
         text = "AAAAAAAAAA" + "BBBBBBBBBB"  # 20 chars, limit 10
         await ch.send("+85200000000", text, {})
         assert ch._client.send_message.call_count == 2
+
+    async def test_markdown_code_fence_language_removed_for_whatsapp(self):
+        ch = _make_channel()
+        ch._client.send_message = AsyncMock()
+        text = "Here:\n```text\nhello\n```\nDone"
+
+        await ch.send("+85200000000", text, {})
+
+        args = ch._client.send_message.call_args[0]
+        assert args[1] == "Here:\n```\nhello\n```\nDone"
+
+    async def test_plain_code_fence_kept_for_whatsapp(self):
+        ch = _make_channel()
+        ch._client.send_message = AsyncMock()
+        text = "```\nhello\n```"
+
+        await ch.send("+85200000000", text, {})
+
+        args = ch._client.send_message.call_args[0]
+        assert args[1] == text
+
+
+class TestParticipantMentionRewrite:
+    """Outbound auto-tagging — convert ``+<digits>`` to ``@<digits>`` only
+    for digits that match a real group participant.  Pure unit tests against
+    the static rewrite helper plus integration tests for the send() path
+    that exercise the participant cache via mocked ``get_group_info``.
+    """
+
+    def test_rewrite_known_participant(self):
+        out = WhatsAppChannel._rewrite_participant_mentions(
+            "等 +85260113079 reply 我哋",
+            {"85260113079"},
+        )
+        assert out == "等 @85260113079 reply 我哋"
+
+    def test_rewrite_strips_at_plus_prefix(self):
+        out = WhatsAppChannel._rewrite_participant_mentions(
+            "@+85260113079 你睇下",
+            {"85260113079"},
+        )
+        assert out == "@85260113079 你睇下"
+
+    def test_unknown_phone_left_alone(self):
+        out = WhatsAppChannel._rewrite_participant_mentions(
+            "客戶嗰邊嘅電話係 +85211110000",
+            {"85260113079"},
+        )
+        assert out == "客戶嗰邊嘅電話係 +85211110000"
+
+    def test_rewrite_preserves_markdown_around_number(self):
+        out = WhatsAppChannel._rewrite_participant_mentions(
+            "**+85260113079** 仲未覆",
+            {"85260113079"},
+        )
+        assert out == "**@85260113079** 仲未覆"
+
+    def test_empty_participant_set_no_rewrite(self):
+        text = "+85260113079 hi"
+        out = WhatsAppChannel._rewrite_participant_mentions(text, set())
+        assert out == text
+
+    async def test_send_into_group_tags_participants(self):
+        ch = _make_channel()
+        ch._client.send_message = AsyncMock()
+
+        # Mock get_group_info to return one phone-server participant.
+        participant = MagicMock()
+        participant.PhoneNumber = MagicMock(
+            User="85260113079",
+            Server="s.whatsapp.net",
+        )
+        participant.JID = MagicMock(User="", Server="")
+        participant.LID = MagicMock(User="", Server="")
+        info = MagicMock(Participants=[participant])
+        ch._client.get_group_info = AsyncMock(return_value=info)
+
+        await ch.send(
+            "120363000@g.us",
+            "等 +85260113079 reply",
+            {"chat_jid": "120363000@g.us"},
+        )
+
+        ch._client.send_message.assert_called_once()
+        sent_text = ch._client.send_message.call_args[0][1]
+        assert sent_text == "等 @85260113079 reply"
+
+    async def test_send_into_group_unknown_phone_passes_through(self):
+        ch = _make_channel()
+        ch._client.send_message = AsyncMock()
+        # Group has a different participant — random number must not get tagged.
+        participant = MagicMock()
+        participant.PhoneNumber = MagicMock(
+            User="85299990000",
+            Server="s.whatsapp.net",
+        )
+        participant.JID = MagicMock(User="", Server="")
+        participant.LID = MagicMock(User="", Server="")
+        info = MagicMock(Participants=[participant])
+        ch._client.get_group_info = AsyncMock(return_value=info)
+
+        await ch.send(
+            "120363000@g.us",
+            "客戶電話 +85211110000",
+            {"chat_jid": "120363000@g.us"},
+        )
+
+        sent_text = ch._client.send_message.call_args[0][1]
+        assert sent_text == "客戶電話 +85211110000"
+
+    async def test_send_into_dm_skips_participant_lookup(self):
+        ch = _make_channel()
+        ch._client.send_message = AsyncMock()
+        ch._client.get_group_info = AsyncMock()
+
+        await ch.send(
+            "+85260113079",
+            "hi +85260113079",
+            {"chat_jid": "85260113079@s.whatsapp.net"},
+        )
+
+        # DM — never call get_group_info, never rewrite.
+        ch._client.get_group_info.assert_not_called()
+        sent_text = ch._client.send_message.call_args[0][1]
+        assert sent_text == "hi +85260113079"
+
+    async def test_get_group_info_failure_falls_back_silent(self):
+        """``get_group_info`` failures must not break the send — the message
+        goes out without mention tagging rather than crashing the agent
+        reply path."""
+        ch = _make_channel()
+        ch._client.send_message = AsyncMock()
+        ch._client.get_group_info = AsyncMock(
+            side_effect=RuntimeError("boom"),
+        )
+
+        await ch.send(
+            "120363000@g.us",
+            "等 +85260113079",
+            {"chat_jid": "120363000@g.us"},
+        )
+
+        ch._client.send_message.assert_called_once()
+        sent_text = ch._client.send_message.call_args[0][1]
+        # No tagging — but message still went out.
+        assert sent_text == "等 +85260113079"
+
+    async def test_participant_cache_reuses_within_ttl(self):
+        ch = _make_channel()
+        ch._client.send_message = AsyncMock()
+        participant = MagicMock()
+        participant.PhoneNumber = MagicMock(
+            User="85260113079",
+            Server="s.whatsapp.net",
+        )
+        participant.JID = MagicMock(User="", Server="")
+        participant.LID = MagicMock(User="", Server="")
+        info = MagicMock(Participants=[participant])
+        ch._client.get_group_info = AsyncMock(return_value=info)
+
+        # Two consecutive sends → one get_group_info call.
+        meta = {"chat_jid": "120363000@g.us"}
+        await ch.send("120363000@g.us", "first +85260113079", meta)
+        await ch.send("120363000@g.us", "second +85260113079", meta)
+
+        assert ch._client.get_group_info.call_count == 1
+
+    async def test_lid_only_participant_via_lid_cache(self):
+        """When a participant is known only by ``@lid`` server, the LID
+        cache (populated on inbound) provides the phone digits used for
+        matching outbound +<digits> patterns."""
+        ch = _make_channel()
+        ch._client.send_message = AsyncMock()
+        ch._lid_cache["104402249592897@lid"] = {
+            "phone": "85260113079",
+            "name": "Joe",
+        }
+        participant = MagicMock()
+        # No phone-server entries; only LID server.
+        participant.PhoneNumber = MagicMock(User="", Server="")
+        participant.JID = MagicMock(User="", Server="")
+        participant.LID = MagicMock(
+            User="104402249592897",
+            Server="lid",
+        )
+        info = MagicMock(Participants=[participant])
+        ch._client.get_group_info = AsyncMock(return_value=info)
+
+        await ch.send(
+            "120363000@g.us",
+            "等 +85260113079",
+            {"chat_jid": "120363000@g.us"},
+        )
+
+        sent_text = ch._client.send_message.call_args[0][1]
+        assert sent_text == "等 @85260113079"
 
 
 # ===================================================================

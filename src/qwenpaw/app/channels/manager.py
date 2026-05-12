@@ -109,7 +109,6 @@ class ChannelManager:
         return cls(channels)
 
     @classmethod
-    # pylint: disable=too-many-branches
     def from_config(
         cls,
         process: ProcessHandler,
@@ -137,83 +136,112 @@ class ChannelManager:
             ch_cfg = getattr(ch, key, None)
             if ch_cfg is None and key in extra:
                 ch_cfg = extra[key]
-            if ch_cfg is None:
-                continue
-            if isinstance(ch_cfg, dict):
-                from types import SimpleNamespace
-                from ...config.config import BaseChannelConfig
-
-                defaults = BaseChannelConfig().model_dump()
-                defaults.update(ch_cfg)
-                ch_cfg = SimpleNamespace(**defaults)
-
-            # Check if channel is enabled
-            # Handle both Pydantic objects (built-in)
-            # and dicts (customchannels)
-            if isinstance(ch_cfg, dict):
-                enabled = ch_cfg.get("enabled", False)
-            else:
-                enabled = getattr(ch_cfg, "enabled", False)
-            if not enabled:
-                continue
-
-            # Handle both Pydantic objects (built-in)
-            # and dicts (custom channels)
-            if isinstance(ch_cfg, dict):
-                filter_tool_messages = ch_cfg.get(
-                    "filter_tool_messages",
-                    False,
-                )
-                filter_thinking = ch_cfg.get("filter_thinking", False)
-            else:
-                filter_tool_messages = getattr(
-                    ch_cfg,
-                    "filter_tool_messages",
-                    False,
-                )
-                filter_thinking = getattr(
-                    ch_cfg,
-                    "filter_thinking",
-                    False,
-                )
-
-            from_config_kwargs = {
-                "process": process,
-                "config": ch_cfg,
-                "on_reply_sent": on_last_dispatch,
-                "show_tool_details": show_tool_details,
-                "filter_tool_messages": filter_tool_messages,
-                "filter_thinking": filter_thinking,
-                "workspace_dir": workspace_dir,
-            }
-
-            # Only pass kwargs that the channel's from_config accepts
-            import inspect
-
-            sig = inspect.signature(ch_cls.from_config)
-            if any(
-                p.kind == inspect.Parameter.VAR_KEYWORD
-                for p in sig.parameters.values()
-            ):
-                filtered_kwargs = from_config_kwargs
-            else:
-                filtered_kwargs = {
-                    k: v
-                    for k, v in from_config_kwargs.items()
-                    if k in sig.parameters
-                }
-
-            try:
-                channels.append(ch_cls.from_config(**filtered_kwargs))
-            except Exception as e:
-                logger.warning(
-                    "Failed to initialize channel '%s', skipping: %s",
-                    key,
-                    e,
-                )
-                continue
+            new_ch = cls.build_one_channel(
+                key=key,
+                ch_cls=ch_cls,
+                ch_cfg=ch_cfg,
+                process=process,
+                on_last_dispatch=on_last_dispatch,
+                show_tool_details=show_tool_details,
+                workspace_dir=workspace_dir,
+            )
+            if new_ch is not None:
+                channels.append(new_ch)
 
         return cls(channels)
+
+    @classmethod
+    # pylint: disable=too-many-branches
+    def build_one_channel(
+        cls,
+        *,
+        key: str,
+        ch_cls: type[BaseChannel],
+        ch_cfg: Any,
+        process: ProcessHandler,
+        on_last_dispatch: OnLastDispatch,
+        show_tool_details: bool,
+        workspace_dir: Path | None,
+    ) -> Optional[BaseChannel]:
+        """Build a single BaseChannel from a per-channel config block.
+
+        Returns None if the config is missing, the channel is not enabled,
+        or construction fails. Mirrors the per-channel logic that used to
+        live inline in ``from_config`` so that ``reload_channel_service``
+        can re-use it for hot-adding a channel that became enabled after
+        the manager was first built.
+        """
+        if ch_cfg is None:
+            return None
+        if isinstance(ch_cfg, dict):
+            from types import SimpleNamespace
+            from ...config.config import BaseChannelConfig
+
+            defaults = BaseChannelConfig().model_dump()
+            defaults.update(ch_cfg)
+            ch_cfg = SimpleNamespace(**defaults)
+
+        # Handle both Pydantic objects (built-in) and dicts (custom channels)
+        if isinstance(ch_cfg, dict):
+            enabled = ch_cfg.get("enabled", False)
+        else:
+            enabled = getattr(ch_cfg, "enabled", False)
+        if not enabled:
+            return None
+
+        if isinstance(ch_cfg, dict):
+            filter_tool_messages = ch_cfg.get(
+                "filter_tool_messages",
+                False,
+            )
+            filter_thinking = ch_cfg.get("filter_thinking", False)
+        else:
+            filter_tool_messages = getattr(
+                ch_cfg,
+                "filter_tool_messages",
+                False,
+            )
+            filter_thinking = getattr(
+                ch_cfg,
+                "filter_thinking",
+                False,
+            )
+
+        from_config_kwargs = {
+            "process": process,
+            "config": ch_cfg,
+            "on_reply_sent": on_last_dispatch,
+            "show_tool_details": show_tool_details,
+            "filter_tool_messages": filter_tool_messages,
+            "filter_thinking": filter_thinking,
+            "workspace_dir": workspace_dir,
+        }
+
+        # Only pass kwargs that the channel's from_config accepts
+        import inspect
+
+        sig = inspect.signature(ch_cls.from_config)
+        if any(
+            p.kind == inspect.Parameter.VAR_KEYWORD
+            for p in sig.parameters.values()
+        ):
+            filtered_kwargs = from_config_kwargs
+        else:
+            filtered_kwargs = {
+                k: v
+                for k, v in from_config_kwargs.items()
+                if k in sig.parameters
+            }
+
+        try:
+            return ch_cls.from_config(**filtered_kwargs)
+        except Exception as e:
+            logger.warning(
+                "Failed to initialize channel '%s', skipping: %s",
+                key,
+                e,
+            )
+            return None
 
     def _make_enqueue_cb(self, channel_id: str) -> Callable[[Any], None]:
         """Return a callback that enqueues payload for the given channel."""
@@ -289,6 +317,13 @@ class ChannelManager:
         # Extract normalized session_id
         session_id = self._extract_session_id(ch, payload)
 
+        max_concurrent = ch.get_max_concurrent_runs(
+            payload,
+            priority_level=priority_level,
+            query=query,
+        )
+        ch.set_payload_max_concurrent_runs(payload, max_concurrent)
+
         # Route to unified queue manager with task tracking
         task = asyncio.create_task(
             self._enqueue_with_timeout(
@@ -297,6 +332,7 @@ class ChannelManager:
                 priority_level,
                 payload,
                 query,
+                max_concurrent,
             ),
         )
         self._enqueue_tasks.add(task)
@@ -309,6 +345,7 @@ class ChannelManager:
         priority_level: int,
         payload: Any,
         query: str,
+        max_concurrent: int = 1,
     ) -> None:
         """Enqueue with timeout protection to prevent unbounded blocking.
 
@@ -326,6 +363,7 @@ class ChannelManager:
                     session_id,
                     priority_level,
                     payload,
+                    max_concurrent=max_concurrent,
                 ),
                 timeout=30.0,
             )
@@ -333,6 +371,7 @@ class ChannelManager:
                 f"Enqueued: channel={channel_id} "
                 f"session={session_id[:30]} "
                 f"priority={priority_level} "
+                f"max_concurrent={max_concurrent} "
                 f"query={query[:40] if query else '(empty)'}",
             )
         except asyncio.TimeoutError:
@@ -368,6 +407,7 @@ class ChannelManager:
         channel_id: str,
         session_id: str,
         priority_level: int,
+        max_concurrent: int,
     ) -> None:
         """Consumer function for UnifiedQueueManager.
 
@@ -418,13 +458,16 @@ class ChannelManager:
                 # so all payloads in this queue already have same
                 # (channel_id, session_id, priority_level).
                 # We still drain to merge rapid-fire messages (e.g. images)
+                # when the queue is serial. Parallel group queues process one
+                # payload per worker so separate messages can run together.
                 batch = [payload]
-                while True:
-                    try:
-                        next_payload = queue.get_nowait()
-                        batch.append(next_payload)
-                    except asyncio.QueueEmpty:
-                        break
+                if max_concurrent <= 1:
+                    while True:
+                        try:
+                            next_payload = queue.get_nowait()
+                            batch.append(next_payload)
+                        except asyncio.QueueEmpty:
+                            break
 
                 # Process batch (with merge logic)
                 await _process_batch(ch, batch)
@@ -442,6 +485,7 @@ class ChannelManager:
                     f"Processed batch: channel={channel_id} "
                     f"session={session_id[:30]} "
                     f"priority={priority_level} "
+                    f"max_concurrent={max_concurrent} "
                     f"batch_size={len(batch)}",
                 )
 
@@ -813,6 +857,42 @@ class ChannelManager:
                             f"Failed to stop old channel: "
                             f"{old_channel.channel}",
                         )
+
+    async def remove_channel(self, channel_name: str) -> bool:
+        """Stop and remove a channel by name.
+
+        Used by ``reload_channel_service`` when a hot-reload turns
+        ``enabled=true`` into ``enabled=false`` for a previously-running
+        channel. Pops first under the lock so further enqueue routing
+        cannot find the channel, then stops it outside the lock to avoid
+        holding the lock across the (potentially slow) shutdown.
+
+        Returns True if the channel was found and removed, False if no
+        channel by that name was registered.
+        """
+        async with self._lock:
+            target = None
+            target_index = None
+            for i, ch in enumerate(self.channels):
+                if ch.channel == channel_name:
+                    target = ch
+                    target_index = i
+                    break
+            if target is None:
+                return False
+            self.channels.pop(target_index)
+
+        target.set_enqueue(None)
+        try:
+            await target.stop()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception(
+                "Failed to stop channel %s during removal",
+                channel_name,
+            )
+        return True
 
     async def send_event(
         self,

@@ -1313,6 +1313,75 @@ class TestConsumeWithTracker:
         )
 
 
+class TestGetMaxConcurrentRuns:
+    """
+    get_max_concurrent_runs tests.
+
+    Sizes the UnifiedQueueManager worker pool per session.  The steer-mode
+    DM widening here is load-bearing: with a single worker, a sibling DM
+    arriving while a run is active waits in the queue and never reaches
+    ``_consume_with_tracker``, so it cannot be steered.  Promoting DMs in
+    steer mode lets siblings reach the steer path.
+    """
+
+    def _channel_with_mode(self, mode: str | None) -> BaseChannel:
+        ch = ConsoleChannel(
+            process=lambda *a, **k: None,  # type: ignore[arg-type]
+            enabled=True,
+            bot_prefix="[TEST] ",
+        )
+        if mode is None:
+            ch.set_workspace(None)
+        else:
+            ws = MagicMock()
+            ws.config = MagicMock()
+            ws.config.running = MagicMock(same_session_mode=mode)
+            ch.set_workspace(ws)
+        return ch
+
+    def test_dm_serial_in_parallel_mode(self):
+        """Default DM behavior stays serial (max_concurrent=1)."""
+        ch = self._channel_with_mode("parallel")
+        payload = {"session_id": "whatsapp:+85211112222"}
+        assert ch.get_max_concurrent_runs(payload) == 1
+
+    def test_dm_promoted_in_steer_mode(self):
+        """In steer mode, DMs widen to the group concurrency budget so a
+        sibling DM can reach _consume_with_tracker mid-run instead of
+        waiting behind the active worker."""
+        ch = self._channel_with_mode("steer")
+        ch.group_session_max_concurrent_runs = 3
+        payload = {"session_id": "whatsapp:+85211112222"}
+        assert ch.get_max_concurrent_runs(payload) == 3
+
+    def test_group_unaffected_by_mode(self):
+        """Groups use the configured budget regardless of session mode."""
+        ch_parallel = self._channel_with_mode("parallel")
+        ch_parallel.group_session_max_concurrent_runs = 3
+        ch_steer = self._channel_with_mode("steer")
+        ch_steer.group_session_max_concurrent_runs = 3
+        payload = {"session_id": "whatsapp:group:abc"}
+        assert ch_parallel.get_max_concurrent_runs(payload) == 3
+        assert ch_steer.get_max_concurrent_runs(payload) == 3
+
+    def test_slash_command_stays_serial_even_in_steer(self):
+        """Control commands always serial — promoting them would let
+        /stop and /new race the run they are meant to interrupt."""
+        ch = self._channel_with_mode("steer")
+        ch.group_session_max_concurrent_runs = 3
+        payload = {"session_id": "whatsapp:+85211112222"}
+        assert (
+            ch.get_max_concurrent_runs(payload, query="/stop") == 1
+        )
+
+    def test_low_priority_stays_serial_even_in_steer(self):
+        """Below normal priority (e.g. system / control), stay serial."""
+        ch = self._channel_with_mode("steer")
+        ch.group_session_max_concurrent_runs = 3
+        payload = {"session_id": "whatsapp:+85211112222"}
+        assert ch.get_max_concurrent_runs(payload, priority_level=10) == 1
+
+
 @pytest.mark.asyncio
 class TestStreamWithTracker:
     """
