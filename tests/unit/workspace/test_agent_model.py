@@ -263,6 +263,7 @@ def test_agent_running_config_has_llm_retry_defaults(
     assert agent_config.running.llm_max_retries == max(LLM_MAX_RETRIES, 1)
     assert agent_config.running.llm_backoff_base == LLM_BACKOFF_BASE
     assert agent_config.running.llm_backoff_cap == LLM_BACKOFF_CAP
+    assert agent_config.running.same_session_mode == "parallel"
 
 
 def test_agent_running_config_llm_retry_persists(
@@ -271,6 +272,7 @@ def test_agent_running_config_llm_retry_persists(
     """Test that LLM retry settings persist in agent.json."""
     agent_config = load_agent_config("test_agent")
     agent_config.running = AgentsRunningConfig(
+        same_session_mode="steer",
         llm_retry_enabled=False,
         llm_max_retries=5,
         llm_backoff_base=0.5,
@@ -284,6 +286,7 @@ def test_agent_running_config_llm_retry_persists(
     assert reloaded_config.running.llm_max_retries == 5
     assert reloaded_config.running.llm_backoff_base == 0.5
     assert reloaded_config.running.llm_backoff_cap == 8.0
+    assert reloaded_config.running.same_session_mode == "steer"
 
 
 def test_agent_running_config_rejects_backoff_cap_below_base():

@@ -23,6 +23,8 @@ def _make_mock_channel_manager(channels):
     cm = MagicMock()
     cm.channels = channels
     cm.set_workspace = MagicMock()
+    cm.replace_channel = AsyncMock()
+    cm.remove_channel = AsyncMock(return_value=True)
     return cm
 
 
@@ -34,6 +36,14 @@ def _make_mock_workspace(runner, channel_manager=None):
     }
     if channel_manager:
         ws._service_manager.services["channel_manager"] = channel_manager
+    # Default to no channel config — keeps the legacy tests focused on
+    # _process swap + set_workspace without triggering the new
+    # add/remove paths. Tests that exercise add/remove override these.
+    ws._config = MagicMock()
+    ws._config.channels = None
+    ws._config.show_tool_details = True
+    ws.workspace_dir = "/tmp/test_ws"
+    ws.agent_id = "test"
     return ws
 
 
@@ -145,6 +155,164 @@ class TestReloadChannelService:
         ws2 = _make_mock_workspace(runner2)
         await reload_channel_service(ws2, cm)
         assert ch._process is runner2.stream_query
+
+
+# ---------------------------------------------------------------------------
+# Tests for hot add/remove of channels (reload bug fix 2026-05-07)
+# ---------------------------------------------------------------------------
+
+
+class TestReloadHotAddRemove:
+    """Cover the case where an agent enables/disables a channel after
+    process start. Pre-fix, the reload loop only iterated existing
+    cm.channels — newly enabled channels were never built, and newly
+    disabled ones kept polling. Both required a full process restart.
+    """
+
+    @pytest.mark.asyncio
+    async def test_newly_enabled_channel_is_built_and_added(self):
+        from qwenpaw.app.workspace.service_factories import (
+            reload_channel_service,
+        )
+
+        runner = MagicMock()
+        runner.stream_query = MagicMock()
+
+        # cm starts with no channels (cold-start happened before any
+        # channel was enabled in agent.json — matches the trader path).
+        cm = _make_mock_channel_manager([])
+        cm.replace_channel = AsyncMock()
+
+        # Build a stand-in channel class that records the call.
+        built_kwargs = {}
+
+        class _StubChannel:
+            channel = "telegram"
+
+            @classmethod
+            def from_config(cls, **kwargs):
+                built_kwargs.update(kwargs)
+                inst = MagicMock()
+                inst.channel = "telegram"
+                return inst
+
+        # New config has telegram enabled.
+        ch_cfg_ns = MagicMock()
+        ch_cfg_ns.enabled = True
+        ch_cfg_ns.filter_tool_messages = False
+        ch_cfg_ns.filter_thinking = False
+
+        channels_ns = MagicMock(spec=["telegram"])
+        channels_ns.telegram = ch_cfg_ns
+        channels_ns.__pydantic_extra__ = {}
+
+        ws = _make_mock_workspace(runner, cm)
+        ws._config = MagicMock()
+        ws._config.channels = channels_ns
+        ws._config.show_tool_details = True
+        ws.workspace_dir = "/tmp/agent_ws"
+        ws.agent_id = "trader"
+
+        with patch(
+            "qwenpaw.app.channels.registry.get_channel_registry",
+            return_value={"telegram": _StubChannel},
+        ), patch(
+            "qwenpaw.config.get_available_channels",
+            return_value=("telegram",),
+        ):
+            await reload_channel_service(ws, cm)
+
+        cm.replace_channel.assert_awaited_once()
+        added = cm.replace_channel.await_args.args[0]
+        assert added.channel == "telegram"
+        # build_one_channel forwarded the per-agent workspace_dir so a
+        # newly added channel gets the same credential isolation as
+        # cold-start would.
+        assert built_kwargs["workspace_dir"] == "/tmp/agent_ws"
+
+    @pytest.mark.asyncio
+    async def test_disabled_channel_is_removed(self):
+        from qwenpaw.app.workspace.service_factories import (
+            reload_channel_service,
+        )
+
+        runner = MagicMock()
+        runner.stream_query = MagicMock()
+
+        ch = _make_mock_channel("telegram")
+        ch.update_config = AsyncMock(return_value=True)
+
+        cm = _make_mock_channel_manager([ch])
+        cm.remove_channel = AsyncMock(return_value=True)
+        cm.replace_channel = AsyncMock()
+
+        # Telegram is now enabled=False — should be removed.
+        ch_cfg_ns = MagicMock()
+        ch_cfg_ns.enabled = False
+
+        channels_ns = MagicMock(spec=["telegram"])
+        channels_ns.telegram = ch_cfg_ns
+        channels_ns.__pydantic_extra__ = {}
+
+        ws = _make_mock_workspace(runner, cm)
+        ws._config = MagicMock()
+        ws._config.channels = channels_ns
+        ws._config.show_tool_details = True
+        ws.workspace_dir = "/tmp/agent_ws"
+        ws.agent_id = "trader"
+
+        with patch(
+            "qwenpaw.app.channels.registry.get_channel_registry",
+            return_value={"telegram": MagicMock},
+        ), patch(
+            "qwenpaw.config.get_available_channels",
+            return_value=("telegram",),
+        ):
+            await reload_channel_service(ws, cm)
+
+        cm.remove_channel.assert_awaited_once_with("telegram")
+        # Removed channel should NOT have been "updated" via clone+replace.
+        cm.replace_channel.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_missing_config_block_treated_as_disabled(self):
+        """If agent.json drops a channel block entirely, treat as
+        disabled (remove). Symmetric with from_config which only builds
+        channels with an explicit, enabled config."""
+        from qwenpaw.app.workspace.service_factories import (
+            reload_channel_service,
+        )
+
+        runner = MagicMock()
+        runner.stream_query = MagicMock()
+
+        ch = _make_mock_channel("telegram")
+        cm = _make_mock_channel_manager([ch])
+        cm.remove_channel = AsyncMock(return_value=True)
+
+        # No telegram attribute at all in the new config.
+        # spec=["__pydantic_extra__"] keeps the MagicMock from
+        # auto-creating a `.telegram` attribute on access.
+        channels_ns = MagicMock(spec=["__pydantic_extra__"])
+        channels_ns.__pydantic_extra__ = {}
+
+        ws = _make_mock_workspace(runner, cm)
+        ws._config = MagicMock()
+        ws._config.channels = channels_ns
+        ws._config.show_tool_details = True
+        ws.workspace_dir = "/tmp/agent_ws"
+        ws.agent_id = "trader"
+
+        with patch(
+            "qwenpaw.app.channels.registry.get_channel_registry",
+            return_value={"telegram": MagicMock},
+        ), patch(
+            "qwenpaw.config.get_available_channels",
+            return_value=("telegram",),
+        ):
+            await reload_channel_service(ws, cm)
+
+        cm.remove_channel.assert_awaited_once_with("telegram")
 
 
 # ---------------------------------------------------------------------------

@@ -197,8 +197,20 @@ async def reload_channel_service(
        change — the file on disk gets the new values but the running channel
        keeps its old ones (observed 2026-04-17 on Signal: clearing
        ``allow_from`` didn't take effect until next process restart).
+    3. Removes channels that have been disabled (``enabled=false``) since
+       the manager was first built, and adds channels that have become
+       enabled. Without these two steps, hot-reload could only mutate the
+       set of channels that already existed at process start — adding a
+       new agent or enabling a previously-off channel required a full
+       process restart (observed 2026-05-07: a hot-added ``trader``
+       agent's telegram bot never started polling because its
+       ``ChannelManager`` was inherited from another agent and had no
+       telegram entry).
     """
+    from ..channels.manager import ChannelManager
+    from ..channels.registry import get_channel_registry
     from ..channels.utils import make_process_from_runner
+    from ...config import get_available_channels, update_last_dispatch
 
     _logger = logger  # reuse module-level logger
 
@@ -208,9 +220,31 @@ async def reload_channel_service(
         return
 
     new_process = make_process_from_runner(runner)
-    # Snapshot list — `replace_channel` mutates `cm.channels` mid-iteration.
-    snapshot = list(cm.channels)
     new_channels_config = getattr(ws._config, "channels", None)
+
+    def _get_ch_cfg(name: str):
+        if new_channels_config is None:
+            return None
+        cfg = getattr(new_channels_config, name, None)
+        if cfg is None:
+            extra = (
+                getattr(new_channels_config, "__pydantic_extra__", None) or {}
+            )
+            cfg = extra.get(name)
+        return cfg
+
+    def _is_enabled(cfg) -> bool:
+        if cfg is None:
+            return False
+        if isinstance(cfg, dict):
+            return bool(cfg.get("enabled", False))
+        return bool(getattr(cfg, "enabled", False))
+
+    # 1+2+3a. Walk existing channels: swap process; remove if disabled;
+    # otherwise propagate the new config (in-place or via clone+replace).
+    # Snapshot list — `replace_channel`/`remove_channel` mutate
+    # `cm.channels` mid-iteration.
+    snapshot = list(cm.channels)
     for ch in snapshot:
         old_id = id(getattr(ch, "_process", None))
         ch._process = new_process
@@ -220,17 +254,21 @@ async def reload_channel_service(
             old_id,
             id(new_process),
         )
-        # Pull the new sub-config for this channel from the workspace
-        # config and push it into the running channel.
-        if new_channels_config is None:
-            continue
-        new_ch_cfg = getattr(new_channels_config, ch.channel, None)
-        if new_ch_cfg is None:
-            extra = (
-                getattr(new_channels_config, "__pydantic_extra__", None) or {}
-            )
-            new_ch_cfg = extra.get(ch.channel)
-        if new_ch_cfg is None:
+        new_ch_cfg = _get_ch_cfg(ch.channel)
+        if not _is_enabled(new_ch_cfg):
+            try:
+                removed = await cm.remove_channel(ch.channel)
+            except Exception:
+                _logger.exception(
+                    "channel_manager reload: failed to remove channel %s",
+                    ch.channel,
+                )
+                continue
+            if removed:
+                _logger.info(
+                    "channel_manager reload: %s removed (no longer enabled)",
+                    ch.channel,
+                )
             continue
         try:
             applied_in_place = await ch.update_config(new_ch_cfg)
@@ -262,9 +300,57 @@ async def reload_channel_service(
                 ch.channel,
             )
 
+    # 3b. Build any newly-enabled channels not previously in cm.channels
+    # (e.g. a hot-added agent enabling its first telegram bot).
+    current_names = {ch.channel for ch in cm.channels}
+    available = get_available_channels()
+    show_tool_details = getattr(ws._config, "show_tool_details", True)
+
+    def _on_last_dispatch(channel, user_id, session_id):
+        update_last_dispatch(
+            channel=channel,
+            user_id=user_id,
+            session_id=session_id,
+            agent_id=ws.agent_id,
+        )
+
+    for key, ch_cls in get_channel_registry().items():
+        if key in current_names or key not in available:
+            continue
+        ch_cfg = _get_ch_cfg(key)
+        if not _is_enabled(ch_cfg):
+            continue
+        new_ch = ChannelManager.build_one_channel(
+            key=key,
+            ch_cls=ch_cls,
+            ch_cfg=ch_cfg,
+            process=new_process,
+            on_last_dispatch=_on_last_dispatch,
+            show_tool_details=show_tool_details,
+            workspace_dir=ws.workspace_dir,
+        )
+        if new_ch is None:
+            continue
+        try:
+            # replace_channel's "no existing" branch appends + starts the
+            # new channel, so this also handles the cold-add case.
+            await cm.replace_channel(new_ch)
+            _logger.info(
+                "channel_manager reload: %s built and started (hot-add)",
+                key,
+            )
+        except Exception:
+            _logger.exception(
+                "channel_manager reload: failed to start newly enabled "
+                "channel %s",
+                key,
+            )
+
+    # set_workspace also injects `_workspace` into channels appended above
+    # via replace_channel, so it must run after the hot-add loop.
     cm.set_workspace(ws)
     _logger.info(
-        "channel_manager reload: updated %d channels to new runner (id=%s)",
+        "channel_manager reload: now managing %d channels (id=%s)",
         len(cm.channels),
         id(runner),
     )

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import sqlite3
-import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -12,15 +11,9 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-# mempalace is installed outside the normal venv on joe-faex1; add that path
-# only if it exists so the import doesn't blow up on other machines.
-_JOE_FAEX1_MEMPALACE = "/home/joe/.local/lib/python3.13/site-packages"
-if Path(_JOE_FAEX1_MEMPALACE).is_dir():
-    sys.path.insert(0, _JOE_FAEX1_MEMPALACE)
-
 try:
-    from mempalace.config import MempalaceConfig  # noqa: E402
-    from mempalace.chroma_helper import get_collection  # noqa: E402
+    from mempalace.config import MempalaceConfig
+    from mempalace.chroma_helper import get_collection
 
     _MEMPALACE_AVAILABLE = True
 except ImportError:

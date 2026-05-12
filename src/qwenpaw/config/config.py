@@ -931,6 +931,19 @@ class AgentsRunningConfig(BaseModel):
         ),
     )
 
+    allow_cross_channel_signal_tools: bool = Field(
+        default=False,
+        description=(
+            "Expose signal_* sticker tools to this agent regardless of the "
+            "inbound channel.  Default off: signal_* tools are hidden when "
+            "the inbound channel is e.g. WhatsApp / Discord (the 7 extra "
+            "tools have been observed to bloat the toolkit and make "
+            "Claude-class models drop tool_use entirely in routine replies). "
+            "Turn on for an agent that needs to bridge stickers across "
+            "channels (e.g. migrate a WhatsApp sticker pack to Signal)."
+        ),
+    )
+
     same_session_mode: Literal["parallel", "steer"] = Field(
         default="parallel",
         description=(
@@ -1336,6 +1349,15 @@ class AgentProfileConfig(BaseModel):
             "model does not support video input.  ``view_video`` "
             "delegates to this model with the user-supplied prompt + "
             "VideoBlock and returns the response as text."
+        ),
+    )
+    fallback_image_model: Optional["ModelSlotConfig"] = Field(
+        default=None,
+        description=(
+            "Fallback model for image understanding when the active "
+            "model does not support image input.  ``view_image`` "
+            "delegates to this model with the user-supplied prompt + "
+            "ImageBlock and returns the response as text."
         ),
     )
     language: str = Field(

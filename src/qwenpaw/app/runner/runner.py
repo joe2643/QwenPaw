@@ -298,6 +298,10 @@ class AgentRunner(Runner):
         )
         query = _get_last_user_text(msgs)
         session_id = getattr(request, "session_id", "") or ""
+        max_concurrent_runs = max(
+            1,
+            int(getattr(request, "max_concurrent_runs", 1) or 1),
+        )
 
         # Check if query is a command (including /approval)
         logger.debug(f"Query: {query!r}, is_command: {_is_command(query)}")
@@ -382,6 +386,7 @@ class AgentRunner(Runner):
                 "user_id": user_id,
                 "channel": channel,
                 "agent_id": self.agent_id,
+                "max_concurrent_runs": max_concurrent_runs,
             }
 
             # Extract root_session_id from request payload (agent chat)
@@ -597,6 +602,8 @@ class AgentRunner(Runner):
                     channel,
                     name=name,
                 )
+                base_request_context["chat_id"] = chat.id
+                agent._request_context["chat_id"] = chat.id
                 logger.debug(f"Runner: Got chat: {chat.id}")
             else:
                 logger.warning(
@@ -770,6 +777,7 @@ class AgentRunner(Runner):
                 await self.session.save_session_state(
                     session_id=session_id,
                     user_id=user_id,
+                    merge_concurrent=max_concurrent_runs > 1,
                     agent=agent,
                 )
 

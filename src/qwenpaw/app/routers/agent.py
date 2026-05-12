@@ -592,3 +592,87 @@ async def put_fallback_video_model(
         provider_id=slot.provider_id if slot else None,
         model=slot.model if slot else None,
     )
+
+
+# -------------------------------------------------------------------------
+# Fallback image model
+#
+# Mirrors fallback_video_model but for ``view_image``.  When the agent's
+# primary model can't perceive images, ``view_image`` delegates the
+# ImageBlock + a caller-supplied prompt to the fallback and returns the
+# text description.
+# -------------------------------------------------------------------------
+
+
+class _FallbackImageModelBody(BaseModel):
+    """Request body for setting the fallback image model.
+
+    Both fields nullable so the client can clear the slot by sending
+    ``{"provider_id": null, "model": null}`` without a separate DELETE.
+    """
+
+    provider_id: str | None = Field(
+        default=None,
+        description="Provider id, e.g. 'gemini', 'claude-oauth'.  "
+        "null clears the slot.",
+    )
+    model: str | None = Field(
+        default=None,
+        description="Model id within the provider.  null clears the slot.",
+    )
+
+
+@router.get(
+    "/fallback-image-model",
+    response_model=_FallbackImageModelBody,
+    summary="Get the agent's fallback image model",
+    description="Returns {provider_id, model} or nulls when unset.",
+)
+async def get_fallback_image_model(
+    request: Request,
+) -> _FallbackImageModelBody:
+    workspace = await get_agent_for_request(request)
+    agent_config = load_agent_config(workspace.agent_id)
+    slot = agent_config.fallback_image_model
+    if slot is None:
+        return _FallbackImageModelBody()
+    return _FallbackImageModelBody(
+        provider_id=slot.provider_id,
+        model=slot.model,
+    )
+
+
+@router.put(
+    "/fallback-image-model",
+    response_model=_FallbackImageModelBody,
+    summary="Set the agent's fallback image model",
+    description="Pass both fields to set; pass nulls to clear.",
+)
+async def put_fallback_image_model(
+    body: _FallbackImageModelBody = Body(...),
+    request: Request = None,
+) -> _FallbackImageModelBody:
+    workspace = await get_agent_for_request(request)
+    agent_config = load_agent_config(workspace.agent_id)
+
+    if body.provider_id and body.model:
+        agent_config.fallback_image_model = ModelSlotConfig(
+            provider_id=body.provider_id,
+            model=body.model,
+        )
+    elif not body.provider_id and not body.model:
+        agent_config.fallback_image_model = None
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=("provider_id and model must both be set or both be null"),
+        )
+
+    save_agent_config(workspace.agent_id, agent_config)
+    schedule_agent_reload(request, workspace.agent_id)
+
+    slot = agent_config.fallback_image_model
+    return _FallbackImageModelBody(
+        provider_id=slot.provider_id if slot else None,
+        model=slot.model if slot else None,
+    )

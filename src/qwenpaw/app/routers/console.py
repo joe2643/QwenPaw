@@ -15,6 +15,7 @@ from starlette.responses import StreamingResponse
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
 from ...utils.logging import LOG_FILE_PATH
 from ..agent_context import get_agent_for_request
+from ..runner import control_commands
 
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ router = APIRouter(prefix="/console", tags=["console"])
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_DEBUG_LOG_LINES = 1000
+DEFAULT_CONSOLE_PARALLEL_MAX_CONCURRENT_RUNS = 3
 
 
 def _safe_filename(name: str) -> str:
@@ -65,6 +67,54 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
         },
     }
     return native_payload
+
+
+def _native_payload_to_agentscope_messages(console_channel, native_payload):
+    """Convert the console payload into AgentScope Msg objects for steering."""
+    from agentscope_runtime.adapters.agentscope.message import (
+        message_to_agentscope_msg,
+    )
+
+    agent_request = console_channel.build_agent_request_from_native(
+        native_payload,
+    )
+    msgs = message_to_agentscope_msg(agent_request.input)
+    return msgs if isinstance(msgs, list) else [msgs]
+
+
+def _native_payload_first_text(native_payload) -> str | None:
+    """Extract the first text part from a console-native payload."""
+    content_parts = native_payload.get("content_parts") or []
+    for part in content_parts:
+        if isinstance(part, str):
+            return part
+        text = getattr(part, "text", None)
+        if isinstance(text, str):
+            return text
+        if isinstance(part, dict):
+            text = part.get("text")
+            if isinstance(text, str):
+                return text
+    return None
+
+
+def _is_immediate_console_control_command(native_payload) -> bool:
+    """Control commands must bypass same-session run attachment."""
+    text = _native_payload_first_text(native_payload)
+    return control_commands.is_control_command(text)
+
+
+def _console_parallel_max_concurrent_runs(running_config) -> int:
+    """Resolve the Console same-session parallel run cap."""
+    configured = getattr(
+        running_config,
+        "same_session_parallel_max_runs",
+        DEFAULT_CONSOLE_PARALLEL_MAX_CONCURRENT_RUNS,
+    )
+    try:
+        return max(1, int(configured))
+    except (TypeError, ValueError):
+        return DEFAULT_CONSOLE_PARALLEL_MAX_CONCURRENT_RUNS
 
 
 def _tail_text_file(
@@ -151,12 +201,53 @@ async def post_console_chat(
         queue = await tracker.attach(chat.id)
         if queue is None:
             return
-    else:
-        queue, _ = await tracker.attach_or_start(
-            chat.id,
-            native_payload,
-            console_channel.stream_one,
+    elif _is_immediate_console_control_command(native_payload):
+        async def control_event_generator() -> AsyncGenerator[str, None]:
+            try:
+                async for event_data in console_channel.stream_one(
+                    native_payload,
+                ):
+                    yield event_data
+            except Exception as e:
+                logger.exception("Console control command stream error")
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+        return StreamingResponse(
+            control_event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
         )
+    else:
+        running_config = getattr(workspace.config, "running", None)
+        same_session_mode = getattr(
+            running_config,
+            "same_session_mode",
+            "parallel",
+        )
+        if same_session_mode == "steer":
+            pending_msgs = _native_payload_to_agentscope_messages(
+                console_channel,
+                native_payload,
+            )
+            queue = await tracker.enqueue_pending_input(chat.id, pending_msgs)
+            if queue is None:
+                queue, _ = await tracker.attach_or_start(
+                    chat.id,
+                    native_payload,
+                    console_channel.stream_one,
+                )
+        else:
+            queue, _ = await tracker.attach_or_start(
+                chat.id,
+                native_payload,
+                console_channel.stream_one,
+                max_concurrent_runs=_console_parallel_max_concurrent_runs(
+                    running_config,
+                ),
+            )
 
     async def event_generator() -> AsyncGenerator[str, None]:
         # Hold iterator so finally can aclose(); guarantees stream_from_queue's
