@@ -745,8 +745,44 @@ async def signal_create_sticker_pack(
     # Validate every sticker up-front so we never half-build a
     # staging dir.  Collect ALL errors so the agent can fix them
     # in one round rather than whack-a-mole.
+    #
+    # Signal-Android refuses to render user-uploaded WebP correctly
+    # (static WebP turns into a voice-message blob; animated WebP
+    # displays only the first frame, no animation).  So we
+    # auto-transcode any non-PNG input through ``prepare_sticker_webp``
+    # before validation: animated → APNG, static → static PNG.  PNG /
+    # APNG inputs pass through unchanged.
+    #
+    # Transcode output goes into a process-temp scratch dir during
+    # validation.  Only after validation passes do we create the real
+    # staging dir and move the bytes into it.  That keeps the "no
+    # staging dir on validation failure" contract intact (some tests
+    # rely on it for cleanup invariants).
+    import tempfile
+
+    from .sticker_convert import (
+        StickerConversionError,
+        prepare_sticker_webp,
+    )
+
+    import hashlib
+
+    scratch_dir = Path(
+        tempfile.mkdtemp(prefix="signal-sticker-transcode-"),
+    )
     errors: list[str] = []
-    resolved: list[tuple[Path, str]] = []
+    # (effective_path, emoji, original_if_transcoded)
+    resolved: list[tuple[Path, str, Path | None]] = []
+    transcode_notes: list[str] = []
+    # Content-hash dedup: WhatsApp exports + bulk migrations often
+    # repeat the same sticker bytes under different emojis (observed
+    # 2026-05-12 on the Yukei Reactions pack — 25 entries → 16 unique).
+    # Signal's picker shows duplicates as redundant tiles; the user
+    # rarely wants that.  Keep the first occurrence's emoji and log
+    # which entries were dropped so the agent can surface the dedup
+    # decision rather than having it hidden in logs.
+    seen_hashes: dict[str, int] = {}  # sha256 → first-seen orig idx
+    dedup_notes: list[str] = []
     for idx, item in enumerate(stickers):
         if not isinstance(item, dict):
             errors.append(
@@ -762,19 +798,86 @@ async def signal_create_sticker_pack(
             errors.append(f"[{idx}] 'emoji' is required")
             continue
         p = Path(str(raw_path)).expanduser().resolve()
-        err = _validate_sticker_webp(p)
+        if not p.is_file():
+            errors.append(f"[{idx}] sticker file not found: {p}")
+            continue
+
+        # Decide whether to transcode.  Anything that's not already a
+        # PNG by magic gets routed through ``prepare_sticker_webp`` so
+        # animated frames are preserved as APNG and Signal Android
+        # gets a format it can actually render.
+        try:
+            with open(p, "rb") as f:
+                raw_bytes = f.read()
+        except OSError as e:
+            errors.append(f"[{idx}] could not read sticker file: {e}")
+            continue
+
+        # Content-hash dedup runs on the *source* bytes (cheaper than
+        # transcoding twice, and dupes don't change after transcode).
+        content_hash = hashlib.sha256(raw_bytes).hexdigest()
+        if content_hash in seen_hashes:
+            first_idx = seen_hashes[content_hash]
+            dedup_notes.append(
+                f"[{idx}] {p.name} ({emoji}) — duplicate of entry "
+                f"[{first_idx}], dropped",
+            )
+            continue
+        seen_hashes[content_hash] = idx
+
+        magic_pre = raw_bytes[:16]
+        is_png_input = _detect_sticker_format(magic_pre) == "png"
+        effective_path = p
+        original_for_log: Path | None = None
+        if not is_png_input:
+            try:
+                effective_path = prepare_sticker_webp(
+                    p,
+                    output_path=scratch_dir / f"_pre_{idx}.sticker.png",
+                    output_format="png",
+                )
+                original_for_log = p
+                transcode_notes.append(
+                    f"[{idx}] {p.name} → APNG/PNG ({effective_path.stat().st_size} bytes)",
+                )
+            except (StickerConversionError, FileNotFoundError) as e:
+                errors.append(f"[{idx}] transcode failed: {e}")
+                continue
+            except Exception as e:
+                # Pillow can raise UnidentifiedImageError, OSError, etc.
+                # Lump under a clear failure message rather than 500.
+                errors.append(
+                    f"[{idx}] transcode failed: {type(e).__name__}: {e}",
+                )
+                continue
+
+        err = _validate_sticker_image(effective_path)
         if err:
             errors.append(f"[{idx}] {err}")
             continue
-        resolved.append((p, emoji))
+        resolved.append((effective_path, emoji, original_for_log))
     if errors:
+        shutil.rmtree(scratch_dir, ignore_errors=True)
         return _err(
             "Error: sticker validation failed:\n  " + "\n  ".join(errors),
         )
 
-    # Stage the pack contents.  Keep the dir after upload — signal-cli
-    # sometimes wants a retry and the agent may want to inspect the
-    # exact bytes that were uploaded.
+    if transcode_notes:
+        logger.info(
+            "signal_create_sticker_pack: auto-transcoded %d entries to PNG/APNG:\n  %s",
+            len(transcode_notes),
+            "\n  ".join(transcode_notes),
+        )
+    if dedup_notes:
+        logger.info(
+            "signal_create_sticker_pack: dropped %d duplicate entries:\n  %s",
+            len(dedup_notes),
+            "\n  ".join(dedup_notes),
+        )
+
+    # Validation passed — set up the real staging dir.  Keep it after
+    # upload (signal-cli sometimes wants a retry and the agent may
+    # want to inspect the exact bytes that were uploaded).
     staging_root = channel._media_dir / "sticker_pack_staging"
     staging_dir = staging_root / uuid.uuid4().hex
     staging_dir.mkdir(parents=True, exist_ok=True)
@@ -784,17 +887,37 @@ async def signal_create_sticker_pack(
         # manifest's ``contentType`` matches reality.  Mismatched
         # contentType (Signal pack stored ``null``) is what triggered
         # the "voice message instead of sticker" bug we hit in prod —
-        # don't rely on file extensions alone.
+        # don't rely on file extensions alone.  After the auto-
+        # transcode pass above, every entry should be PNG or APNG (both
+        # share PNG magic), but keep the WebP branch as a defensive
+        # path: if a future code change accidentally lets a WebP
+        # through, manifest contentType still tells the truth.
         staged_entries: list[tuple[str, str, str]] = []
-        for i, (src, emoji) in enumerate(resolved):
+        for i, (src, emoji, _original) in enumerate(resolved):
             with open(src, "rb") as f:
                 magic = f.read(16)
             fmt = _detect_sticker_format(magic) or "webp"
             ext = "png" if fmt == "png" else "webp"
             mime = "image/png" if fmt == "png" else "image/webp"
             dest_name = f"{i}.{ext}"
-            shutil.copy2(src, staging_dir / dest_name)
+            dest_path = staging_dir / dest_name
+            # If the source is a transcode output (lives in
+            # ``scratch_dir``), rename (atomic move) rather than copy
+            # to avoid a redundant write of the same bytes.
+            try:
+                src_resolved = src.resolve()
+            except OSError:
+                src_resolved = src
+            if src_resolved.parent == scratch_dir.resolve():
+                src.rename(dest_path)
+            else:
+                shutil.copy2(src, dest_path)
             staged_entries.append((dest_name, mime, emoji))
+        # Anything left in scratch_dir is leftover (e.g. transcoded
+        # entries that were validated and then nothing-else); rmtree
+        # the whole scratch_dir now that the bytes we care about have
+        # been moved into staging.
+        shutil.rmtree(scratch_dir, ignore_errors=True)
 
         manifest = {
             "title": title,
@@ -848,20 +971,32 @@ async def signal_create_sticker_pack(
         "author": author,
         "label": (label or "").strip() or None,
         "staged_at": str(staging_dir),
+        # ``dedup_dropped`` surfaces any input entries that were
+        # byte-identical to earlier entries and dropped before
+        # staging.  Empty list (default) means no dedup happened.
+        "dedup_dropped": dedup_notes,
         "stickers": [
             {
                 "id": i,
                 "emoji": emoji,
-                "source_path": str(src),
+                # ``source_path`` is the original caller-supplied path.
+                # When the auto-transcode kicked in (WebP / GIF /
+                # animated source) ``src`` is the staged converted
+                # file inside the staging dir; we surface the
+                # ``original`` path so the agent can correlate back
+                # to its inputs.
+                "source_path": str(_original or src),
+                "transcoded": _original is not None,
                 # ``staged_entries`` carries the real on-disk filename
                 # (``.png`` or ``.webp``) chosen from magic-byte
                 # detection — not all stickers in a pack have to be
                 # the same format.
                 "staged_path": str(staging_dir / dest_name),
             }
-            for i, ((src, emoji), (dest_name, _mime, _emoji)) in enumerate(
-                zip(resolved, staged_entries),
-            )
+            for i, (
+                (src, emoji, _original),
+                (dest_name, _mime, _emoji),
+            ) in enumerate(zip(resolved, staged_entries))
         ],
     }
     from ...app.channels.signal.sticker_pack_registry import upsert_pack

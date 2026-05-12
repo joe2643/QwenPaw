@@ -83,7 +83,52 @@ def _make_vp8x_webp(w: int, h: int, pad_bytes: int = 0) -> bytes:
 
 
 def _write_valid_sticker(path: Path, pad: int = 0) -> Path:
-    path.write_bytes(_make_vp8x_webp(512, 512, pad_bytes=pad))
+    """Write a 512×512 WebP that Pillow can actually decode (not the
+    header-only ``_make_vp8x_webp`` fixture, which only fools the
+    magic+dims reader).  Real bytes are needed since
+    ``signal_create_sticker_pack`` now auto-transcodes any non-PNG
+    input through Pillow before staging — a header-only WebP would
+    fail at the decoder step before reaching the original test's
+    validator path.
+
+    Each call seeds the colour off the filename so byte-identical
+    output is avoided across calls in the same test.  The downstream
+    content-hash dedup would otherwise treat fixture files as
+    duplicates and silently drop them.
+    """
+    from PIL import Image
+
+    seed = hash(path.name) & 0xFFFFFF
+    colour = (seed & 0xFF, (seed >> 8) & 0xFF, (seed >> 16) & 0xFF, 200)
+    Image.new("RGBA", (512, 512), colour).save(path, "WEBP")
+    # ``pad`` was used in legacy oversize tests to push the file past
+    # 300 KB.  Append junk bytes after the real WebP — RIFF parsers
+    # ignore them but ``stat().st_size`` reflects the bloat.
+    if pad:
+        with open(path, "ab") as f:
+            f.write(b"\x00" * pad)
+    return path
+
+
+def _write_real_animated_webp(path: Path, frames: int = 4) -> Path:
+    """Write a Pillow-decodable animated WebP at 200×200 — small
+    enough to keep tests snappy but multi-frame so the transcode
+    path takes the APNG branch.
+    """
+    from PIL import Image
+
+    imgs = []
+    for i in range(frames):
+        col = ((i * 60) % 256, (200 - i * 30) % 256, (i * 40) % 256, 255)
+        imgs.append(Image.new("RGBA", (200, 200), col))
+    imgs[0].save(
+        path,
+        "WEBP",
+        save_all=True,
+        append_images=imgs[1:],
+        duration=120,
+        loop=0,
+    )
     return path
 
 
@@ -293,9 +338,10 @@ async def test_create_sticker_pack_validates_every_sticker_up_front(
     )
     text = res.content[0]["text"]
     # All three failure modes should appear — no staging should occur.
-    # Validator now accepts both PNG and WebP, so the magic-byte
-    # error message changed from "not a WebP" to "not PNG or WebP".
-    assert "[1]" in text and "PNG or WebP" in text
+    # With the WebP→APNG auto-transcode in front, gibberish bytes
+    # surface as a Pillow decoder error wrapped as ``transcode failed:
+    # …`` rather than the old "not PNG or WebP" magic-byte error.
+    assert "[1]" in text and "transcode failed" in text
     assert "[2]" in text and "emoji" in text
     fake_channel.client.upload_sticker_pack.assert_not_awaited()
     assert not (fake_channel._media_dir / "sticker_pack_staging").exists()
@@ -327,15 +373,19 @@ async def test_create_sticker_pack_stages_and_uploads(
     assert payload["pack_id"] == "NEWPACK"
     assert payload["pack_key"] == "NEWKEY"
 
-    # Staging dir should contain manifest.json + the numbered webp
-    # copies, and should survive post-upload for debugging.
+    # Staging dir should contain manifest.json + the numbered files.
+    # WebP sources are auto-transcoded to PNG before staging (Signal
+    # Android can't render user-uploaded WebP — see the docstring on
+    # ``sticker_convert``), so we expect ``0.png`` / ``1.png`` here.
     staging_dirs = list(
         (fake_channel._media_dir / "sticker_pack_staging").iterdir(),
     )
     assert len(staging_dirs) == 1
     staged = staging_dirs[0]
-    assert (staged / "0.webp").read_bytes() == s0.read_bytes()
-    assert (staged / "1.webp").read_bytes() == s1.read_bytes()
+    assert (staged / "0.png").is_file()
+    assert (staged / "1.png").is_file()
+    assert (staged / "0.png").read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert (staged / "1.png").read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
     manifest = json.loads((staged / "manifest.json").read_text())
     assert manifest["title"] == "Title"
     # signal-cli's uploadStickerPack requires per-entry ``file`` +
@@ -344,8 +394,8 @@ async def test_create_sticker_pack_stages_and_uploads(
     # No explicit cover — signal-cli auto-uses the first sticker.
     assert "cover" not in manifest
     assert manifest["stickers"] == [
-        {"file": "0.webp", "contentType": "image/webp", "emoji": "🦀"},
-        {"file": "1.webp", "contentType": "image/webp", "emoji": "🐚"},
+        {"file": "0.png", "contentType": "image/png", "emoji": "🦀"},
+        {"file": "1.png", "contentType": "image/png", "emoji": "🐚"},
     ]
     # upload_sticker_pack was called with the manifest path.
     call = fake_channel.client.upload_sticker_pack.await_args
@@ -390,6 +440,192 @@ async def test_create_sticker_pack_rejects_too_many_stickers(
         stickers=[{"path": str(s0), "emoji": "🙂"}] * 201,
     )
     assert "200 stickers" in res.content[0]["text"]
+
+
+# ────────────────── auto-transcode (WebP → PNG/APNG) ───────────────
+
+
+async def test_create_sticker_pack_transcodes_animated_webp_to_apng(
+    fake_channel,
+    tmp_path,
+) -> None:
+    """Real-world bug we hit: an agent migrating a WhatsApp pack feeds
+    already-512×512 animated WebP files straight into
+    ``signal_create_sticker_pack``.  Signal Android can't render
+    those as animated (it shows only the first frame).  The pack
+    creator must transcode WebP → APNG before staging so the
+    delivered file actually animates on every Signal client.
+    """
+    src = _write_real_animated_webp(tmp_path / "anim.webp", frames=4)
+    fake_channel.client.upload_sticker_pack.return_value = (
+        "https://signal.art/addstickers/#pack_id=APACK&pack_key=AKEY"
+    )
+
+    res = await st.signal_create_sticker_pack(
+        "Animated",
+        "Author",
+        stickers=[{"path": str(src), "emoji": "🌀"}],
+    )
+    text = res.content[0]["text"]
+    payload = json.loads(text[text.index("{") :])
+    assert payload["pack_id"] == "APACK"
+    # Per-sticker response should flag the entry as transcoded and
+    # echo the original path so the agent can map the result back to
+    # its inputs.
+    assert payload["stickers"][0]["transcoded"] is True
+    assert payload["stickers"][0]["source_path"].endswith("anim.webp")
+
+    # Staging should hold a real APNG (PNG magic + ``acTL`` chunk),
+    # NOT the original WebP bytes.
+    staged_dir = next(
+        (fake_channel._media_dir / "sticker_pack_staging").iterdir(),
+    )
+    apng = staged_dir / "0.png"
+    assert apng.is_file()
+    data = apng.read_bytes()
+    assert data.startswith(b"\x89PNG\r\n\x1a\n")
+    # ``acTL`` is the chunk that distinguishes APNG from plain PNG.
+    assert b"acTL" in data, (
+        "staged file lacks acTL chunk — animation was lost, this is "
+        "the exact bug Signal Android trips over"
+    )
+
+    # Manifest must declare image/png for the APNG (APNG IS PNG by
+    # spec — same magic + IHDR layout — and Signal CDN expects the
+    # PNG content type, not image/apng).
+    manifest = json.loads((staged_dir / "manifest.json").read_text())
+    assert manifest["stickers"][0]["contentType"] == "image/png"
+    assert manifest["stickers"][0]["file"] == "0.png"
+
+
+async def test_create_sticker_pack_transcodes_static_webp_to_png(
+    fake_channel,
+    tmp_path,
+) -> None:
+    """Static WebP triggers the Signal-Android voice-message-blob
+    rendering bug.  Auto-transcode should turn even static WebP
+    into static PNG before staging."""
+    src = _write_valid_sticker(tmp_path / "still.webp")
+    fake_channel.client.upload_sticker_pack.return_value = (
+        "https://signal.art/addstickers/#pack_id=SPACK&pack_key=SKEY"
+    )
+
+    res = await st.signal_create_sticker_pack(
+        "Static",
+        "Author",
+        stickers=[{"path": str(src), "emoji": "🌸"}],
+    )
+    payload = json.loads(
+        res.content[0]["text"][res.content[0]["text"].index("{") :],
+    )
+    assert payload["stickers"][0]["transcoded"] is True
+
+    staged_dir = next(
+        (fake_channel._media_dir / "sticker_pack_staging").iterdir(),
+    )
+    png = staged_dir / "0.png"
+    assert png.is_file()
+    data = png.read_bytes()
+    assert data.startswith(b"\x89PNG\r\n\x1a\n")
+    # Static input must NOT carry an ``acTL`` chunk — that would mean
+    # we're paying APNG overhead for no animation, and some viewers
+    # complain about empty animation control blocks.
+    assert b"acTL" not in data
+
+
+async def test_create_sticker_pack_dedups_byte_identical_inputs(
+    fake_channel,
+    tmp_path,
+) -> None:
+    """Bulk-migration sources (WhatsApp pack exports) routinely
+    repeat the same animated sticker bytes under different emojis.
+    The pack creator must dedup by content hash, keep the first
+    occurrence's emoji, and surface what was dropped to the agent.
+    """
+    from PIL import Image
+
+    src_a = tmp_path / "a.webp"
+    Image.new("RGBA", (512, 512), (255, 0, 0, 255)).save(src_a, "WEBP")
+    # Byte-identical copy (same bytes on disk, different filename)
+    src_dup = tmp_path / "dup.webp"
+    src_dup.write_bytes(src_a.read_bytes())
+    # A truly different sticker
+    src_b = tmp_path / "b.webp"
+    Image.new("RGBA", (512, 512), (0, 255, 0, 255)).save(src_b, "WEBP")
+
+    fake_channel.client.upload_sticker_pack.return_value = (
+        "https://signal.art/addstickers/#pack_id=DPACK&pack_key=DKEY"
+    )
+
+    res = await st.signal_create_sticker_pack(
+        "Deduped",
+        "Author",
+        stickers=[
+            {"path": str(src_a), "emoji": "🅰️"},
+            {"path": str(src_dup), "emoji": "🆎"},  # dup of [0]
+            {"path": str(src_b), "emoji": "🅱️"},
+        ],
+    )
+    text = res.content[0]["text"]
+    payload = json.loads(text[text.index("{") :])
+
+    # Only 2 unique stickers should make it through (entries 0 + 2),
+    # entry 1 dropped because it's a content-hash dup of entry 0.
+    assert len(payload["stickers"]) == 2
+    assert payload["stickers"][0]["emoji"] == "🅰️"
+    assert payload["stickers"][1]["emoji"] == "🅱️"
+
+    # ``dedup_dropped`` should record the dropped entry so the agent
+    # can tell the user "I removed 1 duplicate" rather than silently
+    # losing the entry.
+    assert len(payload["dedup_dropped"]) == 1
+    assert "dup.webp" in payload["dedup_dropped"][0]
+    assert "🆎" in payload["dedup_dropped"][0]
+
+    # Staging dir should only have 2 files + manifest.
+    staged_dir = next(
+        (fake_channel._media_dir / "sticker_pack_staging").iterdir(),
+    )
+    assert (staged_dir / "0.png").is_file()
+    assert (staged_dir / "1.png").is_file()
+    assert not (staged_dir / "2.png").exists()
+    manifest = json.loads((staged_dir / "manifest.json").read_text())
+    assert len(manifest["stickers"]) == 2
+
+
+async def test_create_sticker_pack_passes_through_native_png(
+    fake_channel,
+    tmp_path,
+) -> None:
+    """Native PNG input must NOT be re-encoded — that would double-
+    encode (loss of fidelity, possibly oversize) and would make
+    ``transcoded`` lie about whether bytes changed."""
+    from PIL import Image
+
+    src = tmp_path / "native.png"
+    Image.new("RGBA", (512, 512), (40, 200, 90, 255)).save(src, "PNG")
+    original_bytes = src.read_bytes()
+
+    fake_channel.client.upload_sticker_pack.return_value = (
+        "https://signal.art/addstickers/#pack_id=PPACK&pack_key=PKEY"
+    )
+
+    res = await st.signal_create_sticker_pack(
+        "Native",
+        "Author",
+        stickers=[{"path": str(src), "emoji": "✨"}],
+    )
+    payload = json.loads(
+        res.content[0]["text"][res.content[0]["text"].index("{") :],
+    )
+    assert payload["stickers"][0]["transcoded"] is False
+    assert payload["stickers"][0]["source_path"].endswith("native.png")
+
+    staged_dir = next(
+        (fake_channel._media_dir / "sticker_pack_staging").iterdir(),
+    )
+    # Native PNG should be byte-for-byte identical in staging.
+    assert (staged_dir / "0.png").read_bytes() == original_bytes
 
 
 # ─────────────────────────── send ──────────────────────────────────
