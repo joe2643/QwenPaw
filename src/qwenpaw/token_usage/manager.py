@@ -44,6 +44,13 @@ class TokenUsageByModel(TokenUsageStats):
     model: str = Field(..., description="Model name")
 
 
+class TokenUsageByDateModel(TokenUsageStats):
+    """Per-date per-model aggregate in summary."""
+
+    provider_id: str = Field("", description="Provider ID")
+    model: str = Field(..., description="Model name")
+
+
 class TokenUsageSummary(BaseModel):
     """Aggregated token usage summary returned by get_summary()."""
 
@@ -52,17 +59,9 @@ class TokenUsageSummary(BaseModel):
     total_cache_creation_tokens: int = Field(0, ge=0)
     total_cache_read_tokens: int = Field(0, ge=0)
     total_calls: int = Field(0, ge=0)
-    by_model: dict[str, TokenUsageByModel] = Field(
-        default_factory=dict,
-        description="Per composite key (provider:model)",
-    )
-    by_provider: dict[str, TokenUsageStats] = Field(
-        default_factory=dict,
-        description="Per provider_id",
-    )
     by_date: dict[str, TokenUsageStats] = Field(
         default_factory=dict,
-        description="Per date (YYYY-MM-DD)",
+        description="Per date (YYYY-MM-DD) - all models combined",
     )
 
 
@@ -226,8 +225,6 @@ class TokenUsageManager:
         total_cache_creation = 0
         total_cache_read = 0
         total_calls = 0
-        by_model_raw: dict[str, dict] = {}
-        by_provider_raw: dict[str, dict] = {}
         by_date_raw: dict[str, dict] = {}
 
         def _empty_bucket() -> dict[str, int]:
@@ -284,19 +281,46 @@ class TokenUsageManager:
             total_cache_creation_tokens=total_cache_creation,
             total_cache_read_tokens=total_cache_read,
             total_calls=total_calls,
-            by_model={
-                k: TokenUsageByModel.model_validate(v)
-                for k, v in by_model_raw.items()
-            },
-            by_provider={
-                k: TokenUsageStats.model_validate(v)
-                for k, v in by_provider_raw.items()
-            },
             by_date={
                 k: TokenUsageStats.model_validate(v)
                 for k, v in sorted(by_date_raw.items())
             },
         )
+
+    async def get_details(
+        self,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+        model_name: Optional[str] = None,
+        provider_id: Optional[str] = None,
+    ) -> list[TokenUsageRecord]:
+        """Get raw token usage records for frontend aggregation.
+
+        Args:
+            start_date: Start of date range (inclusive). Default: 30 days ago.
+            end_date: End of date range (inclusive). Default: today.
+            model_name: Optional model name filter.
+            provider_id: Optional provider ID filter.
+
+        Returns:
+            List of TokenUsageRecord with per-date per-model data.
+        """
+        if end_date is None:
+            end_date = date.today()
+        if start_date is None:
+            start_date = end_date - timedelta(days=30)
+
+        merged = await self._buffer.get_merged_data()
+
+        records = await self._query(
+            merged,
+            start_date,
+            end_date,
+            model_name,
+            provider_id,
+        )
+
+        return records
 
     @classmethod
     def get_instance(cls) -> "TokenUsageManager":

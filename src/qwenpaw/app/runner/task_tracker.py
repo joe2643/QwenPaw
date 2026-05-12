@@ -16,7 +16,8 @@ import logging
 import uuid
 import weakref
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Callable, Coroutine
+from datetime import datetime, timezone
+from typing import Any, AsyncGenerator, Callable, Coroutine, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,8 @@ class _RunState:
     # by ``LightContextManager.pre_reasoning``). Steer input is still
     # accepted but is logged so timing is observable in logs.
     compacting: bool = False
+    start_time: Optional[datetime] = None
+    finish_time: Optional[datetime] = None
 
 
 class TaskTracker:
@@ -56,6 +59,8 @@ class TaskTracker:
         self._runs: dict[str, _RunState] = {}
         self._child_runs: dict[str, set[str]] = {}
         self._queue_run_keys = weakref.WeakKeyDictionary()
+        self._global_last_run_at: Optional[datetime] = None
+        self._global_last_finish_at: Optional[datetime] = None
 
     @property
     def lock(self) -> asyncio.Lock:
@@ -71,6 +76,29 @@ class TaskTracker:
         if state is None or state.task.done():
             return "idle"
         return "running"
+
+    async def get_global_status(self) -> dict:
+        """Get global agent status summary.
+
+        Returns:
+            dict with keys:
+                - status: 'idle' | 'running'
+                - running_task_count: int
+                - last_run_at: Optional[datetime]
+                - last_finish_at: Optional[datetime]
+        """
+        async with self._lock:
+            running_count = sum(
+                1 for state in self._runs.values() if not state.task.done()
+            )
+            status = "running" if running_count > 0 else "idle"
+
+            return {
+                "status": status,
+                "running_task_count": running_count,
+                "last_run_at": self._global_last_run_at,
+                "last_finish_at": self._global_last_finish_at,
+            }
 
     async def has_active_tasks(self) -> bool:
         """Check if any tasks are currently running.
@@ -129,6 +157,7 @@ class TaskTracker:
         Args:
             run_key: Unique identifier for the external task.
         """
+        start_time = datetime.now(timezone.utc)
         async with self._lock:
             if run_key in self._runs and not self._runs[run_key].task.done():
                 logger.debug(
@@ -143,7 +172,9 @@ class TaskTracker:
                 task=future,
                 queues=[],
                 buffer=[],
+                start_time=start_time,
             )
+            self._global_last_run_at = start_time
             logger.debug("Registered external task: %s", run_key)
 
     async def unregister_external_task(self, run_key: str) -> None:
@@ -158,6 +189,7 @@ class TaskTracker:
             run_key: Unique identifier previously passed to
                 :meth:`register_external_task`.
         """
+        finish_time = datetime.now(timezone.utc)
         async with self._lock:
             state = self._runs.pop(run_key, None)
             if state is None:
@@ -168,6 +200,8 @@ class TaskTracker:
                 q.put_nowait(_SENTINEL)
             if not state.task.done():
                 state.task.set_result(None)
+            state.finish_time = finish_time
+            self._global_last_finish_at = finish_time
             logger.debug("Unregistered external task: %s", run_key)
 
     async def attach(self, run_key: str) -> asyncio.Queue | None:
@@ -294,7 +328,16 @@ class TaskTracker:
             tracker_ref = weakref.ref(self)
 
             async def _producer() -> None:
+                start_time = datetime.now(timezone.utc)
+
                 try:
+                    tracker = tracker_ref()
+                    if tracker is not None:
+                        async with tracker.lock:
+                            run.start_time = start_time
+                            # pylint: disable=protected-access
+                            tracker._global_last_run_at = start_time
+
                     async for sse in stream_fn(payload):
                         tracker = tracker_ref()
                         if tracker is None:
@@ -320,9 +363,13 @@ class TaskTracker:
                             for q in run.queues:
                                 q.put_nowait(err_sse)
                 finally:
+                    finish_time = datetime.now(timezone.utc)
                     tracker = tracker_ref()
                     if tracker is not None:
                         async with tracker.lock:
+                            run.finish_time = finish_time
+                            # pylint: disable=protected-access
+                            tracker._global_last_finish_at = finish_time
                             for q in run.queues:
                                 q.put_nowait(_SENTINEL)
                             # pylint: disable=protected-access

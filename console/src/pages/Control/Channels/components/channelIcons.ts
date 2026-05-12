@@ -25,7 +25,7 @@ export const CHANNEL_ICON_URLS: Record<string, string> = {
     "https://gw.alicdn.com/imgextra/i3/O1CN01L3azqd1XIi7O2jumZ_!!6000000002901-2-tps-400-400.png",
   wecom:
     "https://gw.alicdn.com/imgextra/i1/O1CN01HWtzmr1hkK9beQICJ_!!6000000004315-2-tps-400-400.png",
-  weixin:
+  wechat:
     "https://gw.alicdn.com/imgextra/i4/O1CN01GsAob11fkfDWVIb3R_!!6000000004045-2-tps-400-400.png",
   signal: "https://upload.wikimedia.org/wikipedia/commons/8/8d/Signal-Logo.svg",
   whatsapp: "https://upload.wikimedia.org/wikipedia/commons/6/6b/WhatsApp.svg",
@@ -38,7 +38,6 @@ export const CHANNEL_DEFAULT_ICON_URL =
 
 /** Get the CDN icon URL for a channel, with a default fallback. */
 export function getChannelIconUrl(channelKey: string): string {
-  channelKey = channelKey === "wechat" ? "weixin" : channelKey;
   return CHANNEL_ICON_URLS[channelKey] ?? CHANNEL_DEFAULT_ICON_URL;
 }
 
@@ -52,7 +51,7 @@ const LETTER_ICON_COLORS: Record<string, string> = {
   telegram: "#2AABEE",
   discord: "#5865F2",
   wecom: "#07C160",
-  weixin: "#07C160",
+  wechat: "#07C160",
   mqtt: "#660066",
   mattermost: "#0058CC",
   matrix: "#0DBD8B",

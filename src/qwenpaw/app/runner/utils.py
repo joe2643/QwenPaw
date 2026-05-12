@@ -67,6 +67,7 @@ def _active_provider_is_codex_oauth() -> bool:
 def build_env_context(
     session_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    user_name: Optional[str] = None,
     channel: Optional[str] = None,
     working_dir: Optional[str] = None,
     add_hint: bool = True,
@@ -77,6 +78,8 @@ def build_env_context(
     Args:
         session_id: Current session ID
         user_id: Current user ID
+        user_name: Optional human-readable sender name (e.g. IM nickname).
+            Only rendered when provided by the channel via channel_meta.
         channel: Current channel name
         working_dir: Working directory path
         add_hint: Whether to add hint context
@@ -96,6 +99,8 @@ def build_env_context(
         parts.append(f"- Session ID: {session_id}")
     if user_id is not None:
         parts.append(f"- User ID: {user_id}")
+    if user_name:
+        parts.append(f"- User Name: {user_name}")
     if channel is not None:
         parts.append(f"- Channel: {channel}")
 
