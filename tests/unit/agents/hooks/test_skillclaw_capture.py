@@ -292,3 +292,141 @@ async def test_http_mode_falls_back_on_connection_error(tmp_path, monkeypatch):
 
     line = (tmp_path / "conversations.jsonl").read_text().strip()
     assert json.loads(line)["session_id"] == "net-err-test"
+
+
+@pytest.mark.asyncio
+async def test_post_reasoning_emits_skillclaw_catalog_record(tmp_path):
+    skills_dir = tmp_path / "skill_pool"
+    skill_dir = skills_dir / "demo_skill"
+    skill_dir.mkdir(parents=True)
+    skill_path = skill_dir / "SKILL.md"
+    skill_path.write_text(
+        "---\n"
+        "name: demo_skill\n"
+        "description: Use for demo tasks.\n"
+        "---\n"
+        "# Demo\n",
+        encoding="utf-8",
+    )
+
+    class _Agent:
+        def __init__(self):
+            self._sys_prompt = "base system"
+            self.memory = _FakeMemory([_FakeMsg("user", "use the demo")])
+
+        @property
+        def sys_prompt(self):
+            return self._sys_prompt
+
+    output = _FakeMsg(
+        "assistant",
+        [
+            {"type": "thinking", "thinking": "demo applies"},
+            {"type": "text", "text": "I'll read it."},
+            {
+                "type": "tool_use",
+                "id": "call_demo",
+                "name": "read_file",
+                "input": {"file_path": str(skill_path)},
+            },
+        ],
+    )
+    agent = _Agent()
+    hook = SkillClawCaptureHook(
+        records_dir=tmp_path,
+        session_id="catalog-test",
+        skills_dir=skills_dir,
+    )
+
+    await hook.pre_reasoning(agent, {})
+    assert "## Skills (mandatory)" in agent._sys_prompt
+    assert "<name>demo_skill</name>" in agent._sys_prompt
+
+    await hook.post_reasoning(agent, {}, output)
+    rec = json.loads((tmp_path / "conversations.jsonl").read_text())
+
+    assert rec["session_id"] == "catalog-test"
+    assert rec["turn"] == 1
+    assert rec["messages"][0]["role"] == "system"
+    assert "<available_skills>" in rec["messages"][0]["content"]
+    assert rec["instruction_text"] == "use the demo"
+    assert rec["response_text"] == "I'll read it."
+    assert rec["reasoning_content"] == "demo applies"
+    assert rec["tool_calls"][0]["function"]["name"] == "read_file"
+    assert rec["injected_skills"] == [{"skill_name": "demo_skill"}]
+    assert rec["read_skills"][0]["skill_name"] == "demo_skill"
+    assert rec["read_skills"][0]["path"] == str(skill_path)
+
+
+@pytest.mark.asyncio
+async def test_post_acting_patches_tool_errors(tmp_path):
+    skills_dir = tmp_path / "skill_pool"
+    skill_dir = skills_dir / "demo_skill"
+    skill_dir.mkdir(parents=True)
+    skill_path = skill_dir / "SKILL.md"
+    skill_path.write_text(
+        "---\n"
+        "name: demo_skill\n"
+        "description: Use for demo tasks.\n"
+        "---\n"
+        "# Demo\n",
+        encoding="utf-8",
+    )
+
+    class _Agent:
+        def __init__(self):
+            self._sys_prompt = "base system"
+            self.memory = _FakeMemory([_FakeMsg("user", "use the demo")])
+
+        @property
+        def sys_prompt(self):
+            return self._sys_prompt
+
+    agent = _Agent()
+    hook = SkillClawCaptureHook(
+        records_dir=tmp_path,
+        session_id="tool-result-test",
+        skills_dir=skills_dir,
+    )
+    output = _FakeMsg(
+        "assistant",
+        [
+            {
+                "type": "tool_use",
+                "id": "call_demo",
+                "name": "read_file",
+                "input": {"file_path": str(skill_path)},
+            },
+        ],
+    )
+
+    await hook.pre_reasoning(agent, {})
+    await hook.post_reasoning(agent, {}, output)
+    agent.memory = _FakeMemory(
+        [
+            _FakeMsg("user", "use the demo"),
+            output,
+            _FakeMsg(
+                "system",
+                [
+                    {
+                        "type": "tool_result",
+                        "id": "call_demo",
+                        "name": "read_file",
+                        "output": [{"type": "text", "text": "Error: No such file"}],
+                    },
+                ],
+            ),
+        ],
+    )
+
+    await hook.post_acting(agent, {}, None)
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "conversations.jsonl").read_text().splitlines()
+    ]
+
+    assert len(records) == 2
+    assert records[-1]["turn"] == 1
+    assert records[-1]["tool_observations"][0]["tool_call_id"] == "call_demo"
+    assert records[-1]["tool_errors"][0]["error_type"] == "not_found"

@@ -67,16 +67,23 @@ class BootstrapHook:
             # so the prompt reflects the latest palace state after compaction.
             try:
                 import subprocess
+                import sys
 
                 def _fetch_wakeup_block():
                     try:
                         result = subprocess.run(
-                            ["python3", "-m", "mempalace", "wake-up"],
+                            [sys.executable, "-m", "mempalace", "wake-up"],
                             capture_output=True,
                             text=True,
                             timeout=15,
                         )
                         if result.returncode != 0 or not result.stdout.strip():
+                            logger.warning(
+                                "MemPalace wake-up subprocess: rc=%s stdout=%dB stderr=%s",
+                                result.returncode,
+                                len(result.stdout or ""),
+                                (result.stderr or "")[:500],
+                            )
                             return None
                         lines = result.stdout.strip().split("\n")
                         wakeup = "\n".join(
@@ -86,6 +93,11 @@ class BootstrapHook:
                             and not line.startswith("===")
                         ).strip()
                         if not wakeup or len(wakeup) <= 50:
+                            logger.warning(
+                                "MemPalace wake-up too short: len=%d preview=%r",
+                                len(wakeup),
+                                wakeup[:200],
+                            )
                             return None
                         return "\n\n## MemPalace Wake-up Context\n" + wakeup
                     except Exception as _e:

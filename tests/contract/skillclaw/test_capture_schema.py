@@ -41,6 +41,11 @@ TOLERATED_EXTRAS = {
     "prompt_text",
     "response_text",
     "tool_calls",
+    "tool_results",
+    "tool_observations",
+    "tool_errors",
+    "reasoning_content",
+    "prm_score",
     "next_state",
     # Phase-1 skill-attribution fields emitted by SkillClawCaptureHook
     # so evolve_server's summarizer can compute ``_skills_referenced``.
