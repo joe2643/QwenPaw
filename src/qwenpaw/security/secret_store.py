@@ -160,9 +160,12 @@ def _get_master_key() -> bytes:
 
     Resolution order:
     1. In-process cache (fast path, no lock)
-    2. OS keychain (via ``keyring``)
-    3. File ``SECRET_DIR/.master_key``
+    2. File ``SECRET_DIR/.master_key`` when present
+    3. OS keychain (via ``keyring``)
     4. Generate new → store in keychain (preferred) and file (fallback)
+
+    The file-first path is intentional: desktop keyring calls can block inside
+    user systemd services even when a valid fallback key file already exists.
     """
     global _cached_master_key
     if _cached_master_key is not None:
@@ -172,12 +175,10 @@ def _get_master_key() -> bytes:
         if _cached_master_key is not None:
             return _cached_master_key
 
-        key_hex = _try_keyring_get()
+        key_hex = _read_key_file()
 
         if not key_hex:
-            key_hex = _read_key_file()
-            if key_hex:
-                _try_keyring_set(key_hex)
+            key_hex = _try_keyring_get()
 
         if not key_hex:
             key_hex = _generate_master_key()

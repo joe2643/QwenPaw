@@ -168,7 +168,7 @@ class TestMasterKeyGeneration:
         with patch.object(
             mod,
             "_try_keyring_get",
-            return_value=None,
+            side_effect=AssertionError("keyring should not be read"),
         ), patch.object(mod, "_try_keyring_set", return_value=False):
             key = mod._get_master_key()
 
