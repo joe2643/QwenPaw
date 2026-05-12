@@ -59,6 +59,14 @@ class TokenUsageSummary(BaseModel):
     total_cache_creation_tokens: int = Field(0, ge=0)
     total_cache_read_tokens: int = Field(0, ge=0)
     total_calls: int = Field(0, ge=0)
+    by_model: dict[str, TokenUsageByModel] = Field(
+        default_factory=dict,
+        description="Per composite key (provider:model)",
+    )
+    by_provider: dict[str, TokenUsageStats] = Field(
+        default_factory=dict,
+        description="Per provider_id",
+    )
     by_date: dict[str, TokenUsageStats] = Field(
         default_factory=dict,
         description="Per date (YYYY-MM-DD) - all models combined",
@@ -225,6 +233,8 @@ class TokenUsageManager:
         total_cache_creation = 0
         total_cache_read = 0
         total_calls = 0
+        by_model_raw: dict[str, dict] = {}
+        by_provider_raw: dict[str, dict] = {}
         by_date_raw: dict[str, dict] = {}
 
         def _empty_bucket() -> dict[str, int]:
@@ -281,6 +291,14 @@ class TokenUsageManager:
             total_cache_creation_tokens=total_cache_creation,
             total_cache_read_tokens=total_cache_read,
             total_calls=total_calls,
+            by_model={
+                k: TokenUsageByModel.model_validate(v)
+                for k, v in by_model_raw.items()
+            },
+            by_provider={
+                k: TokenUsageStats.model_validate(v)
+                for k, v in by_provider_raw.items()
+            },
             by_date={
                 k: TokenUsageStats.model_validate(v)
                 for k, v in sorted(by_date_raw.items())
