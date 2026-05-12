@@ -169,6 +169,12 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       label: t("nav.heartbeat"),
     },
     {
+      key: "media-server",
+      icon: <SparkDataLine size={18} />,
+      path: "/media-server",
+      label: t("nav.mediaServer"),
+    },
+    {
       key: "workspace",
       icon: <SparkLocalFileLine size={18} />,
       path: "/workspace",
@@ -247,6 +253,12 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       label: t("nav.tokenUsage"),
     },
     {
+      key: "mempalace",
+      icon: <SparkDataLine size={18} />,
+      path: "/mempalace",
+      label: t("nav.mempalace"),
+    },
+    {
       key: "backups",
       icon: <SparkSaveLine size={18} />,
       path: "/backups",
@@ -304,6 +316,11 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           key: "heartbeat",
           label: collapsed ? null : t("nav.heartbeat"),
           icon: <SparkVoiceChat01Line size={16} />,
+        },
+        {
+          key: "media-server",
+          label: collapsed ? null : t("nav.mediaServer"),
+          icon: <SparkDataLine size={16} />,
         },
       ],
     },
@@ -385,6 +402,11 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
         {
           key: "token-usage",
           label: collapsed ? null : t("nav.tokenUsage"),
+          icon: <SparkDataLine size={16} />,
+        },
+        {
+          key: "mempalace",
+          label: collapsed ? null : t("nav.mempalace"),
           icon: <SparkDataLine size={16} />,
         },
         {

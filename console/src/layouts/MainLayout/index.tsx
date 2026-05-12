@@ -18,6 +18,7 @@ const ChannelsPage = lazyImportWithRetry("../../pages/Control/Channels");
 const SessionsPage = lazyImportWithRetry("../../pages/Control/Sessions");
 const CronJobsPage = lazyImportWithRetry("../../pages/Control/CronJobs");
 const HeartbeatPage = lazyImportWithRetry("../../pages/Control/Heartbeat");
+const MediaServerPage = lazyImportWithRetry("../../pages/Control/MediaServer");
 const AgentConfigPage = lazyImportWithRetry("../../pages/Agent/Config");
 const SkillsPage = lazyImportWithRetry("../../pages/Agent/Skills");
 const SkillPoolPage = lazyImportWithRetry("../../pages/Settings/SkillPool");
@@ -32,6 +33,7 @@ const EnvironmentsPage = lazyImportWithRetry(
 const SecurityPage = lazyImportWithRetry("../../pages/Settings/Security");
 const TokenUsagePage = lazyImportWithRetry("../../pages/Settings/TokenUsage");
 const AgentStatsPage = lazyImportWithRetry("../../pages/Settings/AgentStats");
+const MemPalacePage = lazyImportWithRetry("../../pages/Settings/MemPalace");
 const VoiceTranscriptionPage = lazyImportWithRetry(
   "../../pages/Settings/VoiceTranscription",
 );
@@ -47,6 +49,7 @@ const pathToKey: Record<string, string> = {
   "/sessions": "sessions",
   "/cron-jobs": "cron-jobs",
   "/heartbeat": "heartbeat",
+  "/media-server": "media-server",
   "/skills": "skills",
   "/skill-pool": "skill-pool",
   "/tools": "tools",
@@ -60,6 +63,7 @@ const pathToKey: Record<string, string> = {
   "/security": "security",
   "/token-usage": "token-usage",
   "/agent-stats": "agent-stats",
+  "/mempalace": "mempalace",
   "/voice-transcription": "voice-transcription",
   "/debug": "debug",
   "/backups": "backups",
@@ -106,6 +110,7 @@ export default function MainLayout() {
                   <Route path="/sessions" element={<SessionsPage />} />
                   <Route path="/cron-jobs" element={<CronJobsPage />} />
                   <Route path="/heartbeat" element={<HeartbeatPage />} />
+                  <Route path="/media-server" element={<MediaServerPage />} />
                   <Route path="/skills" element={<SkillsPage />} />
                   <Route path="/skill-pool" element={<SkillPoolPage />} />
                   <Route path="/tools" element={<ToolsPage />} />
@@ -120,6 +125,7 @@ export default function MainLayout() {
                   <Route path="/security" element={<SecurityPage />} />
                   <Route path="/token-usage" element={<TokenUsagePage />} />
                   <Route path="/agent-stats" element={<AgentStatsPage />} />
+                  <Route path="/mempalace" element={<MemPalacePage />} />
                   <Route
                     path="/voice-transcription"
                     element={<VoiceTranscriptionPage />}
