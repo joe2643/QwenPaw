@@ -79,6 +79,7 @@ _ERR_INVALID_PARAMS: int = -32602  # standard JSON-RPC
 _ERR_IO: int = -32002
 _ERR_NOT_FOUND: int = -32003
 _ERR_TERMINAL_UNKNOWN: int = -32004
+_ERR_INTERNAL: int = -32000  # generic implementation-defined server error
 
 
 # ----------------------------------------------------------------- #

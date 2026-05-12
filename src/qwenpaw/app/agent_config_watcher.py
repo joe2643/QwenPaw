@@ -135,9 +135,6 @@ class AgentConfigWatcher:
             self._last_heartbeat_hash = _heartbeat_hash(
                 agent_config.heartbeat,
             )
-            self._last_memory_job_hash = _memory_job_hash(
-                getattr(agent_config, "memory_summary", None),
-            )
         except Exception:
             logger.exception(
                 f"AgentConfigWatcher: failed to load initial config "
@@ -146,7 +143,6 @@ class AgentConfigWatcher:
             self._last_channels = None
             self._last_channels_hash = None
             self._last_heartbeat_hash = None
-            self._last_memory_job_hash = None
 
     @staticmethod
     def _channels_hash(channels: ChannelConfig) -> int:
