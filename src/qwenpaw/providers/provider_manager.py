@@ -177,8 +177,8 @@ ZHIPU_MODELS: List[ModelInfo] = [
         id="glm-5v-turbo",
         name="glm-5v-turbo",
         supports_image=True,
-        supports_video=False,
-        probe_source="documentation",
+        supports_video=True,
+        probe_source="probed",
     ),
 ]
 

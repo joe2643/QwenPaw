@@ -52,6 +52,11 @@ export function useAgentConfig() {
       form.setFieldsValue({
         max_iters: config.max_iters,
         auto_continue_on_text_only: config.auto_continue_on_text_only ?? false,
+        allow_cross_channel_signal_tools:
+          config.allow_cross_channel_signal_tools ?? false,
+        same_session_mode: config.same_session_mode ?? "parallel",
+        same_session_parallel_max_runs:
+          config.same_session_parallel_max_runs ?? 3,
         shell_command_timeout: config.shell_command_timeout ?? 60.0,
         llm_retry_enabled: config.llm_retry_enabled,
         llm_max_retries: config.llm_max_retries,

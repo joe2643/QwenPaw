@@ -339,6 +339,31 @@ async def _process_single_block(
             }
             source = block["source"]
 
+    # Skip download for already-public HTTPS image/video URLs.  The
+    # primary reason to download was to base64-inline for the model
+    # request, but modern vision endpoints (z.ai, mimo, qwen-vl,
+    # gemini SDK) all fetch the URL server-side — keeping the URL
+    # is faster (no 60s wait + 4MB→5MB inline), survives transient
+    # Cloudflare hiccups, and matches the URL-form normalization
+    # already done in view_image / view_video.  Audio + file blocks
+    # still download because audio mode needs local file for
+    # transcription / format conversion and file blocks need local
+    # paths for tool consumption.
+    if (
+        block_type in ("image", "video")
+        and isinstance(source, dict)
+        and source.get("type") == "url"
+    ):
+        url = source.get("url", "")
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme in ("http", "https"):
+            logger.debug(
+                "Skipping download for public %s URL: %s",
+                block_type,
+                url[:120],
+            )
+            return None
+
     try:
         local_path = await _process_single_file_block(source, filename)
 

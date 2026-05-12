@@ -172,13 +172,49 @@ async def test_primary_supports_video_bypasses_fallback(
         "_resolve_fallback_video_model",
         return_value=(fake, "gemini", "gemini-2.5-pro"),
     ):
-        resp = await view_video(str(tmp_video))
+        resp = await view_video(
+            str(tmp_video),
+            prompt="Summarise the key events in this clip.",
+        )
     # VideoBlock present; no fallback header text.
     types = [b.get("type") for b in resp.content]
     assert "video" in types
     assert (
         fake.last_messages is None
     ), "fallback model should not have been called"
+    # Caller-supplied prompt must reach the model verbatim — without
+    # this the primary-path tool_result is just a video block +
+    # "Video loaded:..." label and many vision models reply with
+    # vague acknowledgements (observed in WhatsApp on 2026-05-12:
+    # glm-5v-turbo received only "Video loaded: yt_B9NGOONYnAo.mp4"
+    # and said "no analysis" because no question reached it).
+    texts = [b.get("text", "") for b in resp.content if b.get("type") == "text"]
+    assert any(
+        "Summarise the key events in this clip." in t for t in texts
+    ), f"caller prompt missing from response: {texts!r}"
+
+
+@pytest.mark.asyncio
+async def test_primary_supports_video_uses_default_prompt_when_none(
+    tmp_video: Path,
+) -> None:
+    """When caller passes no prompt, primary path still surfaces a
+    sensible default instruction so the model has something to do."""
+    fake = _FakeChatModel()
+    with patch.object(
+        vm,
+        "_check_multimodal_support",
+        return_value=True,
+    ), patch.object(
+        vm,
+        "_resolve_fallback_video_model",
+        return_value=(fake, "gemini", "gemini-2.5-pro"),
+    ):
+        resp = await view_video(str(tmp_video))
+    texts = [b.get("text", "") for b in resp.content if b.get("type") == "text"]
+    assert any("Describe this video in detail" in t for t in texts), (
+        f"default prompt missing from response: {texts!r}"
+    )
 
 
 @pytest.mark.asyncio
@@ -440,6 +476,11 @@ async def test_qwen_family_gets_signed_url_and_video_url_shape(
     )
 
     async def _fake_sign(path: str) -> str:
+        # Mimic real resolve_media_url: HTTPS / data URLs pass through
+        # unchanged so the step-2 normalize + fallback resolve are
+        # observably idempotent.
+        if path.startswith(("http://", "https://", "data:")):
+            return path
         assert path == str(tmp_video)
         return signed
 
@@ -599,6 +640,8 @@ async def test_non_qwen_family_signs_then_passes_through_block(
     signed_url = "https://media.example/local/abc123?sig=ok"
 
     async def _fake_sign(path: str):
+        if path.startswith(("http://", "https://", "data:")):
+            return path
         sign_called["n"] += 1
         return signed_url
 
@@ -754,6 +797,8 @@ async def test_qwen_400_corrupted_triggers_transcode_then_retry(
     sign_calls: list[str] = []
 
     async def _fake_sign(path: str):
+        if path.startswith(("http://", "https://", "data:")):
+            return path
         sign_calls.append(path)
         return f"https://media.example/sig?p={Path(path).name}"
 

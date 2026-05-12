@@ -42,8 +42,20 @@ export function ReactAgentCard({
 }: ReactAgentCardProps) {
   const { t } = useTranslation();
   const { selectedAgent } = useAgentStore();
+  const form = Form.useFormInstance();
   const [planEnabled, setPlanEnabled] = useState(false);
   const [planLoading, setPlanLoading] = useState(false);
+  const sameSessionMode = Form.useWatch("same_session_mode", form);
+  const sameSessionModeOptions = [
+    {
+      value: "parallel",
+      label: t("agentConfig.sameSessionModeParallel", "Parallel"),
+    },
+    {
+      value: "steer",
+      label: t("agentConfig.sameSessionModeSteer", "Steer"),
+    },
+  ];
 
   useEffect(() => {
     let cancelled = false;
@@ -166,6 +178,76 @@ export function ReactAgentCard({
       >
         <Switch />
       </Form.Item>
+
+      <Form.Item
+        label={t(
+          "agentConfig.allowCrossChannelSignalTools",
+          "Allow signal_* tools on all channels",
+        )}
+        name="allow_cross_channel_signal_tools"
+        valuePropName="checked"
+        tooltip={t(
+          "agentConfig.allowCrossChannelSignalToolsTooltip",
+          "Default off: signal_* sticker tools are hidden when the inbound channel is WhatsApp / Discord / etc., to keep the toolkit focused (the 7 extra tools have been observed to make Claude-class models drop tool_use entirely in routine replies). Turn on for an agent that needs to bridge stickers across channels (e.g. migrate a WhatsApp sticker pack into a Signal sticker pack).",
+        )}
+      >
+        <Switch />
+      </Form.Item>
+
+      <div className={styles.reactAgentRow}>
+        <Form.Item
+          label={t("agentConfig.sameSessionMode", "Same-session mode")}
+          name="same_session_mode"
+          tooltip={t(
+            "agentConfig.sameSessionModeTooltip",
+            "Choose whether a message sent while this chat is running starts a parallel run or steers the active run.",
+          )}
+          className={styles.reactAgentField}
+        >
+          <Select options={sameSessionModeOptions} style={{ width: "100%" }} />
+        </Form.Item>
+
+        <Form.Item
+          label={t(
+            "agentConfig.sameSessionParallelMaxRuns",
+            "Parallel max runs",
+          )}
+          name="same_session_parallel_max_runs"
+          rules={[
+            {
+              required: true,
+              message: t(
+                "agentConfig.sameSessionParallelMaxRunsRequired",
+                "Parallel max runs is required",
+              ),
+            },
+            {
+              type: "number",
+              min: 1,
+              message: t(
+                "agentConfig.sameSessionParallelMaxRunsMin",
+                "Parallel max runs must be at least 1",
+              ),
+            },
+          ]}
+          tooltip={t(
+            "agentConfig.sameSessionParallelMaxRunsTooltip",
+            "Maximum concurrent runs for the same Console chat when same-session mode is Parallel.",
+          )}
+          className={styles.reactAgentField}
+        >
+          <InputNumber
+            style={{ width: "100%" }}
+            min={1}
+            precision={0}
+            disabled={sameSessionMode === "steer"}
+            placeholder={t(
+              "agentConfig.sameSessionParallelMaxRunsPlaceholder",
+              "Enter max runs",
+            )}
+          />
+        </Form.Item>
+      </div>
 
       <div className={styles.reactAgentRow}>
         <Form.Item

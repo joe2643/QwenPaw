@@ -96,6 +96,17 @@ export const agentApi = {
       method: "PUT",
       body: JSON.stringify(body),
     }),
+
+  /* ---- Fallback image model (per-agent) ---- */
+
+  getFallbackImageModel: () =>
+    request<FallbackImageModel>("/agent/fallback-image-model"),
+
+  updateFallbackImageModel: (body: FallbackImageModel) =>
+    request<FallbackImageModel>("/agent/fallback-image-model", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
 };
 
 /**
@@ -104,6 +115,16 @@ export const agentApi = {
  * video.  ``{provider_id: null, model: null}`` clears the slot.
  */
 export interface FallbackVideoModel {
+  provider_id: string | null;
+  model: string | null;
+}
+
+/**
+ * Per-agent fallback image model slot.  When both fields are non-null,
+ * ``view_image`` delegates to this model if the primary can't handle
+ * image.  ``{provider_id: null, model: null}`` clears the slot.
+ */
+export interface FallbackImageModel {
   provider_id: string | null;
   model: string | null;
 }

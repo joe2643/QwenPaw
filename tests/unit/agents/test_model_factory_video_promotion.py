@@ -240,3 +240,77 @@ def test_promote_empty_when_no_video_tool_results() -> None:
 
     # No promotions → formatted list returned unchanged
     assert result is formatted
+
+
+# ---------------------------------------------------------------------------
+# Primary-path formatter regression for glm-5v-turbo
+# ---------------------------------------------------------------------------
+
+
+def test_formatter_emits_video_url_for_glm5v_turbo_primary() -> None:
+    """Regression guard for ``provider_manager.py`` glm-5v-turbo flag.
+
+    With ``glm-5v-turbo`` set as the active model (``supports_video=True``,
+    ``probe_source="probed"``), the wrapped OpenAI formatter must emit a
+    Qwen-style ``{"type":"video_url","video_url":{"url":...}}`` content
+    block instead of downgrading the ``VideoBlock`` to a text placeholder.
+
+    Mirrors ``tests/integration/test_glm5v_video_pipeline.py::
+    test_pipeline_emits_video_url_block`` but lives here so the unit
+    suite alone catches a flag flip back to ``supports_video=False``.
+    """
+    import asyncio
+
+    from agentscope.message import TextBlock, VideoBlock
+    from agentscope.model._openai_model import OpenAIChatModel
+
+    from qwenpaw.agents.model_factory import _create_formatter_instance
+    from qwenpaw.providers.provider_manager import (
+        ModelSlotConfig,
+        ProviderManager,
+    )
+
+    mgr = ProviderManager.get_instance()
+    saved = mgr.active_model
+    mgr.active_model = ModelSlotConfig(
+        provider_id="zhipu-intl-codingplan",
+        model="glm-5v-turbo",
+    )
+    try:
+        fmt = _create_formatter_instance(OpenAIChatModel)
+        msgs = [
+            Msg(
+                name="user",
+                role="user",
+                content=[
+                    VideoBlock(
+                        type="video",
+                        source={
+                            "type": "url",
+                            "url": "https://media.example/clip.mp4",
+                        },
+                    ),
+                    TextBlock(type="text", text="describe"),
+                ],
+            ),
+        ]
+        out = asyncio.run(fmt.format(msgs))
+    finally:
+        mgr.active_model = saved
+
+    assert len(out) == 1, f"expected one user message, got {out!r}"
+    content = out[0]["content"]
+    assert isinstance(content, list), f"non-list content: {content!r}"
+
+    video_blocks = [
+        b for b in content
+        if isinstance(b, dict) and b.get("type") == "video_url"
+    ]
+    assert len(video_blocks) == 1, (
+        f"expected one video_url block, got content={content!r} — if "
+        "this is empty, glm-5v-turbo's supports_video flag in "
+        "provider_manager.py probably got flipped back to False"
+    )
+    assert video_blocks[0]["video_url"] == {
+        "url": "https://media.example/clip.mp4",
+    }

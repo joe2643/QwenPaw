@@ -320,7 +320,22 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
         active_channel = (req_ctx.get("channel") or "").lower()
         # "console" and empty string = UI/debug context → allow all.
         # Any other explicit channel = scope to that channel only.
-        signal_tools_allowed = active_channel in ("", "console", "signal")
+        # Per-agent override: ``allow_cross_channel_signal_tools`` lifts the
+        # gate entirely (use case: migrate a WhatsApp sticker pack to Signal,
+        # where the inbound channel is whatsapp but the agent legitimately
+        # needs signal_create_sticker_pack et al).  Default off so routine
+        # WhatsApp agents keep the focused toolkit that avoids the 2026-04-24
+        # claude-opus tool_use drop regression.
+        allow_cross_channel = bool(
+            getattr(
+                getattr(self._agent_config, "running", None),
+                "allow_cross_channel_signal_tools",
+                False,
+            ),
+        )
+        signal_tools_allowed = (
+            allow_cross_channel or active_channel in ("", "console", "signal")
+        )
 
         # Register only enabled tools
         for tool_name, tool_func in tool_functions.items():
@@ -394,6 +409,19 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
         Args:
             toolkit: Toolkit to register skills to
         """
+        sc_cfg = getattr(self._agent_config, "skillclaw_capture", None)
+        if (
+            sc_cfg
+            and getattr(sc_cfg, "enabled", False)
+            and getattr(sc_cfg, "inject_catalog", True)
+            and getattr(sc_cfg, "disable_native_skill_prompt", True)
+        ):
+            logger.info(
+                "Skipping native skill prompt registration; SkillClaw "
+                "capture hook will inject the SkillClaw catalog",
+            )
+            return
+
         workspace_dir = self._workspace_dir or WORKING_DIR
 
         ensure_skills_initialized(workspace_dir)
@@ -643,11 +671,26 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                     ingest_api_key=sc_cfg.ingest_api_key,
                     workspace_dir=working_dir,
                     channel_name=_sc_channel,
+                    inject_catalog=sc_cfg.inject_catalog,
+                    skills_dir=sc_cfg.skills_dir,
+                    skills_public_root=sc_cfg.skills_public_root,
+                    max_skills_prompt_chars=sc_cfg.max_skills_prompt_chars,
+                    read_tool_name=sc_cfg.read_tool_name,
                 )
                 self.register_instance_hook(
                     hook_type="pre_reasoning",
                     hook_name="skillclaw_capture",
-                    hook=sc_hook.__call__,
+                    hook=sc_hook.pre_reasoning,
+                )
+                self.register_instance_hook(
+                    hook_type="post_reasoning",
+                    hook_name="skillclaw_capture",
+                    hook=sc_hook.post_reasoning,
+                )
+                self.register_instance_hook(
+                    hook_type="post_acting",
+                    hook_name="skillclaw_capture",
+                    hook=sc_hook.post_acting,
                 )
                 logger.info(
                     "SkillClaw capture hook registered (session=%s, "
@@ -989,6 +1032,43 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
             return text
         return text[-max_chars:].lstrip()
 
+    async def _drain_pending_steer_messages(self) -> list[Msg]:
+        """Insert console steer messages queued for this active chat."""
+        tracker = self._task_tracker
+        request_context = getattr(self, "_request_context", {}) or {}
+        chat_id = request_context.get("chat_id")
+        if tracker is None or not chat_id:
+            return []
+
+        drain = getattr(tracker, "drain_pending_input", None)
+        if not callable(drain):
+            return []
+
+        pending_items = await drain(chat_id)
+        if not pending_items:
+            return []
+
+        pending_msgs: list[Msg] = []
+        for item in pending_items:
+            if isinstance(item, Msg):
+                pending_msgs.append(item)
+            elif isinstance(item, list):
+                pending_msgs.extend([msg for msg in item if isinstance(msg, Msg)])
+            elif item is not None:
+                pending_msgs.append(Msg("user", str(item), "user"))
+
+        if not pending_msgs:
+            return []
+
+        await process_file_and_media_blocks_in_message(pending_msgs)
+        await self.memory.add(pending_msgs)
+        logger.info(
+            "Inserted %d pending steer message(s) into active chat %s",
+            len(pending_msgs),
+            str(chat_id)[:12],
+        )
+        return pending_msgs
+
     async def _auto_continue_if_text_only(
         self,
         msg: Msg,
@@ -1005,6 +1085,16 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
         avoid repeated duplicated answers.
         """
         from ..plan.hints import should_skip_auto_continue
+
+        if msg is not None and not msg.has_content_blocks("tool_use"):
+            pending_msgs = await self._drain_pending_steer_messages()
+            if pending_msgs:
+                logger.info(
+                    "Steer mode: continuing current turn after %d "
+                    "pending message(s)",
+                    len(pending_msgs),
+                )
+                return await self._reasoning(tool_choice=tool_choice)
 
         nb = getattr(self, "plan_notebook", None)
         if should_skip_auto_continue(nb):
@@ -1272,6 +1362,7 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
         interception active.
         """
         try:
+            await self._drain_pending_steer_messages()
             return await self._reasoning_with_media_fallback(tool_choice)
         except asyncio.CancelledError:
             raise
@@ -1334,11 +1425,18 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                         e,
                     )
                     msg = await super()._reasoning(tool_choice=tool_choice)
-                    if model_key:
+                    if model_key and not self._is_format_specific_media_error(e):
                         get_capability_cache().learn(
                             model_key,
                             "rejects_media",
                             True,
+                        )
+                    elif model_key:
+                        logger.info(
+                            "Not learning rejects_media for %s — error "
+                            "looks file/format specific (%s)",
+                            model_key,
+                            str(e)[:160],
                         )
                     return msg
                 finally:
@@ -1362,11 +1460,18 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                 n_stripped,
             )
             msg = await super()._reasoning(tool_choice=tool_choice)
-            if model_key:
+            if model_key and not self._is_format_specific_media_error(e):
                 get_capability_cache().learn(
                     model_key,
                     "rejects_media",
                     True,
+                )
+            elif model_key:
+                logger.info(
+                    "Not learning rejects_media for %s — error "
+                    "looks file/format specific (%s)",
+                    model_key,
+                    str(e)[:160],
                 )
         finally:
             if should_strip and self._uses_request_time_media_normalization():
@@ -1529,11 +1634,20 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                             e,
                         )
                         msg = await super()._summarizing()
-                        if model_key:
+                        if model_key and not self._is_format_specific_media_error(
+                            e,
+                        ):
                             get_capability_cache().learn(
                                 model_key,
                                 "rejects_media",
                                 True,
+                            )
+                        elif model_key:
+                            logger.info(
+                                "Not learning rejects_media for %s — error "
+                                "looks file/format specific (%s)",
+                                model_key,
+                                str(e)[:160],
                             )
                     finally:
                         self._set_formatter_media_strip(False)
@@ -1556,11 +1670,20 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                         n_stripped,
                     )
                     msg = await super()._summarizing()
-                    if model_key:
+                    if model_key and not self._is_format_specific_media_error(
+                        e,
+                    ):
                         get_capability_cache().learn(
                             model_key,
                             "rejects_media",
                             True,
+                        )
+                    elif model_key:
+                        logger.info(
+                            "Not learning rejects_media for %s — error "
+                            "looks file/format specific (%s)",
+                            model_key,
+                            str(e)[:160],
                         )
         finally:
             self._in_summarizing = False
@@ -1680,6 +1803,51 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
             "image_url",
         ]
         return any(kw in error_str for kw in keywords)
+
+    # Markers that mean "this specific *file/format* tripped the
+    # decoder", not "this model cannot handle any media".  Learning
+    # ``rejects_media=True`` from these would poison the capability
+    # cache for the rest of the process — observed on 2026-05-12 when
+    # an animated WebP sticker (z.ai code 1210) caused every later
+    # view_image call to be silently stripped before reaching the
+    # vision model.  Keep this list lowercase; the matcher casefolds.
+    _FORMAT_SPECIFIC_MEDIA_ERROR_MARKERS = (
+        # z.ai / Zhipu — image format / parse / decode errors
+        "1210",
+        "图片输入格式",
+        "图片解析",
+        "image format",
+        "image input format",
+        "format/parse",
+        "format error",
+        "parse error",
+        "decode error",
+        "decoding error",
+        "unsupported image format",
+        # Mimo / Qwen-VL video codec / container rejections
+        "multimodal data is corrupted",
+        "only mp4/wmv/mov/avi",
+        "invalid video format",
+        "unsupported video format",
+        "invalid image format",
+        # Generic codec markers
+        "codec",
+        "container",
+    )
+
+    @classmethod
+    def _is_format_specific_media_error(cls, exc: Exception) -> bool:
+        """Return True iff the model's rejection looks file/format
+        specific (so a strip-and-retry success does NOT prove the
+        model can't handle media — only that *this* file's format
+        was unsupported).  Callers should skip the
+        ``rejects_media=True`` learn() in that case.
+        """
+        text = str(exc).casefold()
+        return any(
+            marker.casefold() in text
+            for marker in cls._FORMAT_SPECIFIC_MEDIA_ERROR_MARKERS
+        )
 
     def _strip_media_blocks_from_memory(self) -> int:
         """Remove media blocks (image/audio/video) from all messages.

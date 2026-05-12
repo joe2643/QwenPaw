@@ -35,6 +35,7 @@ class _MimoUnsupportedFormatError(Exception):
 
 _IMAGE_EXTENSIONS = {
     ".png",
+    ".apng",
     ".jpg",
     ".jpeg",
     ".gif",
@@ -59,6 +60,70 @@ def _is_url(path: str) -> bool:
     return path.startswith(("http://", "https://"))
 
 
+# Streaming platforms that serve HTML pages, not raw media bytes.
+# Upstream vision endpoints (z.ai, mimo, qwen-vl) fetch ``video_url``
+# server-side and expect direct mp4/webm; passing a YouTube /
+# TikTok / X URL makes them get back HTML and 400 with ``1210
+# 图片输入格式/解析错误``.  Reject these URLs early with an
+# instructive error so the agent immediately knows to ``yt-dlp``
+# them to a local file and retry — observed in WhatsApp group on
+# 2026-05-12 (agent passed ``https://youtu.be/B9NGOONYnAo`` to
+# view_video and ate the 1210).
+_STREAMING_PLATFORM_HOST_HINTS = (
+    "youtube.com",
+    "youtu.be",
+    "tiktok.com",
+    "douyin.com",
+    "bilibili.com",
+    "x.com/i/videos/",
+    "x.com/i/status/",
+    "twitter.com",
+    "instagram.com",
+    "facebook.com/watch",
+    "fb.watch",
+    "vimeo.com",
+)
+
+
+def _is_streaming_platform_url(url: str) -> bool:
+    """Return True for URLs hosted by platforms that serve HTML, not
+    raw media bytes — those need an extractor (yt-dlp etc.) before
+    they can be loaded into a vision model.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower()
+    full = (parsed.hostname or "") + (parsed.path or "")
+    return any(hint in host or hint in full for hint in _STREAMING_PLATFORM_HOST_HINTS)
+
+
+def _streaming_platform_error(url: str, media_type: str) -> ToolResponse:
+    return ToolResponse(
+        content=[
+            TextBlock(
+                type="text",
+                text=(
+                    f"Error: cannot load {media_type} directly from a "
+                    f"streaming platform URL: {url}\n\n"
+                    f"Vision models fetch ``{media_type}_url`` from the "
+                    f"server side and need raw media bytes (mp4 / webm "
+                    f"/ etc.), but streaming sites return HTML.  "
+                    f"Download with yt-dlp first, then call view_"
+                    f"{media_type} with the local path:\n\n"
+                    f"```\n"
+                    f"yt-dlp -f 'best[height<=720][ext=mp4]/best[height<=720]' "
+                    f"-o '/tmp/yt_%(id)s.%(ext)s' '{url}'\n"
+                    f"# then\n"
+                    f"view_{media_type}(/tmp/yt_<id>.mp4, prompt=...)\n"
+                    f"```"
+                ),
+            ),
+        ],
+    )
+
+
 def _validate_url_extension(
     url: str,
     allowed_extensions: set[str],
@@ -66,10 +131,14 @@ def _validate_url_extension(
 ) -> Optional[ToolResponse]:
     """Optionally validate that the URL path has an allowed extension.
 
-    Returns an error ``ToolResponse`` when the extension is clearly
-    unsupported, or ``None`` to let it through (including when the URL
-    has no recognisable extension, e.g. dynamic endpoints).
+    Returns an error ``ToolResponse`` when the URL clearly cannot be
+    loaded directly (streaming platform that returns HTML, or
+    explicitly unsupported file extension), or ``None`` to let it
+    through (including when the URL has no recognisable extension,
+    e.g. dynamic endpoints).
     """
+    if _is_streaming_platform_url(url):
+        return _streaming_platform_error(url, mime_prefix)
     url_path = urllib.parse.urlparse(url).path
     ext = Path(url_path).suffix.lower()
     if not ext:
@@ -313,7 +382,393 @@ def _get_multimodal_fallback_hint(media_type: str, path: str) -> str:
     )
 
 
-async def view_image(image_path: str) -> ToolResponse:
+async def _transcode_animated_webp_to_apng(src_path: str) -> str | None:
+    """Convert an animated WebP (e.g. Signal sticker) to APNG.
+
+    Z.AI's glm-5v-turbo (and similar OpenAI-compat endpoints) reject
+    ``image/webp`` data URLs that carry animation chunks (VP8X/ANIM)
+    with HTTP 400 ``"1210 图片输入格式/解析错误"``.  APNG preserves
+    every frame + alpha channel and z.ai decodes it end-to-end —
+    confirmed 2026-05-12 by curling the same sticker as PNG (works,
+    single frame), GIF (rejected), APNG (works, model picked up
+    animation-only details), original WebP (rejected).
+
+    Static webp (no ANIM/ANMF chunks) usually works as-is; transcoding
+    those would waste cycles and bloat the request body, so this
+    helper is a no-op for them — caller decides which to invoke.
+
+    Returns the new APNG path (sibling of ``src_path``) or ``None``
+    on any failure.  Idempotent: reuses a non-empty sibling.
+    """
+    try:
+        from PIL import Image, ImageSequence
+    except ImportError:
+        logger.warning("view_image: Pillow not available — cannot transcode webp")
+        return None
+
+    if not src_path or not os.path.exists(src_path):
+        logger.warning(
+            "view_image: webp transcode source missing: %s",
+            src_path,
+        )
+        return None
+
+    p = Path(src_path)
+    out = p.with_name(p.stem + ".apng")
+    if out.exists() and out.stat().st_size > 0:
+        logger.debug("view_image: reusing existing webp→apng transcode %s", out)
+        return str(out)
+
+    def _do_transcode() -> str | None:
+        try:
+            with Image.open(src_path) as im:
+                n_frames = getattr(im, "n_frames", 1)
+                if n_frames < 2:
+                    return None
+                duration = im.info.get("duration") or 100
+                frames = [f.copy() for f in ImageSequence.Iterator(im)]
+            frames[0].save(
+                out,
+                format="PNG",
+                save_all=True,
+                append_images=frames[1:],
+                duration=duration,
+                loop=0,
+            )
+            return str(out)
+        except Exception as e:
+            logger.warning(
+                "view_image: webp→apng transcode failed for %s: %s",
+                src_path,
+                e,
+            )
+            try:
+                if out.exists():
+                    out.unlink()
+            except OSError:
+                pass
+            return None
+
+    return await asyncio.to_thread(_do_transcode)
+
+
+def _is_animated_webp(path: str) -> bool:
+    """Cheap header sniff for animated WebP.  ``RIFF....WEBP`` container
+    with a ``VP8X`` chunk that has the animation bit (``ANIM`` chunk
+    follows).  Avoids loading Pillow for the common static-webp case.
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(200)
+    except OSError:
+        return False
+    if not (head[:4] == b"RIFF" and head[8:12] == b"WEBP"):
+        return False
+    return b"ANIM" in head or b"ANMF" in head
+
+
+async def _to_url_form_block(block: dict) -> dict:
+    """Rewrite ``block.source.url`` to a media-server URL when it is a
+    local path.  HTTP(S) / data URLs pass through.  Best-effort:
+    returns the original block when signing fails so we don't regress
+    in offline / tunnel-down scenarios.
+
+    Keeps primary-model requests small even for big media — the active
+    model receives a fetchable URL instead of inlining the file.
+    """
+    from ...app.channels.media_utils import resolve_media_url
+
+    source = block.get("source") or {}
+    url = source.get("url") or ""
+    if not url:
+        return block
+    resolved = await resolve_media_url(url)
+    if not resolved or resolved == url:
+        return block
+    return {**block, "source": {**source, "url": resolved}}
+
+
+_DEFAULT_IMAGE_FALLBACK_PROMPT = (
+    "Describe this image in detail: visible objects, people, on-screen "
+    "text, colors, composition, and any notable context.  Be thorough "
+    "so a model that cannot see the image can still reason about it "
+    "from your description alone."
+)
+
+
+def _resolve_fallback_image_model() -> "tuple[Any, str, str] | None":
+    """Return a ready-to-call chat model instance for the agent's
+    configured ``fallback_image_model``, or ``None`` when none is set.
+
+    Mirrors :func:`_resolve_fallback_video_model`.
+    """
+    try:
+        from ...app.agent_context import get_current_agent_id
+        from ...config.config import load_agent_config
+        from ...providers.provider_manager import ProviderManager
+
+        try:
+            agent_id = get_current_agent_id()
+        except Exception:
+            return None
+        agent_config = load_agent_config(agent_id)
+        fallback = getattr(agent_config, "fallback_image_model", None)
+        if not fallback or not fallback.provider_id or not fallback.model:
+            return None
+
+        manager = ProviderManager.get_instance()
+        provider = manager.get_provider(fallback.provider_id)
+        if provider is None:
+            logger.warning(
+                "view_image: fallback provider '%s' not found",
+                fallback.provider_id,
+            )
+            return None
+        chat_model = provider.get_chat_model_instance(fallback.model)
+        return chat_model, fallback.provider_id, fallback.model
+    except Exception as e:
+        logger.warning(
+            "view_image: fallback model resolution failed: %s",
+            e,
+        )
+        return None
+
+
+async def _build_fallback_image_messages(
+    image_block: ImageBlock,
+    prompt: str,
+    provider_id: str,
+) -> list[dict] | None:
+    """Format ``messages`` for the fallback chat model.
+
+    For Qwen-family providers we emit the native OpenAI-compat
+    ``{"type":"image_url","image_url":{"url":...}}`` shape directly and
+    dispatch through the httpx bypass — same rationale as the video
+    path: keeps the wire shape we curl-tested and avoids any block-type
+    surprises in agentscope's formatter.
+
+    For everyone else, return the agentscope-native ``ImageBlock`` so
+    each provider's formatter does its own translation; we still run
+    the source URL through :func:`resolve_media_url` first so cloud
+    endpoints get a fetchable HTTPS URL instead of a raw local path.
+    Returns ``None`` when we can't produce a usable shape (e.g. local
+    path that the media server refuses to sign for Qwen-family).
+    """
+    from ...app.channels.media_utils import resolve_media_url
+
+    source = image_block.get("source") or {}
+    url = source.get("url") or ""
+
+    if _is_qwen_family(provider_id):
+        resolved = await resolve_media_url(url) if url else ""
+        if not resolved.startswith(("http://", "https://", "data:")):
+            return None
+        return [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": resolved},
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            },
+        ]
+
+    resolved_block = image_block
+    if url:
+        resolved = await resolve_media_url(url)
+        if resolved and resolved != url:
+            resolved_block = {
+                **image_block,
+                "source": {**source, "url": resolved},
+            }
+    return [
+        {
+            "role": "user",
+            "content": [
+                resolved_block,
+                TextBlock(type="text", text=prompt),
+            ],
+        },
+    ]
+
+
+async def _describe_image_via_qwen_family_httpx(
+    messages: list[dict],
+    chat_model: "object",
+    model_id: str,
+) -> str | None:
+    """POST the OpenAI-compat chat/completions request directly for
+    Qwen-family providers.  Same rationale as the video bypass: avoids
+    any formatter surprises around image content shape.
+    """
+    import httpx
+
+    client = getattr(chat_model, "client", None)
+    base_url = str(getattr(client, "base_url", "")).rstrip("/")
+    api_key = getattr(client, "api_key", None) or ""
+    if not base_url:
+        logger.warning(
+            "view_image: Qwen-family fallback %s has no base_url; "
+            "cannot dispatch directly",
+            model_id,
+        )
+        return None
+    url = (
+        f"{base_url}/chat/completions"
+        if "/chat/completions" not in base_url
+        else base_url
+    )
+    body = {"model": model_id, "messages": messages, "stream": False}
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    logger.info(
+        "view_image: Qwen httpx POST → %s (model=%s, image_url=%s)",
+        url,
+        model_id,
+        next(
+            (
+                (c.get("image_url") or {}).get("url", "?")
+                for c in (messages[0].get("content") or [])
+                if isinstance(c, dict) and c.get("type") == "image_url"
+            ),
+            "?",
+        )[:120],
+    )
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(180, connect=30),
+        ) as hc:
+            resp = await hc.post(url, json=body, headers=headers)
+    except Exception as e:
+        logger.warning(
+            "view_image: Qwen fallback httpx call failed: %s",
+            e,
+        )
+        return None
+
+    if resp.status_code != 200:
+        logger.warning(
+            "view_image: Qwen fallback HTTP %d: %s",
+            resp.status_code,
+            resp.text[:400],
+        )
+        return None
+
+    try:
+        j = resp.json()
+    except Exception as e:
+        logger.warning(
+            "view_image: Qwen fallback returned non-JSON body: %s",
+            e,
+        )
+        return None
+
+    choices = j.get("choices") or []
+    if not choices:
+        logger.warning(
+            "view_image: Qwen fallback response missing choices: %s",
+            str(j)[:400],
+        )
+        return None
+    msg = (choices[0] or {}).get("message") or {}
+    text = msg.get("content") or ""
+    result = str(text).strip() or None
+    logger.info(
+        "view_image: Qwen fallback returned %d chars (usage=%s)",
+        len(result or ""),
+        j.get("usage"),
+    )
+    return result
+
+
+async def _describe_image_via_fallback(
+    image_block: ImageBlock,
+    prompt: str,
+    fallback: "tuple[Any, str, str]",
+) -> str | None:
+    """One-shot call to the fallback image model.  Returns the text
+    description, or ``None`` on failure (the caller substitutes the
+    generic multimodal hint in that case).
+    """
+    chat_model, provider_id, model_id = fallback
+    try:
+        messages = await _build_fallback_image_messages(
+            image_block,
+            prompt,
+            provider_id,
+        )
+        if messages is None:
+            logger.warning(
+                "view_image: cannot format image call for %s/%s "
+                "(unknown shape or media-server signing failed); "
+                "falling back to generic hint",
+                provider_id,
+                model_id,
+            )
+            return None
+        logger.info(
+            "view_image: delegating to fallback %s/%s (prompt len=%d)",
+            provider_id,
+            model_id,
+            len(prompt),
+        )
+        if _is_qwen_family(provider_id):
+            return await _describe_image_via_qwen_family_httpx(
+                messages,
+                chat_model,
+                model_id,
+            )
+        response = await chat_model(messages)
+        final_text = ""
+        chunk_count = 0
+        seen_block_types: set[str] = set()
+        if hasattr(response, "__aiter__"):
+            async for chunk in response:
+                chunk_count += 1
+                for block in getattr(chunk, "content", None) or []:
+                    if isinstance(block, dict):
+                        seen_block_types.add(str(block.get("type", "?")))
+                        if block.get("type") == "text":
+                            final_text = str(
+                                block.get("text") or final_text,
+                            )
+        else:
+            for block in getattr(response, "content", None) or []:
+                if isinstance(block, dict):
+                    seen_block_types.add(str(block.get("type", "?")))
+                    if block.get("type") == "text":
+                        final_text = str(block.get("text") or final_text)
+
+        result = final_text.strip() or None
+        if not result:
+            logger.warning(
+                "view_image: fallback %s/%s returned empty "
+                "(chunks=%d, block_types=%s) — model may not "
+                "actually support image despite supports_image=True",
+                provider_id,
+                model_id,
+                chunk_count,
+                sorted(seen_block_types),
+            )
+        return result
+    except Exception as e:
+        logger.warning(
+            "view_image: fallback %s/%s failed: %s",
+            provider_id,
+            model_id,
+            e,
+        )
+        return None
+
+
+async def view_image(
+    image_path: str,
+    prompt: str | None = None,
+) -> ToolResponse:
     """Load an image file into the LLM context so the model can see it.
 
     Use this after desktop_screenshot, browser_use, or any tool that
@@ -321,27 +776,35 @@ async def view_image(image_path: str) -> ToolResponse:
     online images — the URL is passed directly to the model without
     downloading.
 
-    When the model does not support multimodal, the image is still
-    returned (so the user/frontend can see it) along with a text hint
-    telling the agent it cannot perceive the image. The downstream
-    media-stripping pipeline will remove the ImageBlock before sending
-    to the model.
+    When the active model does not support image AND the agent has a
+    ``fallback_image_model`` configured (Settings → Agent → Fallback
+    Image Model), this tool delegates the image to that model with the
+    supplied ``prompt`` (or a detailed default prompt when none is
+    given) and returns the description as text.  The primary agent
+    can then reason about the image's contents without multimodal
+    support itself.
+
+    When the active model does not support image and **no** fallback
+    is configured, the image is still returned (so the user/frontend
+    can see it) along with a text hint telling the agent it cannot
+    perceive the image.
 
     Args:
         image_path (`str`):
             Local path or HTTP(S) URL of the image to view.
+        prompt (`str | None`, optional):
+            Question / instruction the fallback model should answer
+            about the image.  Ignored when the active model itself
+            supports image (in that case the agent reasons directly
+            over the ImageBlock).  Defaults to a generic
+            describe-everything prompt.
 
     Returns:
         `ToolResponse`:
-            An ImageBlock the model can inspect, or an error message.
+            An ImageBlock the model can inspect, a fallback text
+            description, or an error message.
     """
-    # Determine whether we need a fallback hint
-    fallback_hint: str | None = None
-    if not _check_multimodal_support("image"):
-        probe_result = await _probe_multimodal_if_needed("image")
-        if probe_result is not True:
-            fallback_hint = _get_multimodal_fallback_hint("image", image_path)
-
+    # Step 1: resolve media path / URL into an ImageBlock first.
     if _is_url(image_path):
         err = _validate_url_extension(
             image_path,
@@ -350,39 +813,154 @@ async def view_image(image_path: str) -> ToolResponse:
         )
         if err is not None:
             return err
-        text_msg = (
-            fallback_hint
-            if fallback_hint
-            else f"Image loaded from URL: {image_path}"
+        image_block = ImageBlock(
+            type="image",
+            source={"type": "url", "url": image_path},
         )
+        image_label = f"Image loaded from URL: {image_path}"
+    else:
+        resolved, err = _validate_media_path(
+            image_path,
+            _IMAGE_EXTENSIONS,
+            "image",
+        )
+        if err is not None:
+            return err
+        # Animated WebP (Signal stickers etc.) trips z.ai and similar
+        # OpenAI-compat endpoints with 1210 "image format/parse error";
+        # APNG decodes end-to-end and preserves animation.  Static webp
+        # is left alone — model support is widespread and transcoding
+        # would inflate the request for no win.
+        if resolved.suffix.lower() == ".webp" and _is_animated_webp(
+            str(resolved),
+        ):
+            transcoded = await _transcode_animated_webp_to_apng(
+                str(resolved),
+            )
+            if transcoded:
+                logger.info(
+                    "view_image: animated webp %s → apng %s",
+                    resolved.name,
+                    Path(transcoded).name,
+                )
+                resolved = Path(transcoded)
+        image_block = ImageBlock(
+            type="image",
+            source={"type": "url", "url": str(resolved)},
+        )
+        image_label = f"Image loaded: {resolved.name}"
+
+    # Step 2: check if the active model can see image natively.
+    primary_supports_image = _check_multimodal_support("image")
+    if not primary_supports_image:
+        probe_result = await _probe_multimodal_if_needed("image")
+        primary_supports_image = probe_result is True
+
+    if primary_supports_image:
+        effective_prompt = (
+            prompt.strip()
+            if isinstance(prompt, str) and prompt.strip()
+            else _DEFAULT_IMAGE_FALLBACK_PROMPT
+        )
+
+        # Primary-path HTTP bypass for OpenAI-compat vision providers
+        # (qwen-family + zhipu/z.ai).  Same rationale as the video
+        # bypass — these endpoints refuse to decode inline media
+        # blocks when conversation history contains prior view_image
+        # / view_video tool_call / tool_result pairs.  Reuses the
+        # fallback path so the agent receives a text description
+        # instead of a hot ImageBlock that the next turn would have
+        # to fight history-priors to look at.  Non-qwen-family
+        # providers (Gemini, Claude vision) fall through to the
+        # inline-block path below.
+        primary = _resolve_primary_vision_model()
+        if primary is not None and _is_qwen_family(primary[1]):
+            logger.info(
+                "view_image: primary bypass — calling %s/%s "
+                "directly (clean no-history payload)",
+                primary[1],
+                primary[2],
+            )
+            description = await _describe_image_via_fallback(
+                image_block,
+                effective_prompt,
+                primary,
+            )
+            if description:
+                _, provider_id, model_id = primary
+                header = (
+                    f"[Above description produced by primary image "
+                    f"model {provider_id}/{model_id}.]"
+                )
+                image_block_for_ui = await _to_url_form_block(image_block)
+                return ToolResponse(
+                    content=[
+                        TextBlock(type="text", text=description),
+                        TextBlock(type="text", text=header),
+                        image_block_for_ui,
+                    ],
+                )
+            logger.warning(
+                "view_image: primary bypass returned empty for "
+                "%s/%s — falling through to inline-block path",
+                primary[1],
+                primary[2],
+            )
+
+        # Inline-block path: keeps the request body small even for
+        # big media and dodges providers that choke on inlined
+        # payloads (zhipu coding-plan vs. a 39 MB video, observed
+        # 2026-05-12).
+        image_block = await _to_url_form_block(image_block)
         return ToolResponse(
             content=[
-                ImageBlock(
-                    type="image",
-                    source={"type": "url", "url": image_path},
+                image_block,
+                TextBlock(type="text", text=image_label),
+                TextBlock(
+                    type="text",
+                    text=f"User's question about this image:\n{effective_prompt}",
                 ),
-                TextBlock(type="text", text=text_msg),
             ],
         )
 
-    resolved, err = _validate_media_path(
-        image_path,
-        _IMAGE_EXTENSIONS,
-        "image",
-    )
-    if err is not None:
-        return err
+    # Step 3: active model can't see image — try the configured fallback.
+    fallback = _resolve_fallback_image_model()
+    if fallback is not None:
+        effective_prompt = (
+            prompt.strip()
+            if isinstance(prompt, str) and prompt.strip()
+            else _DEFAULT_IMAGE_FALLBACK_PROMPT
+        )
+        description = await _describe_image_via_fallback(
+            image_block,
+            effective_prompt,
+            fallback,
+        )
+        if description:
+            _, provider_id, model_id = fallback
+            # ORDER MATTERS — same rationale as view_video: put the
+            # real description FIRST so the agent reads the answer
+            # before any normalizer-replaced placeholder for the raw
+            # ImageBlock.
+            header = (
+                f"[Above description produced by fallback image "
+                f"model {provider_id}/{model_id}.]"
+            )
+            return ToolResponse(
+                content=[
+                    TextBlock(type="text", text=description),
+                    TextBlock(type="text", text=header),
+                    image_block,
+                ],
+            )
+        # Fallback failed — fall through to the generic hint below.
 
-    text_msg = (
-        fallback_hint if fallback_hint else f"Image loaded: {resolved.name}"
-    )
+    # Step 4: no fallback (or fallback itself failed) → generic hint.
+    fallback_hint = _get_multimodal_fallback_hint("image", image_path)
     return ToolResponse(
         content=[
-            ImageBlock(
-                type="image",
-                source={"type": "url", "url": str(resolved)},
-            ),
-            TextBlock(type="text", text=text_msg),
+            image_block,
+            TextBlock(type="text", text=fallback_hint),
         ],
     )
 
@@ -395,17 +973,29 @@ _DEFAULT_VIDEO_FALLBACK_PROMPT = (
     "description alone."
 )
 
-# Provider id prefixes that are OpenAI-chat-compat but expect Qwen's
-# multimodal shape (``{"type":"video","video":[url]}`` — video is a
-# list, not a ``source`` sub-object).  Seen across Aliyun Bailian,
-# DashScope coding plan, Kimi, ModelScope, mimo, and the SkillClaw
-# proxy that fronts Bailian locally.
+# Provider id prefixes that speak OpenAI-compat /chat/completions but
+# need the ``{"type":"video_url","video_url":{"url":...}}`` content
+# block shape (matching DashScope / Qwen-VL docs).  agentscope's
+# ``OpenAIChatFormatter`` doesn't understand ``video_url`` and silently
+# drops it (``Unsupported block type ... skipped.``), so any model on
+# one of these providers gets a text-only request unless we bypass
+# the formatter with a direct httpx POST.
+#
+# ``zhipu`` covers ``zhipu-cn-codingplan`` / ``zhipu-intl-codingplan``
+# (z.ai coding plan — glm-5v-turbo / GLM-4.6V).  Required as of
+# 2026-05-12: A/B replay against a 48-msg production wire confirmed
+# that glm-5v-turbo refuses to decode an inline video_url block when
+# prior view_video turns sit in conversation history — only a no-
+# history payload (same shape as the mimo fallback path) returns a
+# real description.  Treating zhipu as Qwen-family lets the existing
+# httpx bypass handle the primary path identically.
 _QWEN_FAMILY_PREFIXES = (
     "aliyun-",
     "bailian",
     "kimi-",
     "modelscope",
     "mimo",
+    "zhipu",
 )
 
 
@@ -596,6 +1186,55 @@ async def _build_fallback_video_messages(
             ],
         },
     ]
+
+
+def _resolve_primary_vision_model() -> "tuple[Any, str, str] | None":
+    """Resolve the agent's *active* model into a ready-to-call
+    ``(chat_model, provider_id, model_id)`` triple — same shape as
+    :func:`_resolve_fallback_video_model` /
+    :func:`_resolve_fallback_image_model`.  Lets the primary-path
+    bypass reuse :func:`_describe_video_via_fallback` /
+    :func:`_describe_image_via_fallback` (and the transcode-on-
+    format-rejection retry for video) unchanged.
+
+    Mirrors the agent-specific resolution in
+    :func:`_probe_multimodal_if_needed` — agent ``active_model``
+    override wins, then global ``ProviderManager.get_active_model()``.
+    """
+    try:
+        from ...app.agent_context import get_current_agent_id
+        from ...config.config import load_agent_config
+        from ...providers.provider_manager import ProviderManager
+
+        manager = ProviderManager.get_instance()
+        active = None
+        try:
+            agent_id = get_current_agent_id()
+            agent_config = load_agent_config(agent_id)
+            if agent_config.active_model:
+                active = agent_config.active_model
+        except Exception:
+            pass
+        if not active:
+            active = manager.get_active_model()
+        if not active:
+            return None
+
+        provider = manager.get_provider(active.provider_id)
+        if provider is None:
+            logger.warning(
+                "view_media: primary provider '%s' not found",
+                active.provider_id,
+            )
+            return None
+        chat_model = provider.get_chat_model_instance(active.model)
+        return chat_model, active.provider_id, active.model
+    except Exception as e:
+        logger.warning(
+            "view_media: primary model resolution failed: %s",
+            e,
+        )
+        return None
 
 
 def _resolve_fallback_video_model() -> "tuple[Any, str, str] | None":
@@ -977,10 +1616,78 @@ async def view_video(
         primary_supports_video = probe_result is True
 
     if primary_supports_video:
-        # Active model handles video directly — return the block +
-        # a short confirmation line.
+        effective_prompt = (
+            prompt.strip()
+            if isinstance(prompt, str) and prompt.strip()
+            else _DEFAULT_VIDEO_FALLBACK_PROMPT
+        )
+
+        # Primary-path HTTP bypass for OpenAI-compat vision providers
+        # (qwen-family + zhipu/z.ai).  Call /chat/completions directly
+        # with a clean no-history payload — same shape as the mimo
+        # fallback path.  Required because these endpoints refuse to
+        # decode an inline video_url block when conversation history
+        # contains prior view_video tool_call / tool_result pairs:
+        # 2026-05-12 A/B replay against a 48-msg production wire
+        # confirmed six in-context variants all fail (`tool_call`
+        # loop or empty content), only no-history returns a real
+        # description.  Reuses :func:`_describe_video_via_fallback`
+        # so the format-rejection → transcode → retry path comes
+        # for free.  Other providers (Gemini, Claude vision, etc.)
+        # fall through to the inline-block path below — their
+        # formatters handle multimodal correctly in-context.
+        primary = _resolve_primary_vision_model()
+        if primary is not None and _is_qwen_family(primary[1]):
+            logger.info(
+                "view_video: primary bypass — calling %s/%s "
+                "directly (clean no-history payload)",
+                primary[1],
+                primary[2],
+            )
+            description = await _describe_video_via_fallback(
+                video_block,
+                effective_prompt,
+                primary,
+            )
+            if description:
+                _, provider_id, model_id = primary
+                header = (
+                    f"[Above description produced by primary video "
+                    f"model {provider_id}/{model_id}.]"
+                )
+                # Resolve to URL form for the user/frontend's copy
+                # of the block so big local files don't bloat the
+                # tool_result downstream.
+                video_block_for_ui = await _to_url_form_block(video_block)
+                return ToolResponse(
+                    content=[
+                        TextBlock(type="text", text=description),
+                        TextBlock(type="text", text=header),
+                        video_block_for_ui,
+                    ],
+                )
+            logger.warning(
+                "view_video: primary bypass returned empty for "
+                "%s/%s — falling through to inline-block path",
+                primary[1],
+                primary[2],
+            )
+
+        # Inline-block path: for providers without a known bypass
+        # (Gemini, Claude vision, etc.) and as the safety net when
+        # the bypass above returned empty.  Normalize to URL form
+        # so big local files don't get inlined (see ``view_image``
+        # for rationale).
+        video_block = await _to_url_form_block(video_block)
         return ToolResponse(
-            content=[video_block, TextBlock(type="text", text=video_label)],
+            content=[
+                video_block,
+                TextBlock(type="text", text=video_label),
+                TextBlock(
+                    type="text",
+                    text=f"User's question about this video:\n{effective_prompt}",
+                ),
+            ],
         )
 
     # Step 3: active model can't see video — try the configured fallback.

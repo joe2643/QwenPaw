@@ -8,3 +8,4 @@ export { ToolExecutionLevelCard } from "./ToolExecutionLevelCard";
 export { MemPalaceCard } from "./MemPalaceCard";
 export { SkillClawCaptureCard } from "./SkillClawCaptureCard";
 export { FallbackVideoModelCard } from "./FallbackVideoModelCard";
+export { FallbackImageModelCard } from "./FallbackImageModelCard";

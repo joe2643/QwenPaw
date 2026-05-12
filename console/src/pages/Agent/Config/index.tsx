@@ -10,6 +10,7 @@ import {
   MemPalaceCard,
   SkillClawCaptureCard,
   FallbackVideoModelCard,
+  FallbackImageModelCard,
 } from "./components";
 import { PageHeader } from "@/components/PageHeader";
 import {
@@ -186,6 +187,22 @@ function AgentConfigPage() {
       children: (
         <div className={styles.tabContent}>
           <FallbackVideoModelCard />
+        </div>
+      ),
+    });
+
+    // Fallback image model — per-agent slot used by view_image when
+    // the primary model can't handle image blocks.
+    baseTabs.push({
+      key: "fallbackImageModel",
+      label: (
+        <span className={styles.tabLabel}>
+          {t("agentConfig.fallbackImageModelTab", "Fallback image")}
+        </span>
+      ),
+      children: (
+        <div className={styles.tabContent}>
+          <FallbackImageModelCard />
         </div>
       ),
     });

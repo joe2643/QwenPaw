@@ -577,3 +577,108 @@ class TestTokenStorePersistence:
         on_disk = _json.loads(s._token_store_path.read_text())
         assert "stale" not in on_disk
         assert "fresh" in on_disk
+
+
+# ---------------------------------------------------------------- #
+# .apng support (sign whitelist + Content-Type override)           #
+# ---------------------------------------------------------------- #
+
+
+class TestApngSupport:
+    """``.apng`` was added to the sign + fetch whitelists on 2026-05-12
+    so view_image's animated-webp → apng transcode pipeline can hand
+    the result to z.ai glm-5v-turbo over a signed URL.  Python's
+    ``mimetypes`` returns ``image/vnd.mozilla.apng`` which z.ai treats
+    as a single frame — we force ``image/apng`` instead.  These tests
+    pin both behaviours."""
+
+    def _make_app_server(self, tmp_path):
+        from fastapi.testclient import TestClient
+
+        from qwenpaw.app import media_server as ms_mod
+
+        srv = MediaServer(
+            port=0,
+            secret="apng-test-secret",
+            allowed_dirs=[str(tmp_path)],
+            max_size_mb=1,
+            tunnel_domain="https://media.example.com",
+            token_store_path=tmp_path / "media_token_store.json",
+        )
+        # /media uses _verify which gates on _runtime_secret indirectly
+        # through srv.secret only; nothing else needs the global.  Set
+        # it anyway to keep parity with the running server.
+        ms_mod._runtime_secret = srv.secret
+        app = srv._create_app()
+        client = TestClient(app)
+        return srv, client
+
+    def test_sign_accepts_apng(self, tmp_path):
+        srv, client = self._make_app_server(tmp_path)
+        apng = tmp_path / "anim.apng"
+        # Minimal APNG-flavoured PNG-ish bytes — sign only checks
+        # extension + size, not magic bytes, so the content is fine.
+        apng.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+
+        resp = client.get(
+            "/sign",
+            params={
+                "path": str(apng),
+                "ttl": 3600,
+                "auth": srv.secret,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert "url" in body
+        assert "/media?" in body["url"]
+        assert body["url"].startswith("https://media.example.com/")
+
+    def test_sign_still_accepts_png_regression(self, tmp_path):
+        """Regression: adding ``.apng`` must not have disturbed the
+        existing ``.png`` whitelist entry."""
+        srv, client = self._make_app_server(tmp_path)
+        png = tmp_path / "static.png"
+        png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+
+        resp = client.get(
+            "/sign",
+            params={
+                "path": str(png),
+                "ttl": 3600,
+                "auth": srv.secret,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+    def test_fetch_apng_returns_image_apng_content_type(self, tmp_path):
+        """``.apng`` must be served with ``image/apng`` — not
+        ``image/vnd.mozilla.apng`` (what Python's mimetypes returns)
+        and not ``image/png`` (which makes z.ai keep only frame 0)."""
+        srv, client = self._make_app_server(tmp_path)
+        apng = tmp_path / "anim.apng"
+        apng.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+
+        sign_resp = client.get(
+            "/sign",
+            params={
+                "path": str(apng),
+                "ttl": 3600,
+                "auth": srv.secret,
+            },
+        )
+        assert sign_resp.status_code == 200
+        # signed URL points at the public tunnel domain; rewrite to a
+        # relative /media?... path so TestClient hits the same app.
+        full_url = sign_resp.json()["url"]
+        rel = full_url.split("https://media.example.com", 1)[1]
+
+        fetch = client.get(rel)
+        assert fetch.status_code == 200, fetch.text
+        ctype = fetch.headers["content-type"].lower()
+        assert ctype.startswith("image/apng"), (
+            f"expected image/apng, got {ctype!r} — if this is "
+            "image/vnd.mozilla.apng the media_type override regressed"
+        )
+        # And the actual bytes round-trip
+        assert fetch.content.startswith(b"\x89PNG")

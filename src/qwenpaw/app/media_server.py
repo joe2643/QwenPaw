@@ -15,7 +15,7 @@ import os
 import secrets
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +122,7 @@ class MediaServer:
                 ".mkv",
                 ".mpeg",
                 ".png",
+                ".apng",
                 ".jpg",
                 ".jpeg",
                 ".gif",
@@ -189,6 +190,7 @@ class MediaServer:
                 ".mkv",
                 ".mpeg",
                 ".png",
+                ".apng",
                 ".jpg",
                 ".jpeg",
                 ".gif",
@@ -207,7 +209,20 @@ class MediaServer:
                 )
             if resolved.stat().st_size > server.max_size:
                 raise HTTPException(413, "File too large")
-            return FileResponse(str(resolved), filename=resolved.name)
+            # Python's ``mimetypes`` returns ``image/vnd.mozilla.apng``
+            # for ``.apng`` — pin to the IANA-registered ``image/apng``
+            # because z.ai's glm-5v-turbo (and other OpenAI-compat
+            # vision endpoints) dispatch animation decoding off the
+            # Content-Type alone.  Sending the mozilla variant or
+            # ``image/png`` makes them keep only the first frame.
+            extra: dict[str, Any] = {}
+            if resolved.suffix.lower() == ".apng":
+                extra["media_type"] = "image/apng"
+            return FileResponse(
+                str(resolved),
+                filename=resolved.name,
+                **extra,
+            )
 
         return app
 

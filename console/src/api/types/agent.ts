@@ -62,6 +62,9 @@ export interface ReMeLightMemoryConfig {
 export interface AgentsRunningConfig {
   max_iters: number;
   auto_continue_on_text_only: boolean;
+  allow_cross_channel_signal_tools: boolean;
+  same_session_mode: "parallel" | "steer";
+  same_session_parallel_max_runs: number;
   shell_command_timeout: number;
   llm_retry_enabled: boolean;
   llm_max_retries: number;

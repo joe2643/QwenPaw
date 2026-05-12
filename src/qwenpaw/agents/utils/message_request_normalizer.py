@@ -16,7 +16,7 @@ from agentscope.message import Msg
 from ...constant import MEDIA_UNSUPPORTED_PLACEHOLDER
 from .tool_message_utils import _sanitize_tool_messages
 
-_MEDIA_BLOCK_TYPES = {"image", "audio", "video"}
+_MEDIA_BLOCK_TYPES = {"image", "audio", "video", "file"}
 
 # Formerly the all-or-nothing ``supports_multimodal`` decision
 # stripped every media block regardless of the model's actual
@@ -97,10 +97,21 @@ def _extract_media_path(block: dict) -> str | None:
     """
     source = block.get("source")
     if isinstance(source, dict):
-        u = source.get("url") or source.get("file_path") or source.get("path")
+        # Prefer durable local paths over signed/remote URLs.  Chat-log
+        # serialisation may enrich signed media-server URLs with
+        # ``source.file_path`` so historical placeholders remain useful
+        # after the URL expires.
+        u = source.get("file_path") or source.get("path") or source.get("url")
         if isinstance(u, str) and u:
             return u
-    for key in ("image_url", "video_url", "audio_url", "url", "file_path"):
+    for key in (
+        "image_url",
+        "video_url",
+        "audio_url",
+        "file_url",
+        "url",
+        "file_path",
+    ):
         v = block.get(key)
         if isinstance(v, str) and v:
             return v
@@ -112,7 +123,8 @@ def _extract_media_path(block: dict) -> str | None:
 
 
 def _path_preserving_placeholder(block_type: str, path: str | None) -> dict:
-    """Text block that replaces a stripped media block.  Includes
+    """Text block that replaces a stripped media block because the
+    current target model cannot decode that media type.  Includes
     the original path when we could recover one — the agent can
     then invoke other tools on the same file instead of blindly
     apologising to the user.
@@ -138,6 +150,103 @@ def _path_preserving_placeholder(block_type: str, path: str | None) -> dict:
             ),
         }
     return {"type": "text", "text": MEDIA_UNSUPPORTED_PLACEHOLDER}
+
+
+def _historical_media_placeholder(block_type: str, path: str | None) -> dict:
+    """Text block replacing a media block from a previous conversation
+    turn.  Unlike ``_path_preserving_placeholder`` this is **not** a
+    capability downgrade: even image-capable models should not receive
+    old screenshots / uploads / tool media over and over.
+
+    The raw session memory is left untouched; this placeholder only
+    exists in the cloned provider request, preserving restart/error
+    recovery while avoiding historical native-media replay.
+    """
+    label = "media file" if block_type == "file" else f"{block_type} file"
+    if path:
+        return {
+            "type": "text",
+            "text": (
+                f"[Note: historical raw {label} is available "
+                f"at {path}, but it is not re-inlined in this request "
+                f"to avoid replaying old media. Reopen that path with "
+                f"a compatible tool if the current user explicitly asks "
+                f"about it.]"
+            ),
+        }
+    return {
+        "type": "text",
+        "text": (
+            f"[Note: historical raw {block_type} content was present "
+            f"in session history but is not re-inlined in this request.]"
+        ),
+    }
+
+
+def _iter_text_fragments(value) -> list[str]:
+    """Collect text strings from a Msg content value or nested blocks."""
+    texts: list[str] = []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        if value.get("type") == "text" and isinstance(value.get("text"), str):
+            texts.append(value["text"])
+        for child in value.values():
+            texts.extend(_iter_text_fragments(child))
+    elif isinstance(value, list):
+        for child in value:
+            texts.extend(_iter_text_fragments(child))
+    return texts
+
+
+def _is_system_hint_message(msg: Msg) -> bool:
+    """Best-effort detection for one-shot ReAct hint messages.
+
+    AgentScope stores HINT marks separately from Msg objects, so the
+    provider normalizer only sees a plain user/system message.  If a
+    ``<system-hint>`` message is appended after the real user input,
+    treating it as the current-turn boundary would incorrectly mark the
+    user's freshly uploaded image as historical.
+    """
+    texts = [t.strip() for t in _iter_text_fragments(msg.content) if t.strip()]
+    return bool(texts) and all(
+        t.startswith("<system-hint>") or t.startswith("<system-note:hint>")
+        for t in texts
+    )
+
+
+def _is_real_user_message(msg: Msg) -> bool:
+    """Return True for user input messages that should start a turn."""
+    if getattr(msg, "role", None) != "user":
+        return False
+    return not _is_system_hint_message(msg)
+
+
+def _find_current_turn_start(msgs: list[Msg]) -> int:
+    """Find the first message of the current user turn.
+
+    ReAct stores the active user message, then assistant tool_use and
+    system tool_result messages for the same turn.  Therefore everything
+    from the last *real* user message onward is current-turn context and
+    may keep native media (subject to model capability).  Everything
+    before it is historical context and should keep only path-preserving
+    placeholders.
+    """
+    for idx in range(len(msgs) - 1, -1, -1):
+        if _is_real_user_message(msgs[idx]):
+            # ``reply(msg=[...])`` can append multiple user messages as one
+            # turn.  Keep adjacent trailing user inputs together instead of
+            # treating all but the last as historical.
+            start = idx
+            while start > 0 and (
+                _is_real_user_message(msgs[start - 1])
+                or _is_system_hint_message(msgs[start - 1])
+            ):
+                start -= 1
+            return start
+    # No active user turn (rare internal calls): fail safe by treating all
+    # existing memory as historical.
+    return len(msgs)
 
 
 def _should_strip(block_type: str, support: "_MediaSupport") -> bool:
@@ -182,6 +291,113 @@ class _MediaSupport:
 _STRIP_ALL = None  # sentinel — see default below
 
 
+def _replace_media_in_tool_result_output(
+    output: list,
+    *,
+    historical: bool,
+    support: "_MediaSupport | None" = None,
+) -> tuple[list, int]:
+    """Replace media blocks inside a tool_result output list.
+
+    ``historical=True`` always placeholders native media because old tool
+    results should not be re-sent as raw image/video/audio.  Otherwise,
+    media is only replaced when unsupported by the current model.
+    """
+    new_output: list = []
+    replaced = 0
+    for item in output:
+        if isinstance(item, dict) and item.get("type") in _MEDIA_BLOCK_TYPES:
+            block_type = item["type"]
+            if historical:
+                new_output.append(
+                    _historical_media_placeholder(
+                        block_type,
+                        _extract_media_path(item),
+                    ),
+                )
+                replaced += 1
+                continue
+            if support is not None and _should_strip(block_type, support):
+                new_output.append(
+                    _path_preserving_placeholder(
+                        block_type,
+                        _extract_media_path(item),
+                    ),
+                )
+                replaced += 1
+                continue
+        new_output.append(item)
+    return new_output, replaced
+
+
+def _strip_historical_media_blocks_in_place(msgs: list[Msg]) -> int:
+    """Replace native media blocks before the current user turn.
+
+    This is the core replay guard: session memory and chat logs keep
+    the original blocks for restart/error recovery and UI rendering,
+    but provider requests should not keep re-sending old uploads,
+    screenshots, stickers, videos, or view_media tool outputs.
+
+    Current-turn media remains untouched here, so a freshly uploaded
+    image or a just-called ``view_image`` tool can still be consumed by
+    a vision-capable model.
+    """
+    current_turn_start = _find_current_turn_start(msgs)
+    total_replaced = 0
+
+    for idx, msg in enumerate(msgs):
+        if idx >= current_turn_start:
+            break
+        if not isinstance(msg.content, list):
+            continue
+
+        new_content: list = []
+        replaced_this_message = 0
+        for block in msg.content:
+            if isinstance(block, dict) and block.get("type") in _MEDIA_BLOCK_TYPES:
+                new_content.append(
+                    _historical_media_placeholder(
+                        block["type"],
+                        _extract_media_path(block),
+                    ),
+                )
+                total_replaced += 1
+                replaced_this_message += 1
+                continue
+
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_result"
+                and isinstance(block.get("output"), list)
+            ):
+                new_output, replaced = _replace_media_in_tool_result_output(
+                    block["output"],
+                    historical=True,
+                )
+                if replaced:
+                    block["output"] = new_output
+                    total_replaced += replaced
+                    replaced_this_message += replaced
+
+            new_content.append(block)
+
+        if not new_content and replaced_this_message > 0:
+            new_content.append(
+                {
+                    "type": "text",
+                    "text": (
+                        "[Note: historical raw media content was present "
+                        "in session history but is not re-inlined in this "
+                        "request.]"
+                    ),
+                },
+            )
+
+        msg.content = new_content
+
+    return total_replaced
+
+
 def _strip_media_blocks_in_place(
     msgs: list[Msg],
     support: "_MediaSupport | None" = None,
@@ -223,24 +439,15 @@ def _strip_media_blocks_in_place(
                 and block.get("type") == "tool_result"
                 and isinstance(block.get("output"), list)
             ):
-                new_output: list = []
-                local_stripped = 0
-                for item in block["output"]:
-                    if (
-                        isinstance(item, dict)
-                        and item.get("type") in _MEDIA_BLOCK_TYPES
-                        and _should_strip(item["type"], support)
-                    ):
-                        path = _extract_media_path(item)
-                        new_output.append(
-                            _path_preserving_placeholder(item["type"], path),
-                        )
-                        local_stripped += 1
-                        continue
-                    new_output.append(item)
+                new_output, local_stripped = _replace_media_in_tool_result_output(
+                    block["output"],
+                    historical=False,
+                    support=support,
+                )
                 total_stripped += local_stripped
                 stripped_this_message += local_stripped
-                block["output"] = new_output
+                if local_stripped:
+                    block["output"] = new_output
 
             new_content.append(block)
 
@@ -289,14 +496,22 @@ def normalize_messages_for_model_request(
     normalized = _sanitize_tool_messages(normalized)
     _clean_provider_specific_fields(normalized, target_family)
 
+    # First enforce the turn boundary regardless of model capability:
+    # historical media becomes path placeholders, while current-turn media
+    # remains available for vision/multimodal models.  This keeps raw
+    # session memory durable but prevents 50+ old images/videos from being
+    # replayed on every request.
+    _strip_historical_media_blocks_in_place(normalized)
+
     support = _MediaSupport(
         supports_multimodal=supports_multimodal,
         supports_image=supports_image,
         supports_video=supports_video,
         supports_audio=supports_audio,
     )
-    # Skip the walk entirely when every media type is supported —
-    # avoids the clone/rebuild cost for multimodal-native models.
+    # Skip the capability walk when every media type is supported —
+    # historical media was already handled above, and current-turn media
+    # can safely stay native for multimodal-capable models.
     if not (support.image and support.video and support.audio):
         _strip_media_blocks_in_place(normalized, support)
     return normalized
