@@ -66,6 +66,7 @@ class StdIOStatefulClient(StatefulClientBase):
             "replace",
         ] = "strict",
         tool_call_timeout: float | None = None,
+        read_timeout_seconds: float = 60 * 5,
         **kwargs: Any,
     ) -> None:
         """Initialize the StdIO MCP client.
@@ -85,6 +86,11 @@ class StdIOStatefulClient(StatefulClientBase):
                 usage and the ``MCPToolFunction`` callables handed to
                 agentscope's Toolkit, so hung backends become
                 surfaced errors instead of silent forever-waits.
+            read_timeout_seconds: Default MCP tool execution timeout
+                (seconds).  Mirrors the parameter name introduced by
+                upstream v1.1.6 #4061 so callers that expect the
+                upstream naming continue to work; falls back here when
+                ``tool_call_timeout`` is not set.
             **kwargs: Additional keyword arguments accepted for compatibility
                 with AgentScope's StdIOStatefulClient.
 
@@ -108,6 +114,13 @@ class StdIOStatefulClient(StatefulClientBase):
             encoding_error_handler=encoding_error_handler,
         )
         self._tool_call_timeout = tool_call_timeout
+        # ``read_timeout_seconds`` mirrors upstream v1.1.6 #4061's
+        # naming so external callers (Toolkit, manager) reading it as
+        # an attribute keep working.  Falls back to ``tool_call_timeout``
+        # when explicit, otherwise the documented default.
+        self.read_timeout_seconds = (
+            tool_call_timeout if tool_call_timeout is not None else read_timeout_seconds
+        )
 
         # Lifecycle management
         self._lifecycle_task: asyncio.Task | None = None
@@ -230,8 +243,18 @@ class StdIOStatefulClient(StatefulClientBase):
 
         Raises:
             RuntimeError: If not connected (unless ignore_errors=True)
+
+        Note:
+            Backport of upstream v1.1.6 #4152: must still stop the
+            ``_lifecycle_task`` even when ``is_connected`` is currently
+            False — that happens during the 1-second sleep between
+            transport-error-driven reconnect attempts, and a naive
+            early return there leaks the lifecycle task forever.
         """
-        if not self.is_connected:
+        has_running_lifecycle = (
+            self._lifecycle_task is not None and not self._lifecycle_task.done()
+        )
+        if not self.is_connected and not has_running_lifecycle:
             if not ignore_errors:
                 raise RuntimeError(
                     f"MCP client '{self.name}' is not connected. "
@@ -240,7 +263,10 @@ class StdIOStatefulClient(StatefulClientBase):
             return
 
         try:
-            # Signal stop and wait for lifecycle task to finish
+            # Signal stop and wait for lifecycle task to finish.  Even
+            # if the task is currently in the reconnect-sleep window,
+            # ``_stop_event`` flips its outer ``while not self._stop_event.is_set()``
+            # guard before it loops again, so await completes cleanly.
             self._stop_event.set()
             if self._lifecycle_task:
                 await self._lifecycle_task
@@ -451,6 +477,13 @@ class HttpStatefulClient(StatefulClientBase):
         self.sse_read_timeout = sse_read_timeout
         self.client_kwargs = client_kwargs
         self._tool_call_timeout = tool_call_timeout
+        # ``read_timeout_seconds`` mirrors upstream v1.1.6 #4061's
+        # naming so external code reading the attribute keeps working.
+        # For HTTP transports the SSE read timeout is the natural
+        # ceiling; explicit ``tool_call_timeout`` still wins.
+        self.read_timeout_seconds = (
+            tool_call_timeout if tool_call_timeout is not None else sse_read_timeout
+        )
 
         # Lifecycle management
         self._lifecycle_task: asyncio.Task | None = None
@@ -603,8 +636,16 @@ class HttpStatefulClient(StatefulClientBase):
 
         Raises:
             RuntimeError: If not connected (unless ignore_errors=True)
+
+        Note:
+            Backport of upstream v1.1.6 #4152: see the matching docstring
+            on ``StdIOStatefulClient.close`` — same lifecycle-task leak
+            applies to HTTP/SSE clients during reconnect sleep.
         """
-        if not self.is_connected:
+        has_running_lifecycle = (
+            self._lifecycle_task is not None and not self._lifecycle_task.done()
+        )
+        if not self.is_connected and not has_running_lifecycle:
             if not ignore_errors:
                 raise RuntimeError(
                     f"MCP client '{self.name}' is not connected. "
