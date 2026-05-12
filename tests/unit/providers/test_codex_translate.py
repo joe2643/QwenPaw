@@ -13,6 +13,7 @@ import pytest
 from qwenpaw.providers.codex_translate import (
     DEFAULT_MODEL,
     StreamState,
+    _translate_responses_usage_to_chat,
     build_responses_body,
     collect_as_chat_completion,
     content_to_plain_text,
@@ -21,6 +22,81 @@ from qwenpaw.providers.codex_translate import (
     convert_tools,
     translate_responses_events_to_chat_chunks,
 )
+
+
+# ---------------------------------------------------------------- #
+# _translate_responses_usage_to_chat                                #
+# ---------------------------------------------------------------- #
+
+
+class TestTranslateResponsesUsage:
+    """The Responses-API → ChatCompletion usage translator must forward
+    the cache hit count so ``TokenRecordingModelWrapper`` can record it
+    against codex-oauth in the token-usage panel.  Without this the
+    Cache Read column shows zero even when ChatGPT's server-side cache
+    is actively hitting on every turn.
+    """
+
+    def test_minimal_usage_passes_through(self):
+        out = _translate_responses_usage_to_chat(
+            {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150},
+        )
+        assert out == {
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "total_tokens": 150,
+        }
+
+    def test_cached_tokens_forwarded_under_chatcompletion_key(self):
+        out = _translate_responses_usage_to_chat(
+            {
+                "input_tokens": 2000,
+                "output_tokens": 100,
+                "total_tokens": 2100,
+                "input_tokens_details": {"cached_tokens": 1800},
+            },
+        )
+        # ChatCompletion shape uses ``prompt_tokens_details``; agentscope's
+        # OpenAI parser stashes the whole usage on ``ChatUsage.metadata``
+        # and the recorder drills into this exact path.
+        assert out["prompt_tokens_details"] == {"cached_tokens": 1800}
+
+    def test_zero_cached_tokens_omits_details(self):
+        # Sub-1024 prefix: OpenAI doesn't activate caching.  Don't
+        # populate the empty details dict — keeps the recorded payload
+        # identical to a no-cache provider for cleaner debugging.
+        out = _translate_responses_usage_to_chat(
+            {
+                "input_tokens": 500,
+                "output_tokens": 100,
+                "total_tokens": 600,
+                "input_tokens_details": {"cached_tokens": 0},
+            },
+        )
+        assert "prompt_tokens_details" not in out
+
+    def test_reasoning_tokens_forwarded(self):
+        # Forwarded for ChatCompletion shape parity even though we don't
+        # bill them separately yet — keeps a future reasoning-cost field
+        # one mapping change away.
+        out = _translate_responses_usage_to_chat(
+            {
+                "input_tokens": 100,
+                "output_tokens": 200,
+                "total_tokens": 300,
+                "output_tokens_details": {"reasoning_tokens": 150},
+            },
+        )
+        assert out["completion_tokens_details"] == {"reasoning_tokens": 150}
+
+    def test_missing_details_dicts_no_crash(self):
+        # Real-world: some upstream responses come back without the
+        # _details fields at all (very small requests, errors).
+        out = _translate_responses_usage_to_chat(
+            {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+        )
+        assert "prompt_tokens_details" not in out
+        assert "completion_tokens_details" not in out
 
 
 # ---------------------------------------------------------------- #

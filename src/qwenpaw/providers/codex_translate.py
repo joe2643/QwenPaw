@@ -28,6 +28,39 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+
+def _translate_responses_usage_to_chat(
+    upstream_usage: dict[str, Any],
+) -> dict[str, Any]:
+    """Map a ChatGPT Responses-API ``usage`` dict to OpenAI ChatCompletion
+    shape.  Forwards ``cached_tokens`` (server-side prompt cache hit
+    count) so :class:`TokenRecordingModelWrapper` can record the saving
+    against the existing token-usage panel — without this mapping
+    agentscope's OpenAI parser receives no cache info at all and the
+    Cache Read column shows zero for codex-oauth.
+    """
+    out: dict[str, Any] = {
+        "prompt_tokens": upstream_usage.get("input_tokens"),
+        "completion_tokens": upstream_usage.get("output_tokens"),
+        "total_tokens": upstream_usage.get("total_tokens"),
+    }
+    in_details = upstream_usage.get("input_tokens_details") or {}
+    cached = in_details.get("cached_tokens")
+    if cached:
+        # ChatCompletion shape — agentscope's parser stashes the whole
+        # usage object on ``ChatUsage.metadata`` and ``_record_usage``
+        # drills into ``prompt_tokens_details.cached_tokens``.
+        out["prompt_tokens_details"] = {"cached_tokens": int(cached)}
+    out_details = upstream_usage.get("output_tokens_details") or {}
+    reasoning = out_details.get("reasoning_tokens")
+    if reasoning:
+        # Forwarded for completeness — not yet recorded but cheap to
+        # keep aligned with the public ChatCompletion shape so future
+        # billing tweaks (reasoning is billed differently) don't need
+        # another translator visit.
+        out["completion_tokens_details"] = {"reasoning_tokens": int(reasoning)}
+    return out
+
 # Models the ChatGPT backend actually serves under Codex OAuth.  Any
 # caller-supplied model ID outside this set is silently forced to the
 # default (upstream 400s otherwise — ``o3``, ``gpt-5-codex``, etc. are
@@ -510,11 +543,7 @@ async def translate_responses_events_to_chat_chunks(
     # Final chunk with finish_reason (+ optional usage)
     final = _chat_chunk(state, {}, finish_reason=state.finish_reason or "stop")
     if state.final_usage:
-        final["usage"] = {
-            "prompt_tokens": state.final_usage.get("input_tokens"),
-            "completion_tokens": state.final_usage.get("output_tokens"),
-            "total_tokens": state.final_usage.get("total_tokens"),
-        }
+        final["usage"] = _translate_responses_usage_to_chat(state.final_usage)
     yield final
 
 
@@ -638,9 +667,5 @@ async def collect_as_chat_completion(
         ],
     }
     if state.final_usage:
-        body["usage"] = {
-            "prompt_tokens": state.final_usage.get("input_tokens"),
-            "completion_tokens": state.final_usage.get("output_tokens"),
-            "total_tokens": state.final_usage.get("total_tokens"),
-        }
+        body["usage"] = _translate_responses_usage_to_chat(state.final_usage)
     return body

@@ -71,7 +71,16 @@ CLAUDE_CLI_VERSION = "2.1.90"
 # CLI.  Missing either one → 401.  Other betas (interleaved-thinking,
 # prompt-caching-scope, context-management) are feature-gates we stay
 # out of unless a caller opts in.
-CLAUDE_BASE_BETAS = "claude-code-20250219," "oauth-2025-04-20"
+CLAUDE_BASE_BETAS = (
+    "claude-code-20250219,"
+    "oauth-2025-04-20,"
+    # Unlocks the 1-hour ``cache_control: {"ttl": "1h"}`` shape used by
+    # ``ClaudeOAuthChatModel``.  Without this beta the SDK still accepts
+    # the field but Anthropic silently degrades it back to the 5-minute
+    # default — the breakpoints work, you just pay 1.25× write cost on
+    # every 5-min boundary instead of every 1-hour boundary.
+    "extended-cache-ttl-2025-04-11"
+)
 
 # Refresh the access_token this many seconds BEFORE ``expiresAt`` so an
 # in-flight request never races the expiration edge.

@@ -215,6 +215,172 @@ def _inject_identity_system(system: Any, identity: str) -> list[dict]:
     return [identity_block, {"type": "text", "text": str(system)}]
 
 
+# ----------------------------------------------------------------------- #
+# Prompt caching                                                          #
+# ----------------------------------------------------------------------- #
+#
+# Anthropic allows up to 4 ``cache_control: ephemeral`` breakpoints per
+# request.  We spend the budget on:
+#
+#   1. last tool definition  — caches the entire tools array
+#   2. last system block     — caches identity preamble + caller system
+#   3. last 2 messages       — rolling window on the conversation tail
+#
+# A breakpoint marks "cache the prefix up to and including this block".
+# On the next turn, the longest matching cached prefix is reused at 10%
+# input cost; the trailing delta is processed fresh.  A two-message
+# rolling tail anchors a stable cache point even when the most recent
+# message changes wildly between turns (e.g., a long tool_result).
+#
+# Cache writes are billed at 1.25× input on first miss; reads at 0.10×.
+# Default TTL is 5 minutes, refreshed on every read.  No beta header
+# needed — prompt caching is GA on the OAuth endpoint.
+
+# 1-hour TTL — write cost 2.0× input vs 1.25× for 5-min, but messaging
+# channels (Signal / WhatsApp / DingTalk) have idle gaps measured in
+# minutes-to-hours where the 5-min cache evaporates and we re-pay the
+# full prefix.  Requires ``extended-cache-ttl-2025-04-11`` beta header
+# in :data:`CLAUDE_BASE_BETAS`.
+_EPHEMERAL_CACHE: dict[str, str] = {"type": "ephemeral", "ttl": "1h"}
+
+
+def _mark_last_cache(blocks: list[Any]) -> list[Any]:
+    """Return a list with ``cache_control: ephemeral`` on the last dict
+    element.  No-op when empty / last is not a dict / marker already
+    present.  Only the last element is shallow-copied; earlier ones
+    pass through by reference.
+    """
+    if not blocks:
+        return blocks
+    last = blocks[-1]
+    if not isinstance(last, dict):
+        return blocks
+    if last.get("cache_control") == _EPHEMERAL_CACHE:
+        return blocks
+    out = list(blocks)
+    out[-1] = {**last, "cache_control": _EPHEMERAL_CACHE}
+    return out
+
+
+def _mark_messages_cache(messages: Any) -> Any:
+    """Tag ``cache_control: ephemeral`` on the last content block of
+    the trailing 1-2 messages.  Returns a new list when changes were
+    made; the input list otherwise.  Caller's input is never mutated.
+    """
+    if not isinstance(messages, list) or not messages:
+        return messages
+    target_idxs = list(range(max(0, len(messages) - 2), len(messages)))
+    out = list(messages)
+    changed = False
+    for i in target_idxs:
+        msg = out[i]
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            new_content: list[Any] = [
+                {
+                    "type": "text",
+                    "text": content,
+                    "cache_control": _EPHEMERAL_CACHE,
+                },
+            ]
+        elif isinstance(content, list) and content:
+            marked = _mark_last_cache(content)
+            if marked is content:
+                continue
+            new_content = marked
+        else:
+            continue
+        out[i] = {**msg, "content": new_content}
+        changed = True
+    return out if changed else messages
+
+
+def _add_cache_breakpoints(call_kwargs: dict[str, Any]) -> None:
+    """Place the 4-breakpoint cache pattern onto the outbound payload
+    in ``call_kwargs`` (last tool, last system block, last 2 messages).
+    Mutates ``call_kwargs`` in place.  Idempotent — re-applying does
+    nothing because :func:`_mark_last_cache` is a no-op on already-marked
+    blocks.
+
+    The system tag is skipped when the list has only one block.  In OAuth
+    mode that single block is the Claude Code identity preamble, which
+    Anthropic validates byte-for-byte; tagging it risks a 400.  Skipping
+    costs ~100 cached tokens in exchange for safety.
+    """
+    tools = call_kwargs.get("tools")
+    if isinstance(tools, list) and tools:
+        call_kwargs["tools"] = _mark_last_cache(tools)
+
+    system = call_kwargs.get("system")
+    if isinstance(system, list) and len(system) >= 2:
+        call_kwargs["system"] = _mark_last_cache(system)
+
+    messages = call_kwargs.get("messages")
+    if isinstance(messages, list) and messages:
+        call_kwargs["messages"] = _mark_messages_cache(messages)
+
+
+# Per-call buffer the OAuth wrapper writes cache token counts into so
+# the outer ``__call__`` can attach them to ``ChatUsage.metadata`` for
+# the recording layer.  ContextVar — concurrent agent calls each see
+# their own buffer.
+_CURRENT_CACHE_BUF: contextvars.ContextVar[
+    dict[str, int] | None
+] = contextvars.ContextVar("claude_oauth_cache_buf", default=None)
+
+
+def _read_cache_into_buf(usage_obj: Any, buf: dict[str, int]) -> None:
+    """Copy ``cache_creation_input_tokens`` / ``cache_read_input_tokens``
+    off an Anthropic usage object into ``buf``.  Tolerant to missing
+    fields and to ``None`` — used on both the non-stream Message.usage
+    and the streaming message_start event's ``message.usage``.
+    """
+    if usage_obj is None:
+        return
+    for key in ("cache_creation_input_tokens", "cache_read_input_tokens"):
+        v = getattr(usage_obj, key, None)
+        if v:
+            buf[key] = int(v)
+
+
+def _inject_cache_metadata(resp: Any, buf: dict[str, int]) -> None:
+    """Merge ``buf`` into ``resp.usage.metadata`` so
+    :class:`TokenRecordingModelWrapper` can record cache token counts
+    alongside prompt/completion tokens.  No-op when buf is empty or the
+    response has no usage attached (e.g., intermediate stream chunks).
+    """
+    if not buf:
+        return
+    usage = getattr(resp, "usage", None)
+    if usage is None:
+        return
+    md = getattr(usage, "metadata", None)
+    if not isinstance(md, dict):
+        md = {}
+    md.update(buf)
+    usage.metadata = md
+
+
+async def _peek_stream_for_cache(
+    sdk_stream: Any,
+    cache_buf: dict[str, int],
+) -> Any:
+    """Pass-through wrapper around an Anthropic SDK ``AsyncStream`` that
+    copies cache token counts out of the ``message_start`` event into
+    ``cache_buf``.  Anthropic only reports ``cache_*_input_tokens`` on
+    that single event; later ``message_delta`` events carry only output
+    token deltas, so a one-shot capture is enough.
+    """
+    async for event in sdk_stream:
+        if getattr(event, "type", None) == "message_start":
+            msg = getattr(event, "message", None)
+            if msg is not None:
+                _read_cache_into_buf(getattr(msg, "usage", None), cache_buf)
+        yield event
+
+
 class ClaudeOAuthChatModel(AnthropicChatModel):
     """Claude Code OAuth variant of :class:`AnthropicChatModel`.
 
@@ -253,7 +419,25 @@ class ClaudeOAuthChatModel(AnthropicChatModel):
                 self._identity,
             )
             _strip_haiku_incompatible_kwargs(call_kwargs)
-            return await original_create(**call_kwargs)
+            _add_cache_breakpoints(call_kwargs)
+
+            # Per-call buffer set by the outer ``__call__`` wrapper.
+            # Absent when the model is invoked outside our wrapper
+            # (e.g., direct ``client.messages.create`` access).
+            cache_buf = _CURRENT_CACHE_BUF.get()
+            result = await original_create(**call_kwargs)
+
+            if call_kwargs.get("stream"):
+                if cache_buf is not None:
+                    return _peek_stream_for_cache(result, cache_buf)
+                return result
+
+            if cache_buf is not None:
+                _read_cache_into_buf(
+                    getattr(result, "usage", None),
+                    cache_buf,
+                )
+            return result
 
         self.client.messages.create = _wrapped_create  # type: ignore[method-assign]
 
@@ -311,7 +495,13 @@ class ClaudeOAuthChatModel(AnthropicChatModel):
         # even for PascalCase-first tool names (which the heuristic
         # strip can't recover unambiguously).
         reverse_map: dict[str, str] = {}
-        token = _TOOL_NAME_REVERSE_MAP.set(reverse_map)
+        # Per-call cache token buffer.  The wrapped ``messages.create``
+        # writes cache_*_input_tokens here on the way back; we then
+        # attach them to the outgoing ChatResponse's usage.metadata so
+        # ``TokenRecordingModelWrapper`` can persist them.
+        cache_buf: dict[str, int] = {}
+        rev_token = _TOOL_NAME_REVERSE_MAP.set(reverse_map)
+        cache_token = _CURRENT_CACHE_BUF.set(cache_buf)
         try:
             messages = _rewrite_history_tool_names_outbound(messages)
             result = await super().__call__(
@@ -322,22 +512,27 @@ class ClaudeOAuthChatModel(AnthropicChatModel):
                 **generate_kwargs,
             )
         finally:
-            _TOOL_NAME_REVERSE_MAP.reset(token)
+            _TOOL_NAME_REVERSE_MAP.reset(rev_token)
+            _CURRENT_CACHE_BUF.reset(cache_token)
 
-        # Streaming case: close over the captured reverse_map so the
-        # generator stays correct even after the ContextVar is reset.
+        # Streaming case: close over the captured reverse_map and
+        # cache_buf so the generator stays correct even after the
+        # ContextVars are reset.
         if self.stream:
-            return self._wrap_stream_strip(result, reverse_map)
+            return self._wrap_stream_response(result, reverse_map, cache_buf)
         _strip_tool_use_names_inplace(result, reverse_map)
+        _inject_cache_metadata(result, cache_buf)
         return result
 
     @staticmethod
-    async def _wrap_stream_strip(
+    async def _wrap_stream_response(
         gen: Any,
         reverse_map: dict[str, str],
+        cache_buf: dict[str, int],
     ) -> Any:
         async for chunk in gen:
             _strip_tool_use_names_inplace(chunk, reverse_map)
+            _inject_cache_metadata(chunk, cache_buf)
             yield chunk
 
 

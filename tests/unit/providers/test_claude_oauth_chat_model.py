@@ -20,8 +20,13 @@ from qwenpaw.providers.anthropic_provider import (
     ClaudeOAuthChatModel,
     MCP_TOOL_PREFIX,
     _TOOL_NAME_REVERSE_MAP,
+    _add_cache_breakpoints,
+    _inject_cache_metadata,
     _inject_identity_system,
+    _mark_last_cache,
+    _mark_messages_cache,
     _prefix_tool_name,
+    _read_cache_into_buf,
     _record_tool_name_mapping,
     _rewrite_history_tool_names_outbound,
     _strip_haiku_incompatible_kwargs,
@@ -352,6 +357,270 @@ class TestFormatterMROResolution:
             _get_formatter_for_chat_model(ClaudeOAuthChatModel)
             is AnthropicChatFormatter
         )
+
+
+# ---------------------------------------------------------------- #
+# Prompt caching                                                    #
+# ---------------------------------------------------------------- #
+
+
+# Tracks the runtime constant in anthropic_provider.py — kept as a literal
+# (not an import of _EPHEMERAL_CACHE) so a regression that drops the TTL
+# silently shows up here rather than auto-passing.
+_EPHEMERAL = {"type": "ephemeral", "ttl": "1h"}
+
+
+class TestMarkLastCache:
+    def test_empty_list_is_noop(self):
+        assert _mark_last_cache([]) == []
+
+    def test_non_dict_last_is_noop(self):
+        # Strange shape — pass through.  Anthropic's API rejects this
+        # anyway; the helper just stays out of the way.
+        original = [{"type": "text", "text": "a"}, "tail"]
+        assert _mark_last_cache(original) is original
+
+    def test_marks_last_block(self):
+        original = [
+            {"type": "text", "text": "a"},
+            {"type": "text", "text": "b"},
+        ]
+        out = _mark_last_cache(original)
+        assert out is not original  # Returns a new list.
+        assert out[0] is original[0]  # Earlier blocks not copied.
+        assert out[1] == {
+            "type": "text",
+            "text": "b",
+            "cache_control": _EPHEMERAL,
+        }
+        # Original block must not be mutated — important for callers
+        # that hold shared references.
+        assert "cache_control" not in original[1]
+
+    def test_idempotent_when_already_marked(self):
+        already = [
+            {"type": "text", "text": "a", "cache_control": _EPHEMERAL},
+        ]
+        # Returns same reference — no rebuild, no double-tag.
+        assert _mark_last_cache(already) is already
+
+
+class TestMarkMessagesCache:
+    def test_empty_passthrough(self):
+        assert _mark_messages_cache([]) == []
+        assert _mark_messages_cache(None) is None
+
+    def test_string_content_is_normalized(self):
+        msgs = [{"role": "user", "content": "hi"}]
+        out = _mark_messages_cache(msgs)
+        assert out[0]["content"] == [
+            {"type": "text", "text": "hi", "cache_control": _EPHEMERAL},
+        ]
+        # Caller's input not mutated.
+        assert msgs[0]["content"] == "hi"
+
+    def test_marks_last_two_messages(self):
+        msgs = [
+            {"role": "user", "content": [{"type": "text", "text": "1"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "2"}]},
+            {"role": "user", "content": [{"type": "text", "text": "3"}]},
+        ]
+        out = _mark_messages_cache(msgs)
+        # First message untouched (rolling 2-bp window).
+        assert "cache_control" not in out[0]["content"][0]
+        # Last two marked.
+        assert out[1]["content"][0]["cache_control"] == _EPHEMERAL
+        assert out[2]["content"][0]["cache_control"] == _EPHEMERAL
+
+    def test_single_message_marked(self):
+        msgs = [
+            {"role": "user", "content": [{"type": "text", "text": "1"}]},
+        ]
+        out = _mark_messages_cache(msgs)
+        assert out[0]["content"][0]["cache_control"] == _EPHEMERAL
+
+
+class TestAddCacheBreakpoints:
+    def test_marks_tools_system_and_messages(self):
+        kwargs = {
+            "tools": [
+                {"name": "a", "description": "x"},
+                {"name": "b", "description": "y"},
+            ],
+            "system": [
+                {"type": "text", "text": CLAUDE_CODE_IDENTITY},
+                {"type": "text", "text": "be terse"},
+            ],
+            "messages": [
+                {"role": "user", "content": "hi"},
+            ],
+        }
+        _add_cache_breakpoints(kwargs)
+        # Last tool marked; earlier untouched.
+        assert "cache_control" not in kwargs["tools"][0]
+        assert kwargs["tools"][1]["cache_control"] == _EPHEMERAL
+        # Last system block marked; identity at idx 0 stays byte-identical
+        # (Anthropic OAuth validates equality on the first block).
+        assert kwargs["system"][0] == {
+            "type": "text",
+            "text": CLAUDE_CODE_IDENTITY,
+        }
+        assert kwargs["system"][1]["cache_control"] == _EPHEMERAL
+        # Last message normalized + marked.
+        assert kwargs["messages"][0]["content"][0]["cache_control"] == (
+            _EPHEMERAL
+        )
+
+    def test_identity_only_system_is_left_alone(self):
+        # Anthropic OAuth validates the identity block byte-for-byte.
+        # When the caller supplies no system, _inject_identity_system
+        # returns a single-block list — that block IS the identity, and
+        # tagging it risks a 400.  Verify we leave it untouched and
+        # eat the ~100-token cache miss.
+        kwargs = {
+            "system": _inject_identity_system(None, CLAUDE_CODE_IDENTITY),
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        _add_cache_breakpoints(kwargs)
+        # Identity block stays exactly as Anthropic expects it.
+        assert kwargs["system"] == [
+            {"type": "text", "text": CLAUDE_CODE_IDENTITY},
+        ]
+
+    def test_two_block_system_marks_only_caller_system(self):
+        # Identity at idx 0 must remain byte-identical; cache lands on
+        # the caller's block at idx 1.
+        kwargs = {
+            "system": _inject_identity_system(
+                "be terse",
+                CLAUDE_CODE_IDENTITY,
+            ),
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        _add_cache_breakpoints(kwargs)
+        assert kwargs["system"][0] == {
+            "type": "text",
+            "text": CLAUDE_CODE_IDENTITY,
+        }
+        assert kwargs["system"][1] == {
+            "type": "text",
+            "text": "be terse",
+            "cache_control": _EPHEMERAL,
+        }
+
+    def test_total_breakpoints_within_anthropic_limit(self):
+        # Anthropic caps at 4 cache_control breakpoints per request.
+        # Tools + system + 2 messages = 4.  Going over would be a 400.
+        kwargs = {
+            "tools": [{"name": "a"}, {"name": "b"}, {"name": "c"}],
+            "system": [
+                {"type": "text", "text": "x"},
+                {"type": "text", "text": "y"},
+            ],
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "1"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "2"}]},
+                {"role": "user", "content": [{"type": "text", "text": "3"}]},
+            ],
+        }
+        _add_cache_breakpoints(kwargs)
+
+        def _count_marks(payload):
+            n = 0
+            for item in payload:
+                blocks = item.get("content") if isinstance(item, dict) else None
+                if isinstance(blocks, list):
+                    n += sum(
+                        1
+                        for b in blocks
+                        if isinstance(b, dict)
+                        and b.get("cache_control") == _EPHEMERAL
+                    )
+                elif item.get("cache_control") == _EPHEMERAL:
+                    n += 1
+            return n
+
+        total = (
+            _count_marks(kwargs["tools"])
+            + _count_marks(kwargs["system"])
+            + _count_marks(kwargs["messages"])
+        )
+        assert total == 4
+
+    def test_idempotent(self):
+        kwargs = {
+            "tools": [{"name": "a"}],
+            "system": [{"type": "text", "text": "x"}],
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        _add_cache_breakpoints(kwargs)
+        snapshot = {
+            "tools": [dict(t) for t in kwargs["tools"]],
+            "system": [dict(b) for b in kwargs["system"]],
+            "messages": [
+                {"role": m["role"], "content": list(m["content"])}
+                for m in kwargs["messages"]
+            ],
+        }
+        # Re-applying must not double-tag or re-shape anything.
+        _add_cache_breakpoints(kwargs)
+        assert kwargs["tools"] == snapshot["tools"]
+        assert kwargs["system"] == snapshot["system"]
+        assert kwargs["messages"] == snapshot["messages"]
+
+
+class TestCacheUsageCapture:
+    def test_read_cache_into_buf_pulls_both_fields(self):
+        usage = SimpleNamespace(
+            input_tokens=100,
+            output_tokens=50,
+            cache_creation_input_tokens=200,
+            cache_read_input_tokens=1500,
+        )
+        buf: dict[str, int] = {}
+        _read_cache_into_buf(usage, buf)
+        assert buf == {
+            "cache_creation_input_tokens": 200,
+            "cache_read_input_tokens": 1500,
+        }
+
+    def test_read_cache_tolerates_missing_fields(self):
+        # Older anthropic SDK builds may lack the cache fields entirely.
+        usage = SimpleNamespace(input_tokens=100, output_tokens=50)
+        buf: dict[str, int] = {}
+        _read_cache_into_buf(usage, buf)
+        assert buf == {}
+
+    def test_inject_cache_metadata_merges_into_existing(self):
+        usage = SimpleNamespace(
+            input_tokens=100,
+            output_tokens=50,
+            metadata={"existing": "keep"},
+        )
+        resp = SimpleNamespace(usage=usage)
+        _inject_cache_metadata(resp, {"cache_read_input_tokens": 1500})
+        assert resp.usage.metadata == {
+            "existing": "keep",
+            "cache_read_input_tokens": 1500,
+        }
+
+    def test_inject_cache_metadata_creates_metadata_when_absent(self):
+        usage = SimpleNamespace(
+            input_tokens=100,
+            output_tokens=50,
+            metadata=None,
+        )
+        resp = SimpleNamespace(usage=usage)
+        _inject_cache_metadata(resp, {"cache_creation_input_tokens": 200})
+        assert resp.usage.metadata == {"cache_creation_input_tokens": 200}
+
+    def test_inject_cache_metadata_noop_on_empty_buf(self):
+        # Hot path: no cache hits at all (e.g., first call on a brand-new
+        # 5-min window).  Don't allocate or touch usage.
+        usage = SimpleNamespace(metadata=None)
+        resp = SimpleNamespace(usage=usage)
+        _inject_cache_metadata(resp, {})
+        assert resp.usage.metadata is None
 
 
 # ---------------------------------------------------------------- #
