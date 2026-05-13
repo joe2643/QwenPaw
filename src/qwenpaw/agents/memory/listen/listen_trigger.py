@@ -299,6 +299,7 @@ async def _fire_once(workspace, cfg: ListenConfig) -> None:
         cfg.chat_id,
         session_id=cfg.session_id,
         user_id=cfg.user_id,
+        channel=cfg.channel_name,
     )
     if chat_busy:
         logger.info(

@@ -84,4 +84,133 @@ async def test_is_chat_busy_returns_false_when_all_needles_empty():
     assert await is_chat_busy(ws, "", session_id="", user_id="") is False
 
 
+# ---------------------------------------------------------------------------
+# ChatSpec.id resolution path (regression for the "listen fires during
+# compaction" symptom — run_key is a UUID that doesn't contain any of
+# the channel-side identifiers, so substring match alone always missed).
+# ---------------------------------------------------------------------------
+
+
+class _FakeChat:
+    def __init__(self, chat_id, session_id, user_id, channel):
+        self.id = chat_id
+        self.session_id = session_id
+        self.user_id = user_id
+        self.channel = channel
+
+
+class _FakeChatManager:
+    def __init__(self, chats):
+        self._chats = chats
+
+    async def list_chats(self):
+        return list(self._chats)
+
+
+async def test_resolves_chatspec_id_by_session_id():
+    """Real bug we hit: a normal @-mention reply was running for this
+    chat, but ``is_chat_busy`` returned False because the run_key in
+    task_tracker was the ChatSpec UUID, not the channel session URI.
+    Listen kept firing during the agent's compaction LLM call."""
+
+    chat_uuid = "abc12345-1234-1234-1234-1234567890ab"
+    ws = SimpleNamespace(
+        task_tracker=_FakeTaskTracker([chat_uuid]),
+        chat_manager=_FakeChatManager(
+            [
+                _FakeChat(
+                    chat_id=chat_uuid,
+                    session_id="whatsapp:group:120363@g.us",
+                    user_id="group:120363@g.us",
+                    channel="whatsapp",
+                ),
+            ],
+        ),
+    )
+
+    busy = await is_chat_busy(
+        ws,
+        chat_id="120363@g.us",
+        session_id="whatsapp:group:120363@g.us",
+        user_id="group:120363@g.us",
+        channel="whatsapp",
+    )
+    assert busy is True
+
+
+async def test_chatspec_match_blocks_when_parallel_child_run_key():
+    """Parallel runs use ``{parent}::run:{hex}`` as the concrete key.
+    The match must catch those too — otherwise listen would fire
+    against a chat that's mid-reply in a parallel child."""
+
+    parent_uuid = "abc12345-1234-1234-1234-1234567890ab"
+    child_key = f"{parent_uuid}::run:deadbeefcafe"
+    ws = SimpleNamespace(
+        task_tracker=_FakeTaskTracker([child_key]),
+        chat_manager=_FakeChatManager(
+            [
+                _FakeChat(
+                    chat_id=parent_uuid,
+                    session_id="whatsapp:group:1@g.us",
+                    user_id="group:1@g.us",
+                    channel="whatsapp",
+                ),
+            ],
+        ),
+    )
+
+    busy = await is_chat_busy(
+        ws,
+        chat_id="1@g.us",
+        session_id="whatsapp:group:1@g.us",
+        channel="whatsapp",
+    )
+    assert busy is True
+
+
+async def test_chatspec_match_rejects_wrong_channel():
+    """A chat with same session_id but DIFFERENT channel must NOT
+    block — channels are isolated."""
+
+    chat_uuid = "abc12345-1234-1234-1234-1234567890ab"
+    ws = SimpleNamespace(
+        task_tracker=_FakeTaskTracker([chat_uuid]),
+        chat_manager=_FakeChatManager(
+            [
+                _FakeChat(
+                    chat_id=chat_uuid,
+                    session_id="whatsapp:group:1@g.us",
+                    user_id="group:1@g.us",
+                    channel="signal",  # different channel
+                ),
+            ],
+        ),
+    )
+
+    busy = await is_chat_busy(
+        ws,
+        chat_id="1@g.us",
+        session_id="whatsapp:group:1@g.us",
+        channel="whatsapp",
+    )
+    assert busy is False
+
+
+async def test_falls_back_to_substring_match_when_no_chat_manager():
+    """Without a chat_manager (unit tests, partial workspace), the
+    substring path is the only signal we have.  Keep it working."""
+
+    ws = SimpleNamespace(
+        task_tracker=_FakeTaskTracker(["streaming:whatsapp:group:abc"]),
+        chat_manager=None,
+    )
+
+    busy = await is_chat_busy(
+        ws,
+        chat_id="any",
+        session_id="whatsapp:group:abc",
+    )
+    assert busy is True
+
+
 pytestmark = pytest.mark.asyncio

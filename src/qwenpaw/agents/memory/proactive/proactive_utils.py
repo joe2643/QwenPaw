@@ -35,20 +35,32 @@ async def is_chat_busy(
     *,
     session_id: str = "",
     user_id: str = "",
+    channel: str = "",
 ) -> bool:
     """Check if THIS chat specifically has an active task.
 
     ``is_agent_busy`` is workspace-global — any task anywhere blocks.
     Listen mode wants finer granularity: a user @-mention in *another*
-    chat shouldn't pause listen ticks in *this* chat.
+    chat shouldn't pause listen ticks in *this* chat, but a reply in
+    flight in *this* chat (including its internal compaction LLM call)
+    SHOULD pause us.
 
-    Run-key format per ``task_tracker`` docstring is typically
-    ``ChatSpec.id`` (the chat_id) for internal streaming runs.  We
-    accept a few aliases (``session_id``, ``user_id``) so callers can
-    pass whatever identifier they have without forcing the trigger loop
-    to know the internal mapping.
+    Run-key format per ``task_tracker`` docstring is ``ChatSpec.id``
+    (a UUID generated when a chat is created — see
+    :class:`qwenpaw.app.runner.models.ChatSpec`).  None of the channel
+    identifiers callers actually have (chat_jid / group_id / session
+    URI / sender phone) appear inside that UUID, so a plain substring
+    match against the run-key would always miss.  The right path is:
+    walk the chat manager to find the ``ChatSpec`` whose
+    ``session_id`` / ``user_id`` / ``channel`` matches the caller's,
+    then check the tracker for its ``id`` field.
 
-    Returns False on any error so a transient task_tracker hiccup
+    We also fall back to a substring match against
+    ``ChatSpec.session_id`` itself, so even when the chat manager
+    isn't fully wired (unit tests / partially-built workspaces) the
+    check still does something useful.
+
+    Returns ``False`` on any error so a transient task_tracker hiccup
     doesn't stall listen forever.
     """
     if not chat_id and not session_id and not user_id:
@@ -58,11 +70,52 @@ async def is_chat_busy(
         if tt is None:
             return False
         active = await tt.list_active_tasks()
+        if not active:
+            return False
+
+        # Build the candidate run_key set: any ChatSpec.id whose
+        # session_id / user_id / channel matches the caller's needles.
+        candidate_run_keys: set[str] = set()
+        chat_manager = getattr(workspace, "chat_manager", None)
+        if chat_manager is not None:
+            try:
+                chats = await chat_manager.list_chats()
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.debug(
+                    "is_chat_busy: chat_manager.list_chats failed: %s",
+                    e,
+                )
+                chats = []
+            for chat in chats:
+                # Match by session_id (most specific), then user_id +
+                # channel (sender match in a DM, group + channel for
+                # group chats).  Channel mismatch is a hard reject.
+                if channel and getattr(chat, "channel", "") != channel:
+                    continue
+                if session_id and getattr(chat, "session_id", "") == session_id:
+                    candidate_run_keys.add(chat.id)
+                    continue
+                if user_id and getattr(chat, "user_id", "") == user_id:
+                    candidate_run_keys.add(chat.id)
+                    continue
+
+        # Primary: exact match on resolved ChatSpec.id (or parent of a
+        # parallel child run, which uses ``parent::run:<hex>``).
+        for run_key in active:
+            for cand in candidate_run_keys:
+                if run_key == cand or run_key.startswith(cand + "::"):
+                    return True
+
+        # Fallback: substring match against the needles themselves.
+        # Some external-task registrations (cron etc.) DO use a string
+        # containing the identifier, and this also keeps unit tests
+        # without a chat_manager working.
         needles = {n for n in (chat_id, session_id, user_id) if n}
         for run_key in active:
             for needle in needles:
                 if needle and needle in run_key:
                     return True
+
         return False
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.warning(
