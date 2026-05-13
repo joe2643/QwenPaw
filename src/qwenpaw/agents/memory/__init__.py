@@ -7,9 +7,10 @@ from .agent_md_manager import AgentMdManager
 from .base_memory_manager import BaseMemoryManager
 from .reme_light_memory_manager import ReMeLightMemoryManager
 
-# Proactive symbols are lazily re-exported via __getattr__ at runtime to
-# avoid circular imports (proactive -> react_agent -> agents.memory loop).
-# The TYPE_CHECKING block below satisfies static analysis tools (pylint, mypy).
+# Proactive + listen symbols are lazily re-exported via __getattr__ at
+# runtime to avoid circular imports (e.g. proactive -> react_agent ->
+# agents.memory loop).  The TYPE_CHECKING block below satisfies static
+# analysis tools (pylint, mypy).
 if TYPE_CHECKING:  # pragma: no cover
     from .proactive import (
         ProactiveConfig,
@@ -21,6 +22,14 @@ if TYPE_CHECKING:  # pragma: no cover
         proactive_configs,
         proactive_tasks,
         proactive_trigger_loop,
+    )
+    from .listen import (
+        ListenConfig,
+        disable_listen_for_chat,
+        enable_listen_for_chat,
+        listen_configs,
+        listen_tasks,
+        listen_trigger_loop,
     )
 
 # pylint: disable=undefined-all-variable
@@ -38,6 +47,13 @@ __all__ = [
     "proactive_configs",
     "generate_proactive_response",
     "extract_content",
+    # listen symbols (also lazy)
+    "ListenConfig",
+    "enable_listen_for_chat",
+    "disable_listen_for_chat",
+    "listen_trigger_loop",
+    "listen_configs",
+    "listen_tasks",
 ]
 
 _PROACTIVE_EXPORTS = {
@@ -52,10 +68,23 @@ _PROACTIVE_EXPORTS = {
     "extract_content",
 }
 
+_LISTEN_EXPORTS = {
+    "ListenConfig",
+    "enable_listen_for_chat",
+    "disable_listen_for_chat",
+    "listen_trigger_loop",
+    "listen_configs",
+    "listen_tasks",
+}
+
 
 def __getattr__(name: str):
     if name in _PROACTIVE_EXPORTS:
         from . import proactive as _proactive  # noqa: PLC0415
 
         return getattr(_proactive, name)
+    if name in _LISTEN_EXPORTS:
+        from . import listen as _listen  # noqa: PLC0415
+
+        return getattr(_listen, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

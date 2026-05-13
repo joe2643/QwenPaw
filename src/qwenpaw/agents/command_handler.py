@@ -47,6 +47,7 @@ class ConversationCommandHandlerMixin:
             "dump_history",
             "load_history",
             "proactive",
+            "listen",
             "plan",
         },
     )
@@ -760,3 +761,221 @@ class CommandHandler(ConversationCommandHandlerMixin):
                 return await self._make_system_msg(
                     msgs["error_args"].format(error=str(e)),
                 )
+
+    async def _process_listen(
+        self,
+        _messages: list[Msg],
+        args: str = "",
+    ) -> Msg:
+        """Process /listen [minutes|on|off] command.
+
+        Per-chat: enables a timer that fires every N minutes on the
+        originating chat's ``_group_history`` buffer and lets a small
+        LLM call decide whether to chime in.  Unlike ``/proactive``,
+        listen is scoped to *this* group / DM only — the captured
+        chat target comes from the current request's channel_meta.
+        """
+        args = args.strip().lower()
+        from ..app.agent_context import (
+            get_current_agent_id,
+            get_current_channel_meta,
+        )
+        from .memory import (
+            disable_listen_for_chat,
+            enable_listen_for_chat,
+            listen_configs,
+        )
+        from .memory.listen.listen_trigger import (
+            _extract_chat_target,
+            listen_key,
+        )
+
+        agent_lang = getattr(
+            self._get_agent_config(),
+            "language",
+            "en",
+        )
+        lang_key = "zh" if str(agent_lang).lower() == "zh" else "en"
+
+        msgs_table = {
+            "en": {
+                "no_chat": (
+                    "**/listen cannot run here**\n\n"
+                    "- /listen is a per-chat command — invoke it from "
+                    "inside the group/DM you want me to observe."
+                ),
+                "enabled": (
+                    "**Listen Mode Enabled**\n\n"
+                    "- Target: {key}\n"
+                    "- Interval: every {minutes} min\n"
+                    "- I'll quietly read the recent chatter buffer "
+                    "and decide whether to chime in.\n"
+                    "- Stop with /listen off."
+                ),
+                "disabled": (
+                    "**Listen Mode Disabled**\n\n"
+                    "- Target: {key}\n"
+                    "- Stopped observing this chat."
+                ),
+                "status_active": (
+                    "**Listen Mode** — active on {key}, every {minutes} min."
+                ),
+                "status_inactive": (
+                    "**Listen Mode** — not active on this chat.\n\n"
+                    "- /listen on (every 5 min)\n"
+                    "- /listen 10 (every 10 min)\n"
+                    "- /listen off"
+                ),
+                "error": "**Listen error**\n\n- {error}",
+            },
+            "zh": {
+                "no_chat": (
+                    "**/listen 喺度用唔到**\n\n"
+                    "- /listen 係 per-chat 指令，請喺你想我觀察嘅 "
+                    "group / DM 入面使用。"
+                ),
+                "enabled": (
+                    "**已啟用 Listen 模式**\n\n"
+                    "- 目標: {key}\n"
+                    "- 間隔: 每 {minutes} 分鐘\n"
+                    "- 我會靜靜咁睇最近 chatter，需要嘅時候搭嘴。\n"
+                    "- 關閉: /listen off"
+                ),
+                "disabled": (
+                    "**已停用 Listen 模式**\n\n"
+                    "- 目標: {key}\n"
+                    "- 已停止觀察呢個 chat。"
+                ),
+                "status_active": (
+                    "**Listen 模式** — 正監聽 {key}，每 {minutes} 分鐘 tick 一次。"
+                ),
+                "status_inactive": (
+                    "**Listen 模式** — 呢個 chat 未啟用。\n\n"
+                    "- /listen on (預設每 5 分鐘)\n"
+                    "- /listen 10 (每 10 分鐘)\n"
+                    "- /listen off"
+                ),
+                "error": "**Listen 出錯**\n\n- {error}",
+            },
+        }
+        t = msgs_table[lang_key]
+
+        from ..app.agent_context import get_current_session_id
+
+        channel_meta = get_current_channel_meta() or {}
+        session_id = get_current_session_id() or ""
+        channel_name, chat_id = _extract_chat_target(channel_meta, session_id)
+        if not channel_name or not chat_id:
+            return await self._make_system_msg(t["no_chat"])
+
+        # Synthesize the minimal chat_meta the channel's outbound
+        # ``send()`` looks for when we couldn't read a real request
+        # channel_meta (e.g. /listen invoked from the console UI sitting
+        # on a remote-channel session).  WhatsApp's ``send`` reads
+        # ``meta["chat_jid"]``; Signal's reads ``meta["group_id"]``.
+        if not channel_meta:
+            channel_meta = {"platform": channel_name}
+            if channel_name == "whatsapp":
+                channel_meta["chat_jid"] = chat_id
+            elif channel_name == "signal":
+                # Group IDs always end in ``=``; bare ``+phone`` is a DM.
+                if chat_id.endswith("=") and not chat_id.startswith("+"):
+                    channel_meta["group_id"] = chat_id
+                else:
+                    channel_meta["source"] = chat_id
+            else:
+                channel_meta["chat_id"] = chat_id
+
+        key = listen_key(channel_name, chat_id)
+
+        if args in ("", "status"):
+            cfg = listen_configs.get(key)
+            if cfg and cfg.enabled:
+                return await self._make_system_msg(
+                    t["status_active"].format(
+                        key=key,
+                        minutes=cfg.interval_minutes,
+                    ),
+                )
+            return await self._make_system_msg(t["status_inactive"])
+
+        if args == "off":
+            try:
+                disable_listen_for_chat(channel_name, chat_id)
+                return await self._make_system_msg(
+                    t["disabled"].format(key=key),
+                )
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                return await self._make_system_msg(
+                    t["error"].format(error=str(e)),
+                )
+
+        # Argument grammar:
+        #   /listen on              → normal verbosity, 5min
+        #   /listen N               → normal verbosity, Nmin
+        #   /listen aggressive      → aggressive verbosity, 5min
+        #   /listen aggressive N    → aggressive verbosity, Nmin
+        #   /listen normal N        → explicit normal, Nmin
+        minutes = 5
+        verbosity = "normal"
+        tokens = [tok for tok in args.split() if tok]
+        try:
+            for tok in tokens:
+                if tok in ("on", "off"):
+                    continue
+                if tok in ("aggressive", "normal"):
+                    verbosity = tok
+                    continue
+                # Treat anything else as the interval.
+                minutes = int(tok)
+                if minutes <= 0:
+                    raise ValueError(
+                        "interval must be a positive integer",
+                    )
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            return await self._make_system_msg(
+                t["error"].format(error=str(e)),
+            )
+
+        try:
+            active_agent_id = get_current_agent_id() or ""
+            # The chat's persisted session state is keyed by
+            # ``{user_id}_{session_id}.json``.  WhatsApp / Signal
+            # channels build the request with
+            # ``sender_id = f"group:{chat_id}"`` for groups (see e.g.
+            # ``WhatsAppChannel._handle_inbound`` and Signal's
+            # equivalent), so a group's session file uses ``group:JID``
+            # as user_id — NOT the human sender's phone.  Reproduce the
+            # same rule here, otherwise the listen tick reads the wrong
+            # file and prior-conversation always renders ``(none)``.
+            captured_session_id = session_id or ""
+            is_group = bool(channel_meta.get("is_group")) or (
+                chat_id.endswith("@g.us")
+                or (chat_id.endswith("=") and not chat_id.startswith("+"))
+            )
+            if is_group:
+                captured_user_id = f"group:{chat_id}"
+            else:
+                captured_user_id = (
+                    channel_meta.get("sender_phone")
+                    or channel_meta.get("source")
+                    or channel_meta.get("sender_jid")
+                    or chat_id  # DM fallback
+                )
+            enable_listen_for_chat(
+                channel_name,
+                chat_id,
+                interval_minutes=minutes,
+                chat_meta=channel_meta,
+                agent_id=active_agent_id,
+                verbosity=verbosity,
+                session_id=captured_session_id,
+                user_id=captured_user_id,
+            )
+            return await self._make_system_msg(
+                t["enabled"].format(key=key, minutes=minutes),
+            )
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            return await self._make_system_msg(
+                t["error"].format(error=str(e)),
+            )

@@ -29,6 +29,50 @@ async def is_agent_busy(
         return False
 
 
+async def is_chat_busy(
+    workspace: "Workspace",
+    chat_id: str,
+    *,
+    session_id: str = "",
+    user_id: str = "",
+) -> bool:
+    """Check if THIS chat specifically has an active task.
+
+    ``is_agent_busy`` is workspace-global — any task anywhere blocks.
+    Listen mode wants finer granularity: a user @-mention in *another*
+    chat shouldn't pause listen ticks in *this* chat.
+
+    Run-key format per ``task_tracker`` docstring is typically
+    ``ChatSpec.id`` (the chat_id) for internal streaming runs.  We
+    accept a few aliases (``session_id``, ``user_id``) so callers can
+    pass whatever identifier they have without forcing the trigger loop
+    to know the internal mapping.
+
+    Returns False on any error so a transient task_tracker hiccup
+    doesn't stall listen forever.
+    """
+    if not chat_id and not session_id and not user_id:
+        return False
+    try:
+        tt = getattr(workspace, "task_tracker", None)
+        if tt is None:
+            return False
+        active = await tt.list_active_tasks()
+        needles = {n for n in (chat_id, session_id, user_id) if n}
+        for run_key in active:
+            for needle in needles:
+                if needle and needle in run_key:
+                    return True
+        return False
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.warning(
+            "is_chat_busy(chat_id=%r) check failed: %s",
+            chat_id,
+            e,
+        )
+        return False
+
+
 def ensure_tz_aware(dt: datetime) -> datetime:
     """Ensure datetime is timezone-aware, convert naive datetime to UTC."""
     if dt.tzinfo is None:
