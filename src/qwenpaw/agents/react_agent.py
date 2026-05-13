@@ -76,6 +76,7 @@ from ..constant import (
     MEDIA_UNSUPPORTED_PLACEHOLDER,
     WORKING_DIR,
 )
+from ..exceptions import ModelContextLengthExceededException
 from ..providers.model_capability_cache import get_capability_cache
 
 if TYPE_CHECKING:
@@ -1438,6 +1439,14 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
         # --- Passive fallback layer (existing logic) ---
         try:
             msg = await super()._reasoning(tool_choice=tool_choice)
+        except ModelContextLengthExceededException as ctx_exc:
+            # Z.AI streams a final empty chunk with
+            # ``finish_reason="model_context_window_exceeded"`` instead of
+            # raising an HTTP error.  The provider wrapper now surfaces
+            # this as a typed exception (see openai_chat_model_compat).
+            # Convert it into a user-visible apology reply so the channel
+            # doesn't go silent; the user can then ``/new`` or ``/compact``.
+            return await self._build_context_exceeded_reply(ctx_exc)
         except Exception as e:
             if not self._is_bad_request_or_media_error(e):
                 raise
@@ -1603,6 +1612,117 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                 exc,
             )
 
+    # User-facing text per agent language for context-window overflow.
+    # Kept short and actionable so channels with strict character limits
+    # (e.g. SMS-style fallbacks) still render the whole thing.
+    _CONTEXT_EXCEEDED_TEXT = {
+        "zh": (
+            "對話歷史已超出模型上下文窗口，無法繼續推理。"
+            "請輸入 /new 開新對話，或 /compact 壓縮現有歷史後再試。"
+        ),
+        "en": (
+            "The conversation has exceeded the model's context window. "
+            "Please send /new to start a fresh chat, or /compact to "
+            "compress the current history and retry."
+        ),
+        "ru": (
+            "История диалога превысила контекстное окно модели. "
+            "Отправьте /new для новой беседы или /compact для сжатия "
+            "истории, затем повторите."
+        ),
+    }
+
+    async def _build_context_exceeded_reply(
+        self,
+        exc: ModelContextLengthExceededException,
+    ) -> Msg:
+        """Convert a context-overflow exception into a user-visible reply.
+
+        Z.AI's overflow signal is silent at the wire level; the upstream
+        parser now raises ``ModelContextLengthExceededException`` (see
+        ``openai_chat_model_compat``).  Without this handler the agent
+        run would propagate the error and the channel would see an empty
+        reply.  Instead, we:
+
+        1. Replace the empty assistant placeholder that the parent's
+           ``_reasoning`` finally-block added (when the stream raised
+           mid-iteration) with a real TextBlock so the next turn's
+           history doesn't carry an empty entry.
+        2. Print the message with ``last=True`` so streaming channels
+           emit it as the final chunk.
+        3. Return it for the ReAct loop to use as ``reply_msg`` — no
+           tool_use → the loop exits naturally.
+        """
+        from agentscope.message import TextBlock  # local: avoid cycle on import
+
+        lang = (self._language or "en").lower()
+        text = self._CONTEXT_EXCEEDED_TEXT.get(
+            lang,
+            self._CONTEXT_EXCEEDED_TEXT["en"],
+        )
+
+        logger.warning(
+            "Surfacing ModelContextLengthExceededException to user "
+            "(model=%s, finish_reason=%s)",
+            getattr(exc, "details", {}).get("model_name", "unknown")
+            if hasattr(exc, "details")
+            else "unknown",
+            getattr(exc, "details", {}).get("finish_reason", "?")
+            if hasattr(exc, "details")
+            else "?",
+        )
+
+        # Try to mutate the empty placeholder the parent's `_reasoning`
+        # finally already inserted, so memory doesn't keep an empty entry.
+        msg: Msg | None = None
+        try:
+            history = list(self.memory.content)
+            last_msg = None
+            if history:
+                last_pair = history[-1]
+                if isinstance(last_pair, (list, tuple)) and last_pair:
+                    last_msg = last_pair[0]
+
+            is_empty_placeholder = (
+                last_msg is not None
+                and getattr(last_msg, "role", None) == "assistant"
+                and (
+                    not last_msg.content
+                    or (
+                        isinstance(last_msg.content, list)
+                        and not last_msg.get_content_blocks("text")
+                        and not last_msg.get_content_blocks("tool_use")
+                        and not last_msg.get_content_blocks("thinking")
+                    )
+                )
+            )
+
+            if is_empty_placeholder:
+                last_msg.content = [TextBlock(type="text", text=text)]
+                msg = last_msg
+        except Exception:  # pylint: disable=broad-exception-caught
+            msg = None
+
+        if msg is None:
+            msg = Msg(self.name, [TextBlock(type="text", text=text)], "assistant")
+            try:
+                await self.memory.add(msg)
+            except Exception:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    "Failed to append context-exceeded reply to memory",
+                    exc_info=True,
+                )
+
+        try:
+            await self.print(msg, True)
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.warning(
+                "Failed to print context-exceeded reply",
+                exc_info=True,
+            )
+
+        return msg
+
     # pylint: disable=too-many-branches
     async def _summarizing(self) -> Msg:
         """Override summarizing with proactive media filtering,
@@ -1647,6 +1767,11 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
         try:
             try:
                 msg = await super()._summarizing()
+            except ModelContextLengthExceededException as ctx_exc:
+                # Summarizing also blows past the context window when
+                # max_iters is reached on an already-bloated session.
+                # Same surfacing path as ``_reasoning_with_media_fallback``.
+                return await self._build_context_exceeded_reply(ctx_exc)
             except Exception as e:
                 if not self._is_bad_request_or_media_error(e):
                     raise
