@@ -922,10 +922,23 @@ async def execute_chime_action(
             to_handle,
             meta=config.chat_meta or None,
         )
+        if typing_handle is not None:
+            logger.info(
+                "listen: typing indicator started for %s:%s",
+                config.channel_name,
+                config.chat_id,
+            )
+        else:
+            logger.debug(
+                "listen: channel.start_typing returned None for %s:%s "
+                "(channel may not support presence)",
+                config.channel_name,
+                config.chat_id,
+            )
     except Exception as e:  # pylint: disable=broad-exception-caught
         # Indicator is cosmetic — never let a presence failure abort
         # the chime-in.
-        logger.debug(
+        logger.warning(
             "listen: start_typing failed for %s:%s — %s",
             config.channel_name,
             config.chat_id,
@@ -962,10 +975,21 @@ async def execute_chime_action(
         # Always stop the indicator — including on PASS / timeout /
         # cancellation paths — so the room doesn't see a stuck "..."
         # after the action quietly aborts.
-        try:
-            await channel.stop_typing(typing_handle)
-        except Exception:  # pylint: disable=broad-exception-caught
-            pass
+        if typing_handle is not None:
+            try:
+                await channel.stop_typing(typing_handle)
+                logger.info(
+                    "listen: typing indicator stopped for %s:%s",
+                    config.channel_name,
+                    config.chat_id,
+                )
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    "listen: stop_typing failed for %s:%s — %s",
+                    config.channel_name,
+                    config.chat_id,
+                    e,
+                )
 
     raw = "" if response is None else (response.get_text_content() or "")
     _maybe_dump_listen_prompt(
