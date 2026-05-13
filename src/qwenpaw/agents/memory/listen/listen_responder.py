@@ -684,6 +684,187 @@ def _build_action_agent(
     )
 
 
+async def _maybe_compact_snapshot(
+    workspace: "Workspace",
+    config: ListenConfig,
+    snapshot_memory: Any,
+) -> Any:
+    """Compact ``snapshot_memory`` in-place when it exceeds the main
+    agent's compaction threshold.
+
+    Reuses ``workspace.agent.context_manager.compact_context`` (the
+    same LLM call the main agent runs in its ``pre_reasoning`` hook)
+    so listen inherits the agent's compaction prompt + summary
+    template.  If the workspace doesn't have a context manager (rare
+    — only when the main agent's config disables it), we leave the
+    snapshot alone; the action LLM call may fail with
+    context-window-exceeded and the action step will log + skip.
+
+    Returns the (possibly compacted) snapshot.  On any failure we
+    return the original snapshot so the action can still try its
+    luck rather than the whole tick disappearing silently.
+    """
+    agent_id = config.agent_id or ""
+    if not agent_id:
+        return snapshot_memory
+
+    try:
+        agent_config = load_agent_config(agent_id)
+    except Exception:  # pylint: disable=broad-exception-caught
+        return snapshot_memory
+    if agent_config is None:
+        return snapshot_memory
+
+    main_agent = getattr(workspace, "agent", None)
+    cm = getattr(main_agent, "context_manager", None) if main_agent else None
+    if cm is None:
+        return snapshot_memory
+
+    try:
+        from ...utils.token_counter import get_token_counter
+
+        token_counter = get_token_counter(agent_config)
+    except Exception:  # pylint: disable=broad-exception-caught
+        return snapshot_memory
+
+    try:
+        messages = await snapshot_memory.get_memory(prepend_summary=False)
+    except Exception:  # pylint: disable=broad-exception-caught
+        return snapshot_memory
+    if not messages:
+        return snapshot_memory
+
+    running_config = agent_config.running
+    ccc = running_config.light_context_config.context_compact_config
+
+    # Compute the same left-after-sys threshold the main agent uses.
+    sys_text = (
+        getattr(main_agent, "sys_prompt", "") or ""
+        if main_agent is not None
+        else ""
+    )
+    try:
+        sys_token_count = (
+            await token_counter.count(messages=[], text=sys_text)
+            if sys_text
+            else 0
+        )
+    except Exception:  # pylint: disable=broad-exception-caught
+        sys_token_count = 0
+
+    context_compact_threshold = int(
+        running_config.max_input_length * ccc.compact_threshold_ratio,
+    )
+    context_compact_reserve = int(
+        running_config.max_input_length * ccc.reserve_threshold_ratio,
+    )
+    left_compact_threshold = context_compact_threshold - sys_token_count
+    if left_compact_threshold <= 0:
+        return snapshot_memory
+
+    # Split the snapshot via the context manager's own helper so the
+    # tail-keep heuristic stays consistent with what the main agent
+    # would have done.
+    try:
+        (
+            messages_to_compact,
+            messages_to_keep,
+            _ctx_total_tokens,
+            _ctx_keep_tokens,
+        ) = await cm._check_context(  # pylint: disable=protected-access
+            messages=messages,
+            context_compact_threshold=left_compact_threshold,
+            context_compact_reserve=context_compact_reserve,
+            as_token_counter=token_counter,
+        )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.debug(
+            "listen: _check_context failed for %s:%s — %s",
+            config.channel_name,
+            config.chat_id,
+            e,
+        )
+        return snapshot_memory
+
+    if not messages_to_compact:
+        return snapshot_memory
+
+    logger.info(
+        "listen: compacting snapshot for %s:%s "
+        "(compact=%d, keep=%d, threshold=%d)",
+        config.channel_name,
+        config.chat_id,
+        len(messages_to_compact),
+        len(messages_to_keep),
+        left_compact_threshold,
+    )
+
+    try:
+        prev_summary = snapshot_memory.get_compressed_summary() or ""
+    except Exception:  # pylint: disable=broad-exception-caught
+        prev_summary = ""
+
+    try:
+        result = await cm.compact_context(
+            messages=messages_to_compact,
+            previous_summary=prev_summary,
+        )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.warning(
+            "listen: snapshot compaction LLM call failed for %s:%s — %s",
+            config.channel_name,
+            config.chat_id,
+            e,
+        )
+        return snapshot_memory
+
+    if not result.get("success"):
+        logger.info(
+            "listen: snapshot compaction skipped (reason=%s) for %s:%s",
+            result.get("reason", "unknown"),
+            config.channel_name,
+            config.chat_id,
+        )
+        return snapshot_memory
+
+    compact_content = result.get("history_compact") or ""
+    if not compact_content:
+        return snapshot_memory
+
+    # Apply: drop compacted messages from snapshot.content, set new
+    # summary.  We mutate the snapshot in place — it's a transient
+    # InMemoryMemory created just for this tick, never persisted.
+    keep_ids = {
+        getattr(m, "id", None) for m in messages_to_keep
+    }
+    keep_ids.discard(None)
+    try:
+        snapshot_memory.content = [
+            (msg, marks)
+            for msg, marks in snapshot_memory.content
+            if getattr(msg, "id", None) in keep_ids
+        ]
+        await snapshot_memory.update_compressed_summary(compact_content)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.warning(
+            "listen: applying compacted summary to snapshot failed "
+            "for %s:%s — %s",
+            config.channel_name,
+            config.chat_id,
+            e,
+        )
+        return snapshot_memory
+
+    logger.info(
+        "listen: snapshot compacted for %s:%s — before=%d after=%d (tokens)",
+        config.channel_name,
+        config.chat_id,
+        result.get("before_tokens", 0),
+        result.get("after_tokens", 0),
+    )
+    return snapshot_memory
+
+
 async def _snapshot_session_memory(
     workspace: "Workspace",
     config: ListenConfig,
@@ -966,6 +1147,15 @@ async def execute_chime_action(
         return None
 
     snapshot_memory = await _snapshot_session_memory(workspace, config)
+    # If the snapshot is large enough to threaten the model's context
+    # window, compact it before we feed it to the action agent.  The
+    # transient agent itself has no LightContextManager hook, so this
+    # is the only opportunity to keep its prompt under the limit.
+    snapshot_memory = await _maybe_compact_snapshot(
+        workspace,
+        config,
+        snapshot_memory,
+    )
     action_agent = _build_action_agent(workspace, config, snapshot_memory)
 
     buffer_msg = Msg(

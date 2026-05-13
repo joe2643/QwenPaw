@@ -282,6 +282,179 @@ async def test_execute_chime_action_skips_when_buffer_emptied(monkeypatch):
     assert svc.update_calls == []
 
 
+async def test_maybe_compact_snapshot_runs_when_threshold_exceeded(monkeypatch):
+    """When the snapshot's token count crosses the main agent's
+    compaction threshold, ``_maybe_compact_snapshot`` must call the
+    main agent's context manager and mutate the snapshot's content +
+    summary in place.  The transient action agent has no
+    pre_reasoning hook, so this is the only compaction opportunity."""
+
+    from types import SimpleNamespace
+    from agentscope.memory import InMemoryMemory
+    from agentscope.message import Msg, TextBlock
+
+    # Build a fake snapshot with 5 turns.
+    snap = InMemoryMemory()
+    msgs = [
+        Msg(
+            name="alice",
+            role="user",
+            content=[TextBlock(type="text", text=f"msg {i}")],
+        )
+        for i in range(5)
+    ]
+    for m in msgs:
+        await snap.add(m)
+
+    # Fake context manager: _check_context picks first 3 to compact,
+    # last 2 to keep; compact_context returns a summary.
+    cm_calls: list[str] = []
+
+    class _FakeCM:
+        async def _check_context(self, messages, **kwargs):
+            cm_calls.append("check")
+            return (messages[:3], messages[3:], 1000, 200)
+
+        async def compact_context(self, messages, previous_summary="", **kw):
+            cm_calls.append("compact")
+            return {
+                "success": True,
+                "history_compact": "SUMMARY",
+                "before_tokens": 1000,
+                "after_tokens": 100,
+            }
+
+    main_agent = SimpleNamespace(
+        sys_prompt="sys",
+        context_manager=_FakeCM(),
+    )
+    ws = SimpleNamespace(agent=main_agent)
+
+    # Stub the agent_config loader + token counter to keep the test
+    # hermetic.
+    class _FakeRunning:
+        max_input_length = 100  # tight: forces compaction path
+        light_context_config = SimpleNamespace(
+            context_compact_config=SimpleNamespace(
+                compact_threshold_ratio=0.5,
+                reserve_threshold_ratio=0.2,
+                enabled=True,
+                compact_with_thinking_block=False,
+            ),
+        )
+
+    class _FakeAgentConfig:
+        running = _FakeRunning()
+
+    monkeypatch.setattr(
+        listen_responder,
+        "load_agent_config",
+        lambda agent_id: _FakeAgentConfig(),
+    )
+
+    class _FakeCounter:
+        async def count(self, messages, text=""):
+            return 10
+
+    monkeypatch.setattr(
+        "qwenpaw.agents.utils.token_counter.get_token_counter",
+        lambda cfg: _FakeCounter(),
+    )
+
+    result = await listen_responder._maybe_compact_snapshot(
+        ws,
+        _make_cfg(),
+        snap,
+    )
+    # Same object back, mutated.
+    assert result is snap
+    # Both context-manager methods were called.
+    assert cm_calls == ["check", "compact"]
+    # Content trimmed to the kept tail.
+    assert len(snap.content) == 2
+    # Summary applied to the snapshot (base InMemoryMemory exposes the
+    # underlying attribute, not the qwenpaw getter).
+    assert snap._compressed_summary == "SUMMARY"
+
+
+async def test_maybe_compact_snapshot_noop_when_no_main_agent():
+    """No workspace.agent → no context manager to reuse → return the
+    snapshot untouched.  This is the unit-test / partial-workspace
+    path and must not blow up."""
+    from agentscope.memory import InMemoryMemory
+
+    snap = InMemoryMemory()
+    ws = SimpleNamespace(agent=None)
+    result = await listen_responder._maybe_compact_snapshot(
+        ws,
+        _make_cfg(),
+        snap,
+    )
+    assert result is snap
+
+
+async def test_maybe_compact_snapshot_swallows_check_context_error(monkeypatch):
+    """If the context manager's _check_context blows up (config drift,
+    etc.) we must NOT crash the listen tick — return the original
+    snapshot and let the action LLM call do its best."""
+
+    from agentscope.memory import InMemoryMemory
+    from agentscope.message import Msg, TextBlock
+
+    snap = InMemoryMemory()
+    await snap.add(
+        Msg(
+            name="x",
+            role="user",
+            content=[TextBlock(type="text", text="hi")],
+        ),
+    )
+
+    class _BoomCM:
+        async def _check_context(self, **kwargs):
+            raise RuntimeError("check_context blew up")
+
+    ws = SimpleNamespace(
+        agent=SimpleNamespace(sys_prompt="sys", context_manager=_BoomCM()),
+    )
+
+    class _FakeRunning:
+        max_input_length = 100
+        light_context_config = SimpleNamespace(
+            context_compact_config=SimpleNamespace(
+                compact_threshold_ratio=0.5,
+                reserve_threshold_ratio=0.2,
+                enabled=True,
+                compact_with_thinking_block=False,
+            ),
+        )
+
+    class _FakeAgentConfig:
+        running = _FakeRunning()
+
+    monkeypatch.setattr(
+        listen_responder,
+        "load_agent_config",
+        lambda agent_id: _FakeAgentConfig(),
+    )
+
+    class _FakeCounter:
+        async def count(self, messages, text=""):
+            return 10
+
+    monkeypatch.setattr(
+        "qwenpaw.agents.utils.token_counter.get_token_counter",
+        lambda cfg: _FakeCounter(),
+    )
+
+    result = await listen_responder._maybe_compact_snapshot(
+        ws,
+        _make_cfg(),
+        snap,
+    )
+    assert result is snap
+
+
 async def test_append_preserves_qwenpaw_specific_memory_keys():
     """Regression for the 18:48-18:53 resurrection: listen append used
     to drop ``_compressed_msg_ids`` and ``_compressed_msg_evicted_count``
