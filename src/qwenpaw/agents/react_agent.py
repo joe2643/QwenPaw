@@ -1280,6 +1280,48 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
 
         self.memory.add = logged_add  # type: ignore[attr-defined]
 
+    @staticmethod
+    def _resolve_watermark_path(
+        workspace: Path | str,
+        session_id: str,
+        user_id: str,
+        channel: str,
+    ) -> Path:
+        """Pick the session.json path whose mtime is the right watermark.
+
+        Mirrors ``SafeJSONSession._get_save_path``: when ``channel`` is
+        set, sessions are written to ``sessions/{channel}/{fname}``; a
+        legacy flat copy may also exist at ``sessions/{fname}`` from
+        the pre-namespacing era but is no longer updated.  Reading
+        mtime from that stale flat copy makes the watermark stale and
+        causes every chat_log entry written since to be re-injected as
+        "unpersisted" — the bug that surfaced as "context recovers
+        full history after /compact".
+
+        Pure function so the regression test can exercise it without
+        constructing a real ReActAgent.
+        """
+        from ..app.runner.session import sanitize_filename
+
+        safe_sid = sanitize_filename(session_id)
+        safe_uid = sanitize_filename(user_id) if user_id else ""
+        fname = (
+            f"{safe_uid}_{safe_sid}.json"
+            if safe_uid
+            else f"{safe_sid}.json"
+        )
+        sessions_dir = Path(workspace) / "sessions"
+        if channel:
+            namespaced = sessions_dir / sanitize_filename(channel) / fname
+            if namespaced.exists():
+                return namespaced
+            # First-turn fallback before migration copies the legacy file.
+            legacy = sessions_dir / fname
+            if legacy.exists():
+                return legacy
+            return namespaced  # let caller see "doesn't exist"
+        return sessions_dir / fname
+
     async def _reconcile_chat_log_into_memory(self) -> None:
         """Inject log entries that were captured between the last
         successful ``save_session_state`` and the current process
@@ -1310,19 +1352,13 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                 return
             workspace = self._workspace_dir or WORKING_DIR
 
-            # Watermark: session.json's mtime is the last-successful-save
-            # timestamp.  Compute its path the same way SafeJSONSession
-            # does (see ``runner/session.py:_get_save_path``).
-            from ..app.runner.session import sanitize_filename
-
-            safe_sid = sanitize_filename(session_id)
-            safe_uid = sanitize_filename(user_id) if user_id else ""
-            fname = (
-                f"{safe_uid}_{safe_sid}.json"
-                if safe_uid
-                else f"{safe_sid}.json"
+            channel = req_ctx.get("channel") or ""
+            session_path = self._resolve_watermark_path(
+                workspace,
+                session_id,
+                user_id,
+                channel,
             )
-            session_path = Path(workspace) / "sessions" / fname
 
             memory_msg_ids: set[str] = set()
             for pair in self.memory.content or []:
