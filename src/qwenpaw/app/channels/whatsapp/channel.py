@@ -3083,6 +3083,32 @@ class WhatsAppChannel(BaseChannel):
             rest = rest[len(chunk) :]
         return chunks
 
+    # ── Typing indicator: public hooks for off-pipeline callers ────────
+    # ``consume()`` already starts a typing loop tied to the inbound
+    # request; these wrappers expose the same machinery to off-pipeline
+    # dispatchers (Listen, cron, future proactive nudge) so they can
+    # show a typing indicator while their background agent reply runs.
+
+    async def start_typing(self, to_handle, meta=None):
+        """Begin a typing loop for an off-pipeline dispatch.
+
+        Returns the task handle (None when the channel isn't ready) and
+        the caller passes it to ``stop_typing`` in a ``finally:`` block.
+        """
+        if not self.enabled or not self._client or not self._connected:
+            return None
+        chat_jid_str = (meta or {}).get("chat_jid") or to_handle
+        try:
+            typing_jid = _str_to_jid(chat_jid_str)
+        except Exception:  # pylint: disable=broad-exception-caught
+            return None
+        try:
+            return asyncio.create_task(
+                self._typing_loop(self._client, typing_jid),
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+            return None
+
     # ── Typing indicator loop ──────────────────────────────────────────
 
     async def _typing_loop(self, client, typing_jid, interval: float = 4.0):

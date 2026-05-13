@@ -1637,6 +1637,45 @@ class SignalChannel(BaseChannel):
 
     # ── Typing indicator loop ────────────────────────────────────────
 
+    # ── Typing indicator: public hooks for off-pipeline callers ────────
+    # ``consume()`` already starts a typing loop tied to the inbound
+    # request; these wrappers expose the same machinery to off-pipeline
+    # dispatchers (Listen, cron, future proactive nudge) so they can
+    # show a composing indicator while their background agent runs.
+
+    async def start_typing(self, to_handle, meta=None):
+        """Begin a composing loop for an off-pipeline dispatch.
+
+        Resolves ``(target, is_group)`` from ``meta`` first, falling
+        back to ``to_handle`` for DMs.  Returns the task handle (or
+        None when typing is disabled / client missing) so callers can
+        stop it in ``finally:``.
+        """
+        if not getattr(self, "_show_typing", True):
+            return None
+        client = getattr(self, "client", None)
+        if client is None:
+            return None
+        meta = meta or {}
+        target = (
+            meta.get("_typing_target")
+            or meta.get("group_id")
+            or meta.get("source")
+            or meta.get("source_uuid")
+            or to_handle
+        )
+        if not target:
+            return None
+        is_group = bool(
+            meta.get("_typing_is_group")
+            or meta.get("is_group")
+            or (meta.get("group_id") and not meta.get("source")),
+        )
+        try:
+            return asyncio.create_task(self._typing_loop(target, is_group))
+        except Exception:  # pylint: disable=broad-exception-caught
+            return None
+
     async def _typing_loop(
         self,
         target: str,

@@ -904,30 +904,68 @@ async def execute_chime_action(
         content=render_action_buffer(buffer[-_LISTEN_MAX_ENTRIES:]),
     )
 
-    timeout = max(10, int(config.action_timeout_seconds or 120))
+    # Show a typing indicator in the room while the action agent
+    # thinks.  Without this, listen replies look like the bot suddenly
+    # blurts out a message — there's no "..." that normal @-mention
+    # replies trigger via consume().  Channels that don't support
+    # presence return None; stop_typing is a no-op in that case.
+    to_handle = (
+        config.chat_meta.get("chat_jid")
+        or config.chat_meta.get("group_id")
+        or config.chat_meta.get("source")
+        or config.chat_meta.get("chat_id")
+        or config.chat_id
+    )
+    typing_handle = None
     try:
-        response = await asyncio.wait_for(
-            action_agent.reply(buffer_msg),
-            timeout=timeout,
+        typing_handle = await channel.start_typing(
+            to_handle,
+            meta=config.chat_meta or None,
         )
-    except asyncio.TimeoutError:
-        logger.warning(
-            "listen: action step timed out after %ds for %s:%s",
-            timeout,
-            config.channel_name,
-            config.chat_id,
-        )
-        return None
-    except asyncio.CancelledError:
-        raise
     except Exception as e:  # pylint: disable=broad-exception-caught
-        logger.warning(
-            "listen: action step failed for %s:%s: %s",
+        # Indicator is cosmetic — never let a presence failure abort
+        # the chime-in.
+        logger.debug(
+            "listen: start_typing failed for %s:%s — %s",
             config.channel_name,
             config.chat_id,
             e,
         )
-        return None
+        typing_handle = None
+
+    timeout = max(10, int(config.action_timeout_seconds or 120))
+    try:
+        try:
+            response = await asyncio.wait_for(
+                action_agent.reply(buffer_msg),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "listen: action step timed out after %ds for %s:%s",
+                timeout,
+                config.channel_name,
+                config.chat_id,
+            )
+            return None
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.warning(
+                "listen: action step failed for %s:%s: %s",
+                config.channel_name,
+                config.chat_id,
+                e,
+            )
+            return None
+    finally:
+        # Always stop the indicator — including on PASS / timeout /
+        # cancellation paths — so the room doesn't see a stuck "..."
+        # after the action quietly aborts.
+        try:
+            await channel.stop_typing(typing_handle)
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
 
     raw = "" if response is None else (response.get_text_content() or "")
     _maybe_dump_listen_prompt(

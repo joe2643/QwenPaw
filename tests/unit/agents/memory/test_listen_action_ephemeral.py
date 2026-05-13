@@ -334,6 +334,68 @@ async def test_snapshot_returns_empty_memory_when_session_unreadable():
     assert msgs == []
 
 
+async def test_execute_chime_action_wraps_typing_indicator(monkeypatch):
+    """The action step must start a typing indicator BEFORE
+    agent.reply() and stop it before returning, even on PASS / error
+    paths.  Without this, listen replies have no '...' cue in the
+    room — Codex tension R3 follow-up.
+    """
+
+    typing_events: list[str] = []
+
+    class _TypingChannel(_FakeChannel):
+        async def start_typing(self, to_handle, meta=None):
+            typing_events.append(f"start:{to_handle}")
+
+            import asyncio as _aio
+
+            async def _dummy_loop():
+                try:
+                    while True:
+                        await _aio.sleep(60)
+                except _aio.CancelledError:
+                    return
+
+            return _aio.create_task(_dummy_loop())
+
+        async def stop_typing(self, handle):
+            typing_events.append("stop")
+            if handle is not None:
+                handle.cancel()
+                try:
+                    await handle
+                except Exception:
+                    pass
+
+    ch = _TypingChannel("whatsapp", {"12345@g.us": [_entry("alice", "yo")]})
+    svc = _FakeSessionService()
+    ws = SimpleNamespace(
+        channel_manager=_FakeChannelManager({"whatsapp": ch}),
+        runner=SimpleNamespace(session=svc),
+        agent=None,
+    )
+
+    class _FakeResponse:
+        def get_text_content(self):
+            return "PASS"  # self-abort → exits via finally
+
+    class _FakeAgent:
+        async def reply(self, msg):
+            return _FakeResponse()
+
+    monkeypatch.setattr(
+        listen_responder,
+        "_build_action_agent",
+        lambda workspace, cfg, mem: _FakeAgent(),
+    )
+
+    out = await listen_responder.execute_chime_action(ws, _make_cfg())
+    assert out is None
+    # Critical: BOTH start and stop must have fired, in order, even
+    # though the action self-aborted with PASS.
+    assert typing_events == ["start:12345@g.us", "stop"]
+
+
 async def test_dispatch_resolves_to_handle_preference_order(monkeypatch):
     """Mirror of the v1 deliver_uses_* tests but explicitly testing
     that route D's dispatch helper picks chat_jid > group_id > source

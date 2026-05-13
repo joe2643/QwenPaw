@@ -1700,6 +1700,43 @@ class BaseChannel(ABC):
         """
         raise NotImplementedError
 
+    async def start_typing(
+        self,
+        to_handle: str,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> Optional[asyncio.Task]:
+        """Begin a typing/composing indicator for ``to_handle``.
+
+        Returns an opaque task handle (or None when the channel doesn't
+        support indicators / is disconnected) that the caller must pass
+        to ``stop_typing`` when the work is finished.
+
+        Default implementation is a no-op so channels that don't
+        implement presence (cron text dispatch, Discord webhook, etc.)
+        stay safe.  Channels with continuous-typing loops (WhatsApp,
+        Signal) override.
+        """
+        return None
+
+    async def stop_typing(self, handle: Optional[asyncio.Task]) -> None:
+        """Cancel a previously-returned typing indicator handle.
+
+        Idempotent and tolerant of ``None`` — call it from a ``finally:``
+        without guarding.
+        """
+        if handle is None:
+            return
+        try:
+            handle.cancel()
+        except Exception:  # pylint: disable=broad-exception-caught
+            return
+        try:
+            await handle
+        except (asyncio.CancelledError, Exception):
+            # Cancelled-as-expected OR the subclass's stop hook raised;
+            # either way we've done our part.
+            return
+
     def to_handle_from_target(self, *, user_id: str, session_id: str) -> str:
         """Map cron dispatch target to channel-specific to_handle.
 
