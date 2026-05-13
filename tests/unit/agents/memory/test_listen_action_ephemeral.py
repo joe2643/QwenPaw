@@ -282,6 +282,55 @@ async def test_execute_chime_action_skips_when_buffer_emptied(monkeypatch):
     assert svc.update_calls == []
 
 
+async def test_append_preserves_qwenpaw_specific_memory_keys():
+    """Regression for the 18:48-18:53 resurrection: listen append used
+    to drop ``_compressed_msg_ids`` and ``_compressed_msg_evicted_count``
+    because base ``agentscope.memory.InMemoryMemory`` doesn't know
+    those keys.  Without tombstones, a concurrent reply's pre-compact
+    baseline can resurrect 200+ compacted messages on save.
+
+    The fix: merge-overlay onto the existing agent.memory dict so any
+    qwenpaw-specific (or future) keys survive the listen write.
+    """
+    initial_state = {
+        "agent": {
+            "memory": {
+                "content": [],
+                "_compressed_summary": "summary text",
+                "_compressed_msg_ids": ["m1", "m2", "m3"],
+                "_compressed_msg_evicted_count": 4,
+                "future_unknown_key": "preserve me",
+            },
+        },
+    }
+    svc = _FakeSessionService(initial_state)
+    ws = SimpleNamespace(
+        channel_manager=_FakeChannelManager({"whatsapp": _FakeChannel("whatsapp")}),
+        runner=SimpleNamespace(session=svc),
+        agent=None,
+    )
+
+    ok = await listen_responder._append_chime_to_real_session(
+        ws,
+        _make_cfg(),
+        "hello",
+    )
+    assert ok is True
+    assert len(svc.update_calls) == 1
+    persisted = svc.update_calls[0]["value"]
+
+    # The qwenpaw-specific keys must survive the listen append, NOT
+    # be wiped by base InMemoryMemory.state_dict() which only knows
+    # about content + _compressed_summary.
+    assert persisted.get("_compressed_msg_ids") == ["m1", "m2", "m3"]
+    assert persisted.get("_compressed_msg_evicted_count") == 4
+    assert persisted.get("future_unknown_key") == "preserve me"
+    # And the agentscope-level fields land too.
+    assert persisted.get("_compressed_summary") == "summary text"
+    # content grew by exactly one (the chime).
+    assert len(persisted.get("content", [])) == 1
+
+
 async def test_append_re_reads_fresh_state_before_writing():
     """Critical for Codex tension #1: the append step must NOT use the
     snapshot captured at action start.  It re-reads the LATEST state

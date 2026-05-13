@@ -792,11 +792,14 @@ async def _append_chime_to_real_session(
         )
         return False
 
+    existing_memory_dict = (state or {}).get("agent", {}).get("memory") or {}
+    if not isinstance(existing_memory_dict, dict):
+        existing_memory_dict = {}
+
     memory = InMemoryMemory()
-    existing = (state or {}).get("agent", {}).get("memory")
-    if existing:
+    if existing_memory_dict:
         try:
-            memory.load_state_dict(existing, strict=False)
+            memory.load_state_dict(existing_memory_dict, strict=False)
         except Exception:  # pylint: disable=broad-exception-caught
             # Corrupted state — start fresh rather than drop the chime.
             memory = InMemoryMemory()
@@ -821,11 +824,26 @@ async def _append_chime_to_real_session(
         )
         return False
 
+    # CRITICAL: preserve qwenpaw-specific agent.memory keys that the
+    # base agentscope InMemoryMemory doesn't know about.  Without this,
+    # ``_compressed_msg_ids`` (sibling-write tombstones) and
+    # ``_compressed_msg_evicted_count`` get wiped on every listen
+    # append, defeating the merge-on-save guard that stops a concurrent
+    # reply with a pre-compaction baseline from resurrecting compacted
+    # messages.  Symptom we hit in prod: 17-msg post-compact state grew
+    # back to 223 msgs on the next reply, 5 minutes after compaction.
+    #
+    # The merge starts from the existing dict and only overlays the
+    # keys that the base class actually serialized (content +
+    # _compressed_summary).  Unknown keys flow through untouched.
+    merged_memory_dict = dict(existing_memory_dict)
+    merged_memory_dict.update(memory.state_dict())
+
     try:
         await session_svc.update_session_state(
             session_id=session_id,
             key="agent.memory",
-            value=memory.state_dict(),
+            value=merged_memory_dict,
             user_id=user_id,
             channel=config.channel_name,
         )
