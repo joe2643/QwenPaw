@@ -334,6 +334,51 @@ async def test_snapshot_returns_empty_memory_when_session_unreadable():
     assert msgs == []
 
 
+async def test_execute_chime_action_strips_listen_prefix_from_reply(monkeypatch):
+    """Bug observed in 17:53 prod log: action agent saw past chime-ins
+    tagged ``[listen chime-in] ...`` in snapshot memory and mimicked
+    the prefix in its OWN reply.  channel.send then dispatched
+    ``[listen chime-in] 哇個 bot 401 ...`` literally to the group.
+
+    Defensive strip: if the action reply starts with the memory prefix,
+    we remove it before dispatching.  Session append still adds the
+    prefix back via ``_append_chime_to_real_session``.
+    """
+
+    ch = _FakeChannel("whatsapp", {"12345@g.us": [_entry("alice", "yo")]})
+    svc = _FakeSessionService()
+    ws = SimpleNamespace(
+        channel_manager=_FakeChannelManager({"whatsapp": ch}),
+        runner=SimpleNamespace(session=svc),
+        agent=None,
+    )
+
+    class _FakeResponse:
+        def get_text_content(self):
+            return "[listen chime-in] real chime text"
+
+    class _FakeAgent:
+        async def reply(self, msg):
+            return _FakeResponse()
+
+    monkeypatch.setattr(
+        listen_responder,
+        "_build_action_agent",
+        lambda workspace, cfg, mem: _FakeAgent(),
+    )
+
+    out = await listen_responder.execute_chime_action(ws, _make_cfg())
+    assert out == "real chime text"  # prefix stripped
+    assert ch.sent[0][1] == "real chime text"  # channel got clean text
+    # Session append still happened with the prefix re-applied by the
+    # appender — verify by checking the persisted memory state's text.
+    assert len(svc.update_calls) == 1
+    persisted = svc.update_calls[0]["value"]
+    # The persisted memory dict will contain the prefix-tagged text
+    # somewhere; we just confirm the assistant turn was written.
+    assert persisted is not None
+
+
 async def test_execute_chime_action_wraps_typing_indicator(monkeypatch):
     """The action step must start a typing indicator BEFORE
     agent.reply() and stop it before returning, even on PASS / error

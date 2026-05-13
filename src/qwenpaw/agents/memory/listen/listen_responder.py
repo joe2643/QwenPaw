@@ -360,6 +360,53 @@ async def _ask_llm_to_chime_in(
     return raw
 
 
+def _disable_thinking_on_model(model: Any) -> None:
+    """Best-effort: turn off chain-of-thought / reasoning on a model.
+
+    Decision step outputs a single token (CHIME or PASS); any
+    reasoning the model does before that token is pure wasted
+    latency.  Different providers expose different knobs:
+
+    - OpenAI reasoning models: ``reasoning_effort`` instance attr.
+    - z.ai / GLM via OpenAI-compat: ``extra_body={"thinking": {"type": "disabled"}}``.
+    - Qwen / DashScope / Ollama: ``extra_body={"enable_thinking": False}``.
+
+    We drill through the project's wrapper chain
+    (``RetryChatModel._inner -> TokenRecordingModelWrapper._model``)
+    to reach the real ``OpenAIChatModel`` (or sibling) and mutate its
+    ``generate_kwargs`` in place.  The model instance is fresh per
+    decision call (``create_model_and_formatter`` returns a new
+    object), so this doesn't bleed into other agents.
+    """
+    # Drill through known wrappers.
+    inner = model
+    for _ in range(4):  # bounded — guard against weird wrapping cycles
+        next_inner = getattr(inner, "_inner", None) or getattr(
+            inner,
+            "_model",
+            None,
+        )
+        if next_inner is None:
+            break
+        inner = next_inner
+
+    # Mutate generate_kwargs if the inner model exposes it.
+    gk = getattr(inner, "generate_kwargs", None)
+    if gk is None:
+        return
+    extra_body = dict(gk.get("extra_body") or {})
+    extra_body.setdefault("thinking", {"type": "disabled"})
+    extra_body.setdefault("enable_thinking", False)
+    gk["extra_body"] = extra_body
+    # Also clear reasoning_effort if the model carries one — for
+    # OpenAI reasoning models this is where CoT budget lives.
+    if hasattr(inner, "reasoning_effort"):
+        try:
+            inner.reasoning_effort = None
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+
+
 async def _ask_with_snapshot(
     workspace: "Workspace",
     config: ListenConfig,
@@ -398,6 +445,11 @@ async def _ask_with_snapshot(
     prompt_text = template.format(history=history_text)
 
     model, formatter = create_model_and_formatter(agent_id=agent_id)
+    # Decision step returns a single token; turn off any
+    # reasoning/thinking the provider would do otherwise.  Each tick
+    # gets a fresh model instance so this mutation is local.
+    _disable_thinking_on_model(model)
+
     sub_agent = ReActAgent(
         name=agent_name,
         model=model,
@@ -1008,6 +1060,14 @@ async def execute_chime_action(
         return None
 
     reply = raw.strip().strip("`\"'").strip()
+    # The action agent's memory contains past chime-ins tagged with the
+    # ``_LISTEN_REPLY_MEMORY_PREFIX`` so the main agent can tell them
+    # apart from real @-mention replies.  The agent sometimes mimics
+    # that prefix in its OWN output, which would then leak into the
+    # channel.send below as a literal ``"[listen chime-in] ..."``
+    # message.  Strip it defensively.
+    if reply.startswith(_LISTEN_REPLY_MEMORY_PREFIX):
+        reply = reply[len(_LISTEN_REPLY_MEMORY_PREFIX):].lstrip()
     if not reply:
         return None
 

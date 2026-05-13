@@ -164,6 +164,41 @@ async def test_ask_without_workspace_uses_text_render_fallback(monkeypatch):
         "[alice]: lunch?" in user_content
 
 
+async def test_ask_with_workspace_disables_thinking_on_model(monkeypatch):
+    """Decision step returns one token (CHIME/PASS); any provider-side
+    reasoning is wasted latency.  ``_disable_thinking_on_model`` must
+    drill through the wrapper chain and add the disable-thinking knobs
+    to the inner model's ``generate_kwargs``."""
+
+    # Simulate the project's wrapper chain:
+    #   RetryChatModel._inner -> TokenRecordingModelWrapper._model
+    #     -> OpenAIChatModelCompat (has generate_kwargs)
+    class _InnerModel:
+        def __init__(self):
+            self.generate_kwargs: dict = {}
+            self.reasoning_effort = "high"
+
+    class _TokenWrapper:
+        def __init__(self, inner):
+            self._model = inner
+
+    class _RetryWrapper:
+        def __init__(self, inner):
+            self._inner = inner
+
+    inner = _InnerModel()
+    wrapper = _RetryWrapper(_TokenWrapper(inner))
+
+    listen_responder._disable_thinking_on_model(wrapper)
+
+    assert "extra_body" in inner.generate_kwargs
+    extra = inner.generate_kwargs["extra_body"]
+    assert extra["thinking"] == {"type": "disabled"}
+    assert extra["enable_thinking"] is False
+    # Reasoning effort cleared for OpenAI-style reasoning models.
+    assert inner.reasoning_effort is None
+
+
 async def test_ask_with_workspace_but_no_main_agent_falls_back_gracefully(
     monkeypatch,
 ):
