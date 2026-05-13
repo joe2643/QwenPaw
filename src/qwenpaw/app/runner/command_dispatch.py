@@ -107,6 +107,22 @@ async def run_command_path(  # pylint: disable=too-many-statements,too-many-bran
     user_id = getattr(request, "user_id", "") or ""
     channel_name = getattr(request, "channel", "") or ""
 
+    # Mirror the ContextVars that ``AgentRunner.stream_query`` sets on
+    # the non-command path so command handlers can discover which chat
+    # they're running on (e.g. ``/listen`` needs ``channel_meta`` to
+    # snapshot the originating WhatsApp group).  Without this, every
+    # ContextVar read from a slash-command handler returned the prior
+    # request's value (or ``None`` on a fresh process).
+    from ..agent_context import (
+        set_current_agent_id,
+        set_current_channel_meta,
+        set_current_session_id,
+    )
+
+    set_current_agent_id(runner.agent_id)
+    set_current_session_id(session_id)
+    set_current_channel_meta(getattr(request, "channel_meta", None))
+
     # Daemon path
     parsed = parse_daemon_query(query)
     if parsed is not None:
