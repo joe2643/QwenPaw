@@ -12,10 +12,28 @@ from agentscope.model import OpenAIChatModel
 from agentscope.model._model_response import ChatResponse
 from pydantic import BaseModel
 
+from qwenpaw.exceptions import ModelContextLengthExceededException
 from qwenpaw.local_models.tag_parser import (
     parse_tool_calls_from_text,
     text_contains_tool_call_tag,
 )
+
+
+# Streaming finish_reason values that indicate the request blew past the
+# model's context window.  Z.AI's coding-plan endpoint emits a final empty
+# delta with ``finish_reason="model_context_window_exceeded"`` and no error
+# code/HTTP failure; upstream agentscope's parser treats that as a normal
+# end-of-stream and yields nothing, so the agent silently terminates.  We
+# surface it as a typed exception so callers can react (e.g. trigger /compact
+# or notify the user).  ``length`` is also a context-overflow signal *only*
+# when combined with empty content — for normal truncation we let it pass.
+_CONTEXT_OVERFLOW_FINISH_REASONS = frozenset(
+    {
+        "model_context_window_exceeded",
+        "context_length_exceeded",
+    },
+)
+_TRUNCATED_FINISH_REASONS = frozenset({"length"})
 
 
 def _clone_with_overrides(obj: Any, **overrides: Any) -> Any:
@@ -144,6 +162,10 @@ class _SanitizedStream:
         self._stream = stream
         self._ctx_stream: Any | None = None
         self.extra_contents: dict[str, Any] = {}
+        # Last non-None finish_reason seen across all chunks.  Used by the
+        # parser wrapper to detect ``model_context_window_exceeded`` style
+        # silent overflows (see _CONTEXT_OVERFLOW_FINISH_REASONS).
+        self.last_finish_reason: str | None = None
 
     async def __aenter__(self) -> "_SanitizedStream":
         self._ctx_stream = await self._stream.__aenter__()
@@ -165,7 +187,23 @@ class _SanitizedStream:
             raise StopAsyncIteration
         item = await self._ctx_stream.__anext__()
         self._capture_extra_content(item)
+        self._capture_finish_reason(item)
         return _sanitize_stream_item(item)
+
+    def _capture_finish_reason(self, item: Any) -> None:
+        """Track the latest ``finish_reason`` across all chunks.
+
+        Z.AI's overflow signal arrives on a final delta with empty content
+        but ``finish_reason="model_context_window_exceeded"``; we have to
+        sniff it here because upstream agentscope's parser only inspects
+        ``delta`` fields and never surfaces this terminal flag.
+        """
+        chunk = getattr(item, "chunk", item)
+        choices = getattr(chunk, "choices", None) or []
+        for choice in choices:
+            reason = getattr(choice, "finish_reason", None)
+            if isinstance(reason, str) and reason:
+                self.last_finish_reason = reason
 
     def _capture_extra_content(self, item: Any) -> None:
         """Store ``extra_content`` keyed by tool-call id."""
@@ -241,6 +279,26 @@ def _sanitize_boolean_schemas(schema: Any) -> Any:
     return result
 
 
+def _has_actionable_content(content: Any) -> bool:
+    """Return True if ``content`` contains a non-empty text or tool_use block.
+
+    Thinking-only emissions don't count: z.ai's overflow path can leak a
+    short reasoning_content prefix before the empty terminal chunk, which
+    would otherwise mask the silent failure.
+    """
+    if not content:
+        return False
+    for block in content:
+        block_type = block.get("type") if isinstance(block, dict) else None
+        if block_type == "tool_use":
+            return True
+        if block_type == "text":
+            text = block.get("text") if isinstance(block, dict) else None
+            if isinstance(text, str) and text.strip():
+                return True
+    return False
+
+
 def _sanitize_tool_schemas(
     tools: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -304,6 +362,7 @@ class OpenAIChatModelCompat(OpenAIChatModel):
         _think_tool_calls: dict[str, dict] = {}
         _text_tool_calls: dict[str, dict] = {}
 
+        yielded_real_content = False
         async for parsed in super()._parse_openai_stream_response(
             start_datetime=start_datetime,
             response=sanitized_response,
@@ -406,4 +465,23 @@ class OpenAIChatModelCompat(OpenAIChatModel):
                 if extra:
                     parsed.content = list(parsed.content) + extra
 
+            if _has_actionable_content(parsed.content):
+                yielded_real_content = True
             yield parsed
+
+        # Stream finished — surface silent context-window overflows.
+        # See _CONTEXT_OVERFLOW_FINISH_REASONS for the rationale.  We raise
+        # only when the parent emitted nothing actionable (text or tool_use);
+        # otherwise the caller already has a usable response and we don't
+        # want to mask it.
+        terminal = sanitized_response.last_finish_reason
+        if terminal in _CONTEXT_OVERFLOW_FINISH_REASONS or (
+            terminal in _TRUNCATED_FINISH_REASONS and not yielded_real_content
+        ):
+            raise ModelContextLengthExceededException(
+                model_name=getattr(self, "model_name", "unknown"),
+                details={
+                    "finish_reason": terminal,
+                    "provider_hint": "openai-compat stream",
+                },
+            )
