@@ -408,7 +408,7 @@ async def test_generate_listen_reply_returns_none_when_buffer_empty(
 
     called: list[str] = []
 
-    async def fake_ask(history_text, config, prior_conversation_text=""):
+    async def fake_ask(history_text, config, prior_conversation_text="", **kwargs):
         called.append(history_text)
         return "should never be called"
 
@@ -433,7 +433,7 @@ async def test_generate_listen_reply_skips_when_buffer_unchanged(monkeypatch):
     )
     ws = _workspace({"whatsapp": ch})
 
-    async def fake_ask(history_text, config, prior_conversation_text=""):
+    async def fake_ask(history_text, config, prior_conversation_text="", **kwargs):
         return "this should not run"
 
     monkeypatch.setattr(listen_responder, "_ask_llm_to_chime_in", fake_ask)
@@ -454,7 +454,7 @@ async def test_generate_listen_reply_returns_chime_when_llm_says_chime(monkeypat
     )
     ws = _workspace({"whatsapp": ch})
 
-    async def fake_ask(history_text, config, prior_conversation_text=""):
+    async def fake_ask(history_text, config, prior_conversation_text="", **kwargs):
         assert "[+Alice]: lunch?" in history_text
         return "CHIME"
 
@@ -474,7 +474,7 @@ async def test_generate_listen_reply_returns_none_on_pass(monkeypatch):
     )
     ws = _workspace({"whatsapp": ch})
 
-    async def fake_ask(history_text, config, prior_conversation_text=""):
+    async def fake_ask(history_text, config, prior_conversation_text="", **kwargs):
         return "PASS"
 
     monkeypatch.setattr(listen_responder, "_ask_llm_to_chime_in", fake_ask)
@@ -493,7 +493,7 @@ async def test_generate_listen_reply_swallows_llm_error(monkeypatch):
     )
     ws = _workspace({"whatsapp": ch})
 
-    async def fake_ask(history_text, config, prior_conversation_text=""):
+    async def fake_ask(history_text, config, prior_conversation_text="", **kwargs):
         raise RuntimeError("LLM down")
 
     monkeypatch.setattr(listen_responder, "_ask_llm_to_chime_in", fake_ask)
@@ -505,7 +505,7 @@ async def test_generate_listen_reply_returns_none_when_channel_missing(monkeypat
     cfg = _make_cfg()
     ws = _workspace({})  # no whatsapp channel registered
 
-    async def fake_ask(history_text, config, prior_conversation_text=""):
+    async def fake_ask(history_text, config, prior_conversation_text="", **kwargs):
         return "ignored"
 
     monkeypatch.setattr(listen_responder, "_ask_llm_to_chime_in", fake_ask)
@@ -962,8 +962,12 @@ async def test_load_session_history_respects_char_cap(monkeypatch):
 async def test_generate_listen_reply_passes_prior_conversation_to_llm(
     monkeypatch,
 ):
-    """End-to-end glue: when session memory has content, the rendered
-    prior-conversation block reaches the LLM call alongside the buffer."""
+    """v2.1: the decision step receives a ``workspace`` reference so it
+    can build the snapshot-memory sub-agent.  prior_conversation_text
+    is no longer populated by the caller — persona / past exchanges
+    arrive through snapshot memory instead.  We assert here that the
+    workspace kwarg reaches the LLM call and the chatter buffer is
+    rendered correctly into history_text."""
     state = {"agent": {"memory": "STATE"}}
     svc = _FakeSessionService(state)
     runner = SimpleNamespace(session=svc)
@@ -1000,9 +1004,12 @@ async def test_generate_listen_reply_passes_prior_conversation_to_llm(
         history_text,
         config,
         prior_conversation_text="",
+        **kwargs,
     ):
         captured["history"] = history_text
         captured["prior"] = prior_conversation_text
+        captured["workspace_passed"] = "workspace" in kwargs
+        captured["workspace"] = kwargs.get("workspace")
         return "CHIME"
 
     monkeypatch.setattr(listen_responder, "_ask_llm_to_chime_in", fake_ask)
@@ -1014,8 +1021,10 @@ async def test_generate_listen_reply_passes_prior_conversation_to_llm(
     # returns the binary ``"CHIME"`` / ``None`` token.
     assert out == "CHIME"
     assert "[+Alice]: anyone up for lunch?" in captured["history"]
-    assert "[user]: what's a good pho place?" in captured["prior"]
-    assert "[assistant]: Pho Hoa, two blocks east." in captured["prior"]
+    # v2.1: workspace handle reaches the LLM call so the snapshot
+    # decision path can build a sub-agent with the chat's real memory.
+    assert captured["workspace_passed"] is True
+    assert captured["workspace"] is ws
 
 
 async def test_generate_listen_reply_works_without_session_memory(monkeypatch):
@@ -1038,6 +1047,7 @@ async def test_generate_listen_reply_works_without_session_memory(monkeypatch):
         history_text,
         config,
         prior_conversation_text="",
+        **kwargs,
     ):
         captured["prior"] = prior_conversation_text
         return "CHIME"
@@ -1407,19 +1417,16 @@ async def test_fire_once_respects_min_chime_gap(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_prompt_renders_none_marker_when_prior_conversation_empty():
-    """The prompt's prior-conversation slot must show a visible marker
-    so the model can tell 'no prior history' from 'forgot to fill in'."""
+def test_prompt_only_takes_history_slot_in_v2_1():
+    """v2.1: decision prompts dropped the {agent_name} / {prior_conversation}
+    / {channel_name} / {language} slots because persona / past
+    exchanges now live in the sub-agent's sys_prompt + snapshot memory.
+    Only {history} remains."""
     from qwenpaw.agents.memory.listen.listen_prompts import (
         LISTEN_CHIME_IN_PROMPT,
     )
 
-    rendered = LISTEN_CHIME_IN_PROMPT.format(
-        agent_name="Bot",
-        channel_name="whatsapp",
-        language="zh",
-        prior_conversation="(none)",
-        history="[+Alice]: hi",
-    )
-    assert "(none)" in rendered
+    rendered = LISTEN_CHIME_IN_PROMPT.format(history="[+Alice]: hi")
     assert "[+Alice]: hi" in rendered
+    # Sanity: no unrendered slots left.
+    assert "{" not in rendered or "{history}" not in rendered

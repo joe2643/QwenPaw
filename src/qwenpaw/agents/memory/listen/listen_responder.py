@@ -317,41 +317,137 @@ def _maybe_dump_listen_prompt(
 async def _ask_llm_to_chime_in(
     history_text: str,
     config: ListenConfig,
-    prior_conversation_text: str = "",
+    prior_conversation_text: str = "",  # noqa: ARG001 — v1 compat
+    *,
+    workspace: Optional["Workspace"] = None,
 ) -> str:
     """Single non-streaming LLM call returning CHIME or PASS (or junk).
+
+    When ``workspace`` is provided (the normal in-app path), the
+    sub-agent runs against a SNAPSHOT of the chat's persisted memory
+    plus the main agent's ``sys_prompt`` and ``name``.  That means the
+    decision sees the same persona / past @-mention exchanges the
+    action step will see, so its CHIME / PASS call matches how the
+    main agent would actually feel about the room.
+
+    When ``workspace`` is None (legacy / unit-test callers that only
+    pass history + config), the sub-agent falls back to the v2
+    bare-agent + text-rendered prior-conversation path.  Tests that
+    monkeypatch this function still work because they replace the
+    callable entirely.
 
     Defensive: callers should treat any non-CHIME output as PASS via
     ``_is_chime_response``.
     """
     agent_id = config.agent_id or ""
-    agent_config = load_agent_config(agent_id) if agent_id else None
-    language = (
-        getattr(agent_config, "language", "en") if agent_config else "en"
+    template = _select_decision_prompt(config.verbosity)
+
+    # Branch on whether we have a workspace handle to snapshot.
+    if workspace is not None:
+        prompt_text, raw = await _ask_with_snapshot(
+            workspace, config, agent_id, template, history_text,
+        )
+    else:
+        prompt_text, raw = await _ask_with_text_render(
+            agent_id,
+            config,
+            template,
+            history_text,
+            prior_conversation_text,
+        )
+
+    _maybe_dump_listen_prompt(config, "decision", prompt_text, raw)
+    return raw
+
+
+async def _ask_with_snapshot(
+    workspace: "Workspace",
+    config: ListenConfig,
+    agent_id: str,
+    template: str,
+    history_text: str,
+) -> tuple[str, str]:
+    """Decision step with snapshot memory + main-agent persona.
+
+    Returns ``(prompt_text_for_logging, raw_response)``.
+    """
+    from agentscope.tool import Toolkit
+
+    snapshot_memory = await _snapshot_session_memory(workspace, config)
+
+    main_agent = getattr(workspace, "agent", None)
+    if main_agent is not None:
+        agent_name = getattr(main_agent, "name", None) or "Assistant"
+        base_sys_prompt = getattr(main_agent, "sys_prompt", "") or ""
+    else:
+        agent_name = "Assistant"
+        base_sys_prompt = ""
+
+    # Decision step gets the main agent's persona-bearing sys_prompt
+    # so the LLM knows who it is and how it talks.  No injection guard
+    # suffix here — the decision step has no tools, the LISTEN_INJECTION_GUARD
+    # only matters for the action step that can call tools.
+    decision_sys_prompt = (
+        base_sys_prompt
+        if base_sys_prompt
+        else f"You are {agent_name}, a peer in a group chat."
     )
+
+    # The user-turn prompt no longer carries persona slots; persona is
+    # carried by sys_prompt + memory.  Only the {history} slot remains.
+    prompt_text = template.format(history=history_text)
+
+    model, formatter = create_model_and_formatter(agent_id=agent_id)
+    sub_agent = ReActAgent(
+        name=agent_name,
+        model=model,
+        sys_prompt=decision_sys_prompt,
+        toolkit=Toolkit(),  # still no tools — decision is text-only
+        formatter=formatter,
+        memory=snapshot_memory,
+        max_iters=1,
+    )
+    response = await sub_agent.reply(
+        Msg(name="User", role="user", content=prompt_text),
+    )
+    raw = "" if response is None else (response.get_text_content() or "")
+    return prompt_text, raw
+
+
+async def _ask_with_text_render(
+    agent_id: str,
+    config: ListenConfig,
+    template: str,
+    history_text: str,
+    prior_conversation_text: str,
+) -> tuple[str, str]:
+    """v2 fallback path: bare agent + text-rendered prior conversation.
+
+    Kept for tests that exercise ``_ask_llm_to_chime_in`` directly
+    without a workspace handle.  Production callers always go through
+    ``_ask_with_snapshot``.
+    """
+    from agentscope.tool import Toolkit
+
+    agent_config = load_agent_config(agent_id) if agent_id else None
     agent_name = (
-        getattr(agent_config, "name", "Assistant") or "Assistant"
+        (getattr(agent_config, "name", "Assistant") or "Assistant")
         if agent_config
         else "Assistant"
     )
 
-    template = _select_decision_prompt(config.verbosity)
-    prompt_text = template.format(
-        agent_name=agent_name,
-        channel_name=config.channel_name,
-        language=language,
-        prior_conversation=(
-            prior_conversation_text or _LISTEN_EMPTY_CONTEXT_MARKER
-        ),
-        history=history_text,
+    # The v2.1 prompt templates dropped the {agent_name} /
+    # {prior_conversation} slots; surface them via a synthesised
+    # leading line so the legacy text-render path still gets persona
+    # signal into the user-turn.
+    persona_block = (
+        f"(You are {agent_name}.  Previous exchanges in this room "
+        f"where you were @-mentioned:\n"
+        f"{prior_conversation_text or _LISTEN_EMPTY_CONTEXT_MARKER}\n)\n\n"
     )
+    prompt_text = persona_block + template.format(history=history_text)
 
     model, formatter = create_model_and_formatter(agent_id=agent_id)
-    # Bare ReActAgent with empty toolkit and no memory — cheapest way
-    # to reuse the main agent's model + formatter without dragging in
-    # tools, hooks, or persistence.  One reply call ⇒ one round-trip.
-    from agentscope.tool import Toolkit
-
     sub_agent = ReActAgent(
         name="ListenDecider",
         model=model,
@@ -365,8 +461,7 @@ async def _ask_llm_to_chime_in(
         Msg(name="User", role="user", content=prompt_text),
     )
     raw = "" if response is None else (response.get_text_content() or "")
-    _maybe_dump_listen_prompt(config, "decision", prompt_text, raw)
-    return raw
+    return prompt_text, raw
 
 
 async def should_chime_in(
@@ -435,13 +530,11 @@ async def should_chime_in(
     if not history_text:
         return False
 
-    prior_conversation_text = await _load_session_history(workspace, config)
-
     try:
         raw = await _ask_llm_to_chime_in(
             history_text,
             config,
-            prior_conversation_text=prior_conversation_text,
+            workspace=workspace,
         )
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.warning(
