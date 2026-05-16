@@ -16,6 +16,7 @@ import Chat from "../../pages/Chat";
 // All other pages are lazily loaded with automatic retry on chunk failure
 const ChannelsPage = lazyImportWithRetry("../../pages/Control/Channels");
 const SessionsPage = lazyImportWithRetry("../../pages/Control/Sessions");
+const InboxPage = lazyImportWithRetry("../../pages/Inbox");
 const CronJobsPage = lazyImportWithRetry("../../pages/Control/CronJobs");
 const HeartbeatPage = lazyImportWithRetry("../../pages/Control/Heartbeat");
 const MediaServerPage = lazyImportWithRetry("../../pages/Control/MediaServer");
@@ -40,6 +41,9 @@ const VoiceTranscriptionPage = lazyImportWithRetry(
 const AgentsPage = lazyImportWithRetry("../../pages/Settings/Agents");
 const DebugPage = lazyImportWithRetry("../../pages/Settings/Debug");
 const BackupsPage = lazyImportWithRetry("../../pages/Settings/Backups");
+const PluginManagerPage = lazyImportWithRetry(
+  "../../pages/Settings/PluginManager",
+);
 
 const { Content } = Layout;
 
@@ -47,6 +51,7 @@ const pathToKey: Record<string, string> = {
   "/chat": "chat",
   "/channels": "channels",
   "/sessions": "sessions",
+  "/inbox": "inbox",
   "/cron-jobs": "cron-jobs",
   "/heartbeat": "heartbeat",
   "/media-server": "media-server",
@@ -67,6 +72,7 @@ const pathToKey: Record<string, string> = {
   "/voice-transcription": "voice-transcription",
   "/debug": "debug",
   "/backups": "backups",
+  "/plugin-manager": "plugin-manager",
 };
 
 export default function MainLayout() {
@@ -108,6 +114,7 @@ export default function MainLayout() {
                   <Route path="/chat/*" element={<Chat />} />
                   <Route path="/channels" element={<ChannelsPage />} />
                   <Route path="/sessions" element={<SessionsPage />} />
+                  <Route path="/inbox" element={<InboxPage />} />
                   <Route path="/cron-jobs" element={<CronJobsPage />} />
                   <Route path="/heartbeat" element={<HeartbeatPage />} />
                   <Route path="/media-server" element={<MediaServerPage />} />
@@ -132,6 +139,10 @@ export default function MainLayout() {
                   />
                   <Route path="/debug" element={<DebugPage />} />
                   <Route path="/backups" element={<BackupsPage />} />
+                  <Route
+                    path="/plugin-manager"
+                    element={<PluginManagerPage />}
+                  />
 
                   {/* Plugin routes — dynamically injected at runtime */}
                   {pluginRoutes.map((route) => (

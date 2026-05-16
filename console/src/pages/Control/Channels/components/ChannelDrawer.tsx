@@ -11,6 +11,7 @@ import { useAppMessage } from "../../../../hooks/useAppMessage";
 import { Alert, ConfigProvider } from "antd";
 import { LinkOutlined } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
+import { useEffect } from "react";
 import type { FormInstance } from "antd";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getChannelLabel, type ChannelKey } from "./constants";
@@ -18,6 +19,7 @@ import { useChannelQrcode } from "./useChannelQrcode";
 import { api } from "../../../../api";
 import styles from "../index.module.less";
 import { useAgentStore } from "../../../../stores/agentStore";
+import { openExternalLink } from "../../../../utils/openExternalLink";
 
 const CHANNELS_WITH_ACCESS_CONTROL: ChannelKey[] = [
   "telegram",
@@ -125,6 +127,18 @@ export function ChannelDrawer({
   const currentLang = i18n.language?.startsWith("zh") ? "zh" : "en";
   const label = activeKey ? getChannelLabel(activeKey, t) : activeLabel;
   const { message } = useAppMessage();
+  const matrixAuthMethod = Form.useWatch("auth_method", form);
+  const isMatrixPasswordAuth = matrixAuthMethod === "password";
+
+  // Parent calls form.setFieldsValue() before the Form mounts, which wins over
+  // initialValues. Re-apply auth_method after open so the dropdown is correct.
+  useEffect(() => {
+    if (!open || activeKey !== "matrix") return;
+    const pw = initialValues?.password;
+    if (typeof pw === "string" && pw.trim().length > 0) {
+      form.setFieldsValue({ auth_method: "password" });
+    }
+  }, [open, activeKey, initialValues, form]);
 
   // WeChat QR code hook
   const weixinQrcode = useChannelQrcode({
@@ -562,16 +576,64 @@ export function ChannelDrawer({
             <Form.Item
               name="user_id"
               label="User ID"
-              rules={[{ required: true }]}
+              tooltip="Accepts a full MXID (e.g. @bot:matrix.org) or just the localpart (e.g. bot)."
+              rules={[{ required: true, message: "Please enter User ID" }]}
             >
               <Input placeholder="@bot:matrix.org" />
             </Form.Item>
             <Form.Item
+              name="auth_method"
+              label="Auth Method"
+              initialValue="token"
+            >
+              <Select
+                options={[
+                  { value: "token", label: "Token" },
+                  { value: "password", label: "Password" },
+                ]}
+              />
+            </Form.Item>
+            <Form.Item
               name="access_token"
               label="Access Token"
-              rules={[{ required: true }]}
+              rules={[
+                {
+                  required: !isMatrixPasswordAuth,
+                  message: "Please enter access token",
+                },
+              ]}
+              hidden={isMatrixPasswordAuth}
             >
               <Input.Password placeholder="syt_..." />
+            </Form.Item>
+            <Form.Item
+              name="password"
+              label="Password"
+              rules={[
+                {
+                  required: isMatrixPasswordAuth,
+                  message: "Please enter password",
+                },
+              ]}
+              hidden={!isMatrixPasswordAuth}
+            >
+              <Input.Password placeholder="Account password for login" />
+            </Form.Item>
+            <Form.Item
+              name="encryption"
+              label="Enable End-to-End Encryption"
+              tooltip="After enabling, you must verify the device in a Matrix client (e.g. Element). E2EE requires manually installing matrix-nio[e2e] (pip install matrix-nio[e2e])."
+              valuePropName="checked"
+              hidden={!isMatrixPasswordAuth}
+            >
+              <Switch />
+            </Form.Item>
+            <Form.Item
+              name="device_name"
+              label="Device Name"
+              tooltip="A stable device identity for the Matrix client. Defaults to 'qwenpaw-worker' if left empty."
+            >
+              <Input placeholder="qwenpaw-worker" />
             </Form.Item>
           </>
         );
@@ -772,6 +834,38 @@ export function ChannelDrawer({
                 </Select.Option>
               </Select>
             </Form.Item>
+            <ConfigProvider prefixCls="ant">
+              <Alert
+                type="info"
+                showIcon
+                message={t("channels.feishuScanGuide")}
+                style={{ marginBottom: 16 }}
+              />
+            </ConfigProvider>
+            <QrcodeAuthBlock
+              label={t("channels.feishuScanLogin")}
+              buttonText={t("channels.feishuGetQrcode")}
+              imageAlt="Feishu QR Code"
+              hintText={t("channels.feishuScanHint")}
+              channel="feishu"
+              successStatus="success"
+              successCredentialKey="app_id"
+              pollInterval={2000}
+              onSuccess={(credentials) => {
+                form.setFieldsValue({
+                  app_id: credentials.app_id,
+                  app_secret: credentials.app_secret,
+                });
+                message.success(t("channels.feishuAuthSuccess"));
+              }}
+              onError={(type) => {
+                if (type === "expired") {
+                  message.warning(t("channels.feishuQrcodeExpired"));
+                } else {
+                  message.error(t("channels.feishuQrcodeFailed"));
+                }
+              }}
+            />
             <Form.Item
               name="app_id"
               label="App ID"
@@ -1952,7 +2046,7 @@ export function ChannelDrawer({
                 isQwenPawDoc && currentLang === "zh"
                   ? CHANNEL_DOC_ZH_URLS[activeKey]!
                   : CHANNEL_DOC_EN_URLS[activeKey]!;
-              window.open(finalUrl, "_blank");
+              openExternalLink(finalUrl);
             }}
             className={styles.dingtalkDocBtn}
             style={{ color: "#FF7F16" }}
@@ -1965,9 +2059,7 @@ export function ChannelDrawer({
           type="text"
           size="small"
           icon={<LinkOutlined />}
-          onClick={() =>
-            window.open(TWILIO_CONSOLE_URL, "_blank", "noopener,noreferrer")
-          }
+          onClick={() => openExternalLink(TWILIO_CONSOLE_URL)}
           className={styles.dingtalkDocBtn}
           style={{ color: "#FF7F16" }}
         >
@@ -1997,13 +2089,25 @@ export function ChannelDrawer({
       onClose={onClose}
       destroyOnClose
       footer={drawerFooter}
+      key={activeKey} // Force remount when switching channels
     >
       {activeKey && (
         <Form
           form={form}
           layout="vertical"
           initialValues={initialValues}
-          onFinish={onSubmit}
+          onFinish={(values: Record<string, unknown>) => {
+            if (activeKey !== "matrix") {
+              onSubmit(values);
+              return;
+            }
+            const { auth_method, ...rest } = values;
+            if (auth_method === "password") {
+              onSubmit({ ...rest, access_token: "" });
+            } else {
+              onSubmit({ ...rest, password: "", encryption: false });
+            }
+          }}
         >
           <Form.Item
             name="enabled"
@@ -2038,6 +2142,23 @@ export function ChannelDrawer({
                 <Switch />
               </Form.Item>
             </>
+          )}
+
+          {(activeKey === "wecom" ||
+            activeKey === "telegram" ||
+            activeKey === "dingtalk") && (
+            <Form.Item
+              name="streaming_enabled"
+              label={t("channels.streamingEnabled")}
+              valuePropName="checked"
+              tooltip={
+                activeKey === "dingtalk"
+                  ? t("channels.streamingEnabledDingtalkHint")
+                  : undefined
+              }
+            >
+              <Switch />
+            </Form.Item>
           )}
 
           {isBuiltin

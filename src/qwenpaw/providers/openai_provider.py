@@ -70,12 +70,19 @@ class OpenAIProvider(Provider):
 
         return CodexAuth()
 
+    def _build_default_headers(self) -> dict:
+        return dict(self.custom_headers) if self.custom_headers else {}
+
     def _client(self, timeout: float = 5) -> AsyncOpenAI:
-        return AsyncOpenAI(
-            base_url=self.base_url,
-            api_key=self.api_key,
-            timeout=timeout,
-        )
+        kwargs: dict = {
+            "base_url": self.base_url,
+            "api_key": self.api_key,
+            "timeout": timeout,
+        }
+        headers = self._build_default_headers()
+        if headers:
+            kwargs["default_headers"] = headers
+        return AsyncOpenAI(**kwargs)
 
     def _probe_client(self, model_id: str, timeout: float) -> AsyncOpenAI:
         """Return a chat client that actually reaches this model for probing.
@@ -307,44 +314,35 @@ class OpenAIProvider(Provider):
                 generate_kwargs=self.get_effective_generate_kwargs(model_id),
             )
 
-        client_kwargs = {"base_url": self.base_url}
+        client_kwargs: dict = {"base_url": self.base_url}
+
+        # Start with user-defined custom headers, then layer platform-specific
+        # headers on top so required service headers are always present.
+        merged_headers = self._build_default_headers()
 
         if self.base_url in DASHSCOPE_BASE_URLS:
-            client_kwargs["default_headers"] = {
-                "x-dashscope-agentapp": json.dumps(
-                    {
-                        "agentType": "QwenPaw",
-                        "deployType": "UnKnown",
-                        "moduleCode": "model",
-                        "agentCode": "UnKnown",
-                    },
-                    ensure_ascii=False,
-                ),
-            }
-        elif self.base_url == CODING_DASHSCOPE_BASE_URL:
-            client_kwargs["default_headers"] = {
-                "X-DashScope-Cdpl": json.dumps(
-                    {
-                        "agentType": "QwenPaw",
-                        "deployType": "UnKnown",
-                        "moduleCode": "model",
-                        "agentCode": "UnKnown",
-                    },
-                    ensure_ascii=False,
-                ),
-            }
-        elif self.base_url == TOKEN_PLAN_BASE_URL:
-            client_kwargs["default_headers"] = {
-                "X-DashScope-Cdpl": json.dumps(
-                    {
-                        "agentType": "QwenPaw",
-                        "deployType": "UnKnown",
-                        "moduleCode": "model",
-                        "agentCode": "UnKnown",
-                    },
-                    ensure_ascii=False,
-                ),
-            }
+            merged_headers["x-dashscope-agentapp"] = json.dumps(
+                {
+                    "agentType": "QwenPaw",
+                    "deployType": "UnKnown",
+                    "moduleCode": "model",
+                    "agentCode": "UnKnown",
+                },
+                ensure_ascii=False,
+            )
+        elif self.base_url in (CODING_DASHSCOPE_BASE_URL, TOKEN_PLAN_BASE_URL):
+            merged_headers["X-DashScope-Cdpl"] = json.dumps(
+                {
+                    "agentType": "QwenPaw",
+                    "deployType": "UnKnown",
+                    "moduleCode": "model",
+                    "agentCode": "UnKnown",
+                },
+                ensure_ascii=False,
+            )
+
+        if merged_headers:
+            client_kwargs["default_headers"] = merged_headers
 
         return OpenAIChatModelCompat(
             model_name=model_id,

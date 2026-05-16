@@ -57,6 +57,7 @@ export function useAgentConfig() {
         same_session_parallel_max_runs:
           config.same_session_parallel_max_runs ?? 3,
         shell_command_timeout: config.shell_command_timeout ?? 60.0,
+        shell_command_executable: config.shell_command_executable ?? "",
         llm_retry_enabled: config.llm_retry_enabled,
         llm_max_retries: config.llm_max_retries,
         llm_backoff_base: config.llm_backoff_base,
@@ -72,6 +73,7 @@ export function useAgentConfig() {
         light_context_config: config.light_context_config,
         memory_manager_backend: memoryBackend,
         reme_light_memory_config: config.reme_light_memory_config,
+        adbpg_memory_config: config.adbpg_memory_config,
         auto_title_config: config.auto_title_config ?? {
           enabled: true,
           timeout_seconds: 30.0,

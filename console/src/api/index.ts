@@ -26,6 +26,7 @@ import { userTimezoneApi } from "./modules/userTimezone";
 import { languageApi } from "./modules/language";
 import { backupApi } from "./modules/backup";
 import { acpxProviderApi } from "./modules/acpxProvider";
+import { consoleApi } from "./modules/console";
 
 export const api = {
   // Root
@@ -91,6 +92,9 @@ export const api = {
 
   // ACPX Provider tuning
   ...acpxProviderApi,
+
+  // Console
+  ...consoleApi,
 };
 
 export default api;

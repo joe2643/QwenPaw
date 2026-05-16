@@ -7,6 +7,7 @@ import {
   Modal,
   Button,
   Select,
+  Radio,
 } from "@agentscope-ai/design";
 import { theme } from "antd";
 import {
@@ -28,6 +29,7 @@ import {
 import { useAppMessage } from "../../../../../hooks/useAppMessage";
 import {
   ApiOutlined,
+  CloseOutlined,
   DownOutlined,
   RightOutlined,
   CheckCircleFilled,
@@ -47,8 +49,16 @@ import { getLocalizedTestConnectionMessage } from "./testConnectionMessage";
 import styles from "../../index.module.less";
 
 interface ProviderConfigFormValues
-  extends Omit<ProviderConfigRequest, "generate_kwargs"> {
+  extends Omit<
+    ProviderConfigRequest,
+    "generate_kwargs" | "custom_headers" | "auth_mode"
+  > {
   generate_kwargs_text?: string;
+}
+
+interface HeaderEntry {
+  key: string;
+  value: string;
 }
 
 interface JsonCodeEditorProps {
@@ -630,6 +640,8 @@ interface ProviderConfigModalProps {
     support_connection_check: boolean;
     generate_kwargs: Record<string, unknown>;
     require_api_key?: boolean;
+    custom_headers?: Record<string, string>;
+    auth_mode?: "api_key" | "auth_token";
     meta?: Record<string, unknown>;
   };
   activeModels: any;
@@ -652,6 +664,15 @@ export function ProviderConfigModal({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [form] = Form.useForm<ProviderConfigFormValues>();
   const { message } = useAppMessage();
+  const [authMode, setAuthMode] = useState<"api_key" | "auth_token">(
+    provider.auth_mode ?? "api_key",
+  );
+  const [customHeaders, setCustomHeaders] = useState<HeaderEntry[]>(
+    Object.entries(provider.custom_headers ?? {}).map(([key, value]) => ({
+      key,
+      value,
+    })),
+  );
   const selectedChatModel = Form.useWatch("chat_model", form);
   const canEditBaseUrl = !provider.freeze_url;
 
@@ -844,6 +865,14 @@ export function ProviderConfigModal({
     return selectedChatModel || provider.chat_model || "OpenAIChatModel";
   }, [provider.chat_model, provider.is_custom, selectedChatModel]);
 
+  const isAnthropicProvider = useMemo(
+    () =>
+      provider.id === "anthropic" ||
+      provider.chat_model === "AnthropicChatModel" ||
+      effectiveChatModel === "AnthropicChatModel",
+    [provider.id, provider.chat_model, effectiveChatModel],
+  );
+
   const apiKeyPlaceholder = useMemo(() => {
     if (provider.api_key) {
       return t("models.leaveBlankKeep");
@@ -853,6 +882,11 @@ export function ProviderConfigModal({
     }
     return t("models.enterApiKeyOptional");
   }, [provider.api_key, provider.api_key_prefix, t]);
+
+  const apiKeyLabel =
+    isAnthropicProvider && authMode === "auth_token"
+      ? t("models.authModeAuthToken")
+      : t("models.apiKey");
 
   const baseUrlExtra = useMemo(() => {
     if (!canEditBaseUrl) {
@@ -937,6 +971,13 @@ export function ProviderConfigModal({
       });
       setAdvancedOpen(false);
       setFormDirty(false);
+      setAuthMode(provider.auth_mode ?? "api_key");
+      setCustomHeaders(
+        Object.entries(provider.custom_headers ?? {}).map(([key, value]) => ({
+          key,
+          value,
+        })),
+      );
     }
   }, [provider, form, open]);
 
@@ -952,10 +993,18 @@ export function ProviderConfigModal({
       // Validate connection before saving
       // For local providers, we might skip this or just check if models exist (which the backend does)
       if (provider.support_connection_check) {
+        const testHeaders = customHeaders
+          .filter((h) => h.key.trim())
+          .reduce<Record<string, string>>((acc, h) => {
+            acc[h.key.trim()] = h.value;
+            return acc;
+          }, {});
         const result = await api.testProviderConnection(provider.id, {
           api_key: values.api_key,
           base_url: values.base_url,
           chat_model: values.chat_model,
+          custom_headers: testHeaders,
+          auth_mode: isAnthropicProvider ? authMode : undefined,
         });
 
         if (!result.success) {
@@ -965,11 +1014,20 @@ export function ProviderConfigModal({
         }
       }
 
+      const headersObj = customHeaders
+        .filter((h) => h.key.trim())
+        .reduce<Record<string, string>>((acc, h) => {
+          acc[h.key.trim()] = h.value;
+          return acc;
+        }, {});
+
       await api.configureProvider(provider.id, {
         api_key: values.api_key,
         base_url: values.base_url,
         chat_model: values.chat_model,
         generate_kwargs: hasGenerateConfigInput ? generateConfig : {},
+        custom_headers: headersObj,
+        auth_mode: isAnthropicProvider ? authMode : undefined,
       });
 
       await onSaved();
@@ -994,10 +1052,18 @@ export function ProviderConfigModal({
         "base_url",
         "chat_model",
       ]);
+      const testHeaders = customHeaders
+        .filter((h) => h.key.trim())
+        .reduce<Record<string, string>>((acc, h) => {
+          acc[h.key.trim()] = h.value;
+          return acc;
+        }, {});
       const result = await api.testProviderConnection(provider.id, {
         api_key: values.api_key,
         base_url: values.base_url,
         chat_model: values.chat_model,
+        custom_headers: testHeaders,
+        auth_mode: isAnthropicProvider ? authMode : undefined,
       });
       if (result.success) {
         message.success(getLocalizedTestConnectionMessage(result, t));
@@ -1319,6 +1385,86 @@ export function ProviderConfigModal({
               value={codexReasoning}
               onChange={applyCodexReasoningPatch}
             />
+          )}
+
+          {/* Anthropic auth mode selector */}
+          {isAnthropicProvider && advancedOpen && (
+            <Form.Item label={t("models.authMode")}>
+              <Radio.Group
+                value={authMode}
+                onChange={(e) => {
+                  setAuthMode(e.target.value);
+                  setFormDirty(true);
+                }}
+              >
+                <Radio value="api_key">{t("models.authModeApiKey")}</Radio>
+                <Radio value="auth_token">
+                  {t("models.authModeAuthToken")}
+                </Radio>
+              </Radio.Group>
+            </Form.Item>
+          )}
+
+          {/* Custom Headers editor */}
+          {advancedOpen && (
+            <Form.Item
+              label={t("models.customHeaders")}
+              extra={t("models.customHeadersHint")}
+            >
+              <div className={styles.customHeadersSection}>
+                {customHeaders.map((header, index) => (
+                  <div key={index} className={styles.customHeaderRow}>
+                    <Input
+                      className={styles.customHeaderKey}
+                      placeholder={t("models.customHeaderKey")}
+                      value={header.key}
+                      onChange={(e) => {
+                        const next = [...customHeaders];
+                        next[index] = { ...next[index], key: e.target.value };
+                        setCustomHeaders(next);
+                        setFormDirty(true);
+                      }}
+                    />
+                    <Input
+                      className={styles.customHeaderValue}
+                      placeholder={t("models.customHeaderValue")}
+                      value={header.value}
+                      onChange={(e) => {
+                        const next = [...customHeaders];
+                        next[index] = {
+                          ...next[index],
+                          value: e.target.value,
+                        };
+                        setCustomHeaders(next);
+                        setFormDirty(true);
+                      }}
+                    />
+                    <CloseOutlined
+                      className={styles.customHeaderDelete}
+                      onClick={() => {
+                        setCustomHeaders(
+                          customHeaders.filter((_, i) => i !== index),
+                        );
+                        setFormDirty(true);
+                      }}
+                    />
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  className={styles.addHeaderBtn}
+                  onClick={() => {
+                    setCustomHeaders([
+                      ...customHeaders,
+                      { key: "", value: "" },
+                    ]);
+                    setFormDirty(true);
+                  }}
+                >
+                  {t("models.addHeader")}
+                </button>
+              </div>
+            </Form.Item>
           )}
 
           <Form.Item

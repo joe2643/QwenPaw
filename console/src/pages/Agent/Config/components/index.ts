@@ -9,3 +9,4 @@ export { MemPalaceCard } from "./MemPalaceCard";
 export { SkillClawCaptureCard } from "./SkillClawCaptureCard";
 export { FallbackVideoModelCard } from "./FallbackVideoModelCard";
 export { FallbackImageModelCard } from "./FallbackImageModelCard";
+export { ADBPGConfigCard } from "./ADBPGConfigCard";

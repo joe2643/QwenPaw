@@ -486,71 +486,64 @@ DEEPSEEK_MODELS: List[ModelInfo] = [
 
 VOLCENGINE_MODELS: List[ModelInfo] = [
     ModelInfo(
-        id="Doubao-Seed-2.0-Code",
+        id="doubao-seed-2-0-code-preview-260215",
         name="Doubao-Seed-2.0-Code",
-        supports_image=False,
-        supports_video=False,
-        probe_source="documentation",
+        supports_image=True,
+        supports_video=True,
+        probe_source="probed",
     ),
     ModelInfo(
-        id="Doubao-Seed-2.0-pro",
+        id="doubao-seed-2-0-pro-260215",
         name="Doubao-Seed-2.0-pro",
-        supports_image=False,
-        supports_video=False,
-        probe_source="documentation",
+        supports_image=True,
+        supports_video=True,
+        probe_source="probed",
     ),
     ModelInfo(
-        id="Doubao-Seed-2.0-lite",
+        id="doubao-seed-2-0-lite-260428",
         name="Doubao-Seed-2.0-lite",
-        supports_image=False,
-        supports_video=False,
-        probe_source="documentation",
+        supports_image=True,
+        supports_video=True,
+        probe_source="probed",
     ),
     ModelInfo(
-        id="Doubao-Seed-Code",
+        id="doubao-seed-code-preview-251028",
         name="Doubao-Seed-Code",
-        supports_image=False,
-        supports_video=False,
-        probe_source="documentation",
+        supports_image=True,
+        supports_video=True,
+        probe_source="probed",
     ),
     ModelInfo(
-        id="GLM-5.1",
-        name="GLM-5.1",
-        supports_image=False,
-        supports_video=False,
-        probe_source="documentation",
-    ),
-    ModelInfo(
-        id="MiniMax-M2.7",
-        name="MiniMax-M2.7",
-        supports_image=False,
-        supports_video=False,
-        probe_source="documentation",
-    ),
-    ModelInfo(
-        id="Kimi-K2.6",
-        name="Kimi-K2.6",
-        supports_image=False,
-        supports_video=False,
-        probe_source="documentation",
-    ),
-    ModelInfo(
-        id="Kimi-K2.5",
-        name="Kimi-K2.5",
-        supports_image=False,
-        supports_video=False,
-        probe_source="documentation",
-    ),
-    ModelInfo(
-        id="GLM-4.7",
+        id="glm-4-7-251222",
         name="GLM-4.7",
         supports_image=False,
         supports_video=False,
         probe_source="documentation",
     ),
     ModelInfo(
-        id="DeepSeek-V3.2",
+        id="deepseek-v3-2-251201",
         name="DeepSeek-V3.2",
+        supports_image=False,
+        supports_video=False,
+        probe_source="documentation",
+    ),
+    ModelInfo(
+        id="doubao-seed-1-8-251228",
+        name="Doubao-Seed-1.8",
+        supports_image=True,
+        supports_video=True,
+        probe_source="probed",
+    ),
+    ModelInfo(
+        id="doubao-seed-2-0-mini-260428",
+        name="Doubao-Seed-2.0-mini",
+        supports_image=True,
+        supports_video=True,
+        probe_source="probed",
+    ),
+    ModelInfo(
+        id="doubao-seed-character-251128",
+        name="Doubao-Seed-Character",
         supports_image=False,
         supports_video=False,
         probe_source="documentation",
@@ -559,74 +552,74 @@ VOLCENGINE_MODELS: List[ModelInfo] = [
 
 VOLCENGINE_CODINGPLAN_MODELS: List[ModelInfo] = [
     ModelInfo(
-        id="Doubao-Seed-2.0-Code",
+        id="doubao-seed-2-0-code-preview-260215",
         name="Doubao-Seed-2.0-Code",
-        supports_image=False,
-        supports_video=False,
-        probe_source="documentation",
+        supports_image=True,
+        supports_video=True,
+        probe_source="probed",
     ),
     ModelInfo(
-        id="Doubao-Seed-2.0-pro",
+        id="doubao-seed-2-0-pro-260215",
         name="Doubao-Seed-2.0-pro",
-        supports_image=False,
-        supports_video=False,
-        probe_source="documentation",
+        supports_image=True,
+        supports_video=True,
+        probe_source="probed",
     ),
     ModelInfo(
-        id="Doubao-Seed-2.0-lite",
+        id="doubao-seed-2-0-lite-260428",
         name="Doubao-Seed-2.0-lite",
-        supports_image=False,
-        supports_video=False,
-        probe_source="documentation",
+        supports_image=True,
+        supports_video=True,
+        probe_source="probed",
     ),
     ModelInfo(
-        id="Doubao-Seed-Code",
+        id="doubao-seed-code-preview-251028",
         name="Doubao-Seed-Code",
-        supports_image=False,
-        supports_video=False,
-        probe_source="documentation",
+        supports_image=True,
+        supports_video=True,
+        probe_source="probed",
     ),
     ModelInfo(
-        id="GLM-5.1",
+        id="glm-5.1",
         name="GLM-5.1",
         supports_image=False,
         supports_video=False,
-        probe_source="documentation",
+        probe_source="probed",
     ),
     ModelInfo(
-        id="MiniMax-M2.7",
+        id="minimax-m2.7",
         name="MiniMax-M2.7",
         supports_image=False,
         supports_video=False,
-        probe_source="documentation",
+        probe_source="probed",
     ),
     ModelInfo(
-        id="Kimi-K2.6",
+        id="kimi-k2.6",
         name="Kimi-K2.6",
         supports_image=False,
         supports_video=False,
-        probe_source="documentation",
+        probe_source="probed",
     ),
     ModelInfo(
-        id="Kimi-K2.5",
+        id="kimi-k2.5",
         name="Kimi-K2.5",
         supports_image=False,
         supports_video=False,
-        probe_source="documentation",
+        probe_source="probed",
     ),
     ModelInfo(
-        id="GLM-4.7",
+        id="glm-4-7-251222",
         name="GLM-4.7",
         supports_image=False,
         supports_video=False,
-        probe_source="documentation",
+        probe_source="probed",
     ),
     ModelInfo(
-        id="DeepSeek-V3.2",
+        id="deepseek-v3-2-251201",
         name="DeepSeek-V3.2",
         supports_image=False,
         supports_video=False,
-        probe_source="documentation",
+        probe_source="probed",
     ),
 ]
 
@@ -939,7 +932,7 @@ PROVIDER_ANTHROPIC = AnthropicProvider(
     api_key_prefix="sk-ant-",
     models=ANTHROPIC_MODELS,
     chat_model="AnthropicChatModel",
-    freeze_url=True,
+    freeze_url=False,
 )
 
 # Codex OAuth — authenticates against the ChatGPT backend Responses
@@ -1125,6 +1118,7 @@ PROVIDER_VOLCENGINE_CN = OpenAIProvider(
     api_key_prefix="",
     models=VOLCENGINE_MODELS,
     freeze_url=True,
+    support_model_discovery=False,
 )
 
 PROVIDER_VOLCENGINE_CN_CODINGPLAN = OpenAIProvider(
@@ -1135,6 +1129,7 @@ PROVIDER_VOLCENGINE_CN_CODINGPLAN = OpenAIProvider(
     models=VOLCENGINE_CODINGPLAN_MODELS,
     support_connection_check=False,
     freeze_url=True,
+    support_model_discovery=False,
 )
 
 
@@ -1946,6 +1941,10 @@ class ProviderManager:  # pylint: disable=too-many-public-methods
                 if not builtin.freeze_url:
                     builtin.base_url = provider.base_url
                 builtin.api_key = provider.api_key
+                if provider.auth_mode != "api_key":
+                    builtin.auth_mode = provider.auth_mode
+                if provider.custom_headers:
+                    builtin.custom_headers = provider.custom_headers
                 builtin_model_ids = {m.id for m in builtin.models}
                 builtin.extra_models = [
                     m
@@ -2170,6 +2169,33 @@ class ProviderManager:  # pylint: disable=too-many-public-methods
             f"✓ Registered plugin provider: {provider_id} "
             f"with {len(default_models)} default model(s)",
         )
+
+    def unregister_plugin_provider(self, provider_id: str) -> bool:
+        """Remove a plugin provider from memory.
+
+        Removes the provider from ``self.plugin_providers`` so it no
+        longer appears in the model list.  The persisted configuration
+        file (``plugin_path/{provider_id}.json``) is intentionally
+        kept on disk so that user-configured keys survive a
+        reinstall.
+
+        Args:
+            provider_id: Plugin provider identifier to remove.
+
+        Returns:
+            ``True`` if the provider was found and removed,
+            ``False`` if it was not registered.
+        """
+        if provider_id not in self.plugin_providers:
+            logger.warning(
+                f"unregister_plugin_provider: '{provider_id}' not found",
+            )
+            return False
+        del self.plugin_providers[provider_id]
+        logger.info(
+            f"Unregistered plugin provider '{provider_id}' from memory",
+        )
+        return True
 
     @staticmethod
     def get_instance() -> "ProviderManager":
