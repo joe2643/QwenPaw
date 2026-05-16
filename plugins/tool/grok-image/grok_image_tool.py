@@ -386,7 +386,10 @@ async def _post_and_render(
     if b64:
         image_path = _save_b64(b64)
     elif url:
-        image_path = url
+        # xAI's CDN URLs (imgen.x.ai/...) are signed/short-lived and
+        # chat channels (Signal, etc.) need a real local file to
+        # attach — return path, not URL.
+        image_path = await _download_url(url)
     if not image_path:
         return _text_error(
             "xAI response contained neither b64_json nor url",
@@ -492,6 +495,25 @@ def _save_b64(b64: str) -> str:
     timestamp = int(time.time() * 1000)
     path = media_dir / f"grok_image_{timestamp}.png"
     path.write_bytes(base64.b64decode(b64))
+    return str(path)
+
+
+async def _download_url(url: str) -> str:
+    media_dir = DEFAULT_MEDIA_DIR / "grok_image"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = int(time.time() * 1000)
+    ext = ".jpg"
+    for candidate in (".jpeg", ".jpg", ".png", ".webp"):
+        if candidate in url.lower():
+            ext = candidate
+            break
+    path = media_dir / f"grok_image_{timestamp}{ext}"
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        async with client.stream("GET", url) as resp:
+            resp.raise_for_status()
+            with path.open("wb") as f:
+                async for chunk in resp.aiter_bytes():
+                    f.write(chunk)
     return str(path)
 
 
