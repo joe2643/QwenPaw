@@ -1720,6 +1720,55 @@ class SignalChannel(BaseChannel):
                     [{"path": p, "type": ""} for p in atts],
                 )
 
+    async def send_content_parts(
+        self,
+        to_handle: str,
+        parts: List[OutgoingContentPart],
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Send Signal reply content without media fallback duplication.
+
+        ``BaseChannel.send_content_parts`` appends each media part back
+        into the text body as a ``[Image: path]`` / ``[Video: path]``
+        fallback *and* then calls ``send_media``.  Signal's ``send()``
+        already parses ``[Image: ...]`` markers for plain-text agent
+        replies (so a TEXT block containing ``[Image: /tmp/foo.png]``
+        still attaches), but combining that with a native ImageContent
+        in the same response sends the image twice: once as a regex
+        extraction in the text chunk, once via ``send_media``.
+
+        Mirror the WhatsApp override: route text via ``send()`` and
+        media via ``send_media()`` on separate paths, no fallback
+        marker appended.  Plain-text ``[Image: ...]`` replies still
+        work through ``send()`` regex extraction when there's no
+        native media part.
+        """
+        text_parts: List[str] = []
+        media_parts: List[OutgoingContentPart] = []
+        for part in parts:
+            t = getattr(part, "type", None)
+            if t == ContentType.TEXT and getattr(part, "text", None):
+                text_parts.append(part.text or "")
+            elif t == ContentType.REFUSAL and getattr(part, "refusal", None):
+                text_parts.append(part.refusal or "")
+            elif t in (
+                ContentType.IMAGE,
+                ContentType.VIDEO,
+                ContentType.AUDIO,
+                ContentType.FILE,
+            ):
+                media_parts.append(part)
+
+        body = "\n".join(text_parts).strip() if text_parts else ""
+        prefix = (meta or {}).get("bot_prefix", "") or ""
+        if prefix and body:
+            body = prefix + "  " + body
+
+        if body:
+            await self.send(to_handle, body, meta)
+        for part in media_parts:
+            await self.send_media(to_handle, part, meta)
+
     async def send_media(
         self,
         to_handle: str,
