@@ -613,6 +613,16 @@ class SignalChannel(BaseChannel):
                         },
                     )
 
+            # Peer-id preference MUST match the framework's
+            # ``effective_sender`` ordering (``source or source_uuid``)
+            # below — otherwise outbound's ``to_handle`` lands under a
+            # different cache key than inbound and reverse-lookup
+            # misses 100% of the time.  Number first, UUID fallback.
+            chat_bucket = self._chat_bucket(
+                group_id,
+                source or source_uuid,
+            )
+
             # ── Access control ────────────────────────────────────
             if group_id:
                 if self.group_policy == "allowlist":
@@ -644,6 +654,20 @@ class SignalChannel(BaseChannel):
                             group_id[:20],
                         )
                         return
+                # Cache media now — sender already passed group +
+                # group_allow_from gates.  Done BEFORE the
+                # require_mention check so a later reply quoting this
+                # message can still resolve a local path even when the
+                # original wasn't @-directed at the bot.  The files
+                # were already downloaded above; this is a zero-byte
+                # hard link.
+                if downloaded_media and timestamp:
+                    self._record_inbound_media(
+                        chat_bucket,
+                        int(timestamp),
+                        downloaded_media,
+                    )
+
                 # Compute mention status once so channel_meta can reflect
                 # reality regardless of require_mention. In groups we use
                 # the real check; DMs are always implicitly addressed to
@@ -720,6 +744,14 @@ class SignalChannel(BaseChannel):
                             len(self.allow_from or []),
                         )
                         return
+                # Cache media now — DM passed allowlist (or none was
+                # configured).  Symmetric with the group branch.
+                if downloaded_media and timestamp:
+                    self._record_inbound_media(
+                        chat_bucket,
+                        int(timestamp),
+                        downloaded_media,
+                    )
 
             logger.info(
                 "signal: from %s%s: %s",
@@ -735,22 +767,6 @@ class SignalChannel(BaseChannel):
             if body:
                 content_parts.append(
                     TextContent(type=ContentType.TEXT, text=body),
-                )
-
-            # Peer-id preference MUST match the framework's
-            # ``effective_sender`` ordering (``source or source_uuid``)
-            # below — otherwise outbound's ``to_handle`` lands under a
-            # different cache key than inbound and reverse-lookup
-            # misses 100% of the time.  Number first, UUID fallback.
-            chat_bucket = self._chat_bucket(
-                group_id,
-                source or source_uuid,
-            )
-            if downloaded_media and timestamp:
-                self._record_inbound_media(
-                    chat_bucket,
-                    int(timestamp),
-                    downloaded_media,
                 )
 
             quote_parts = await self._extract_quote_content(
