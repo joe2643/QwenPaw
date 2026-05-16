@@ -18,8 +18,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import mimetypes
 import os
 import re
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -266,16 +268,6 @@ class SignalChannel(BaseChannel):
         self._media_dir = _MEDIA_DIR
         self._group_history: Dict[str, list] = {}
         self._group_history_limit = 50
-        # Reverse-lookup of inbound + outbound media by (chat_bucket,
-        # message_timestamp). Signal's quote envelope only carries the
-        # parent message timestamp (``quote.id``) and a media metadata
-        # stub WITHOUT the per-attachment download key, so the quote
-        # handler can't re-fetch — it can only reuse what we already
-        # have on disk. Mirrors WhatsApp's _inbound_media. FIFO eviction
-        # caps memory at ``_inbound_media_limit``.
-        self._inbound_media: Dict[tuple[str, int], list[Dict[str, str]]] = {}
-        self._inbound_media_order: list[tuple[str, int]] = []
-        self._inbound_media_limit: int = 200
         self._sender_names: Dict[str, str] = {}
         # 8-char UUID prefix → full UUID. Populated every time we see a
         # sender in a group so the outbound mention compiler can recover
@@ -1132,50 +1124,88 @@ class SignalChannel(BaseChannel):
             return f"g:{group_id}"
         return f"dm:{peer}" if peer else ""
 
+    @staticmethod
+    def _safe_bucket_token(chat_bucket: str) -> str:
+        return re.sub(r"[^A-Za-z0-9_-]", "_", chat_bucket)
+
+    @staticmethod
+    def _guess_mime(path: Path, fallback: str = "") -> str:
+        mime, _ = mimetypes.guess_type(str(path))
+        if mime:
+            return mime
+        try:
+            with open(path, "rb") as f:
+                detected = _detect_mime(f.read(16))
+            if detected:
+                return detected
+        except OSError:
+            pass
+        return fallback
+
     def _record_inbound_media(
         self,
         chat_bucket: str,
         msg_ts: int,
         media: List[Dict[str, str]],
     ) -> None:
-        """Cache local paths + content types for a message that may be
-        quoted later. ``media`` follows the same shape used by the
-        inbound handler (``{"path": str, "type": str}`` entries).
-        Skips entries whose file no longer exists so we never hand the
-        quote handler a dead path. FIFO eviction at
-        ``_inbound_media_limit``.
+        """Persist a quote-recoverable index by hard-linking (or
+        copy-fallback) each media file into ``self._media_dir`` under
+        a name that encodes ``(chat_bucket, msg_ts)``. The quote
+        handler later globs by that prefix — no in-memory dict, so
+        the index survives restarts for free (the file is the index).
+        Idempotent: skips entries whose destination already exists.
+        Hard link costs zero extra bytes when source + dest share a
+        filesystem; cross-fs paths transparently fall through to
+        ``shutil.copy2``.
         """
         if not chat_bucket or not msg_ts:
             return
-        live = [m for m in media if m.get("path") and os.path.isfile(m["path"])]
-        if not live:
-            return
-        key = (chat_bucket, int(msg_ts))
-        if key in self._inbound_media:
-            existing = self._inbound_media[key]
-            existing_paths = {m.get("path") for m in existing}
-            for m in live:
-                if m.get("path") not in existing_paths:
-                    existing.append(m)
-            return
-        self._inbound_media[key] = list(live)
-        self._inbound_media_order.append(key)
-        while len(self._inbound_media_order) > self._inbound_media_limit:
-            old = self._inbound_media_order.pop(0)
-            self._inbound_media.pop(old, None)
+        token = self._safe_bucket_token(chat_bucket)
+        self._media_dir.mkdir(parents=True, exist_ok=True)
+        for entry in media:
+            src_path = entry.get("path") or ""
+            if not src_path or not os.path.isfile(src_path):
+                continue
+            src = Path(src_path)
+            dest = self._media_dir / f"sig_{token}_{int(msg_ts)}_{src.name}"
+            if dest.exists():
+                continue
+            try:
+                os.link(src, dest)
+            except OSError:
+                try:
+                    shutil.copy2(src, dest)
+                except OSError as e:
+                    logger.warning(
+                        "signal: media embed failed for %s → %s: %s",
+                        src,
+                        dest,
+                        e,
+                    )
 
     def _lookup_inbound_media(
         self,
         chat_bucket: str,
         msg_ts: int,
     ) -> List[Dict[str, str]]:
-        """Reverse-lookup. Returns only entries whose file still
-        exists on disk. Empty list on cache miss (or no paths survive).
+        """Glob the media dir for files whose name encodes
+        ``(chat_bucket, msg_ts)``. Returns ``[{path, type}]`` with
+        the MIME guessed from extension (falls back to header sniff).
+        Empty list on no match.
         """
         if not chat_bucket or not msg_ts:
             return []
-        entries = self._inbound_media.get((chat_bucket, int(msg_ts)), [])
-        return [m for m in entries if m.get("path") and os.path.isfile(m["path"])]
+        token = self._safe_bucket_token(chat_bucket)
+        results: List[Dict[str, str]] = []
+        for path in sorted(
+            self._media_dir.glob(f"sig_{token}_{int(msg_ts)}_*"),
+        ):
+            if not path.is_file():
+                continue
+            results.append(
+                {"path": str(path), "type": self._guess_mime(path)},
+            )
+        return results
 
     def _remember_sender(
         self,
