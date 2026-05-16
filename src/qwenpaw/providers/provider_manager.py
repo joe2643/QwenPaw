@@ -971,6 +971,34 @@ PROVIDER_CODEX_OAUTH = OpenAIProvider(
     },
 )
 
+# xAI OAuth — authenticates against ``https://api.x.ai/v1`` using the
+# access_token stored in ``~/.xai/auth.json`` by ``qwenpaw xai login``.
+# The ``oauth`` sentinel + provider id ``xai-oauth`` route through
+# ``XaiOAuthChatModel`` which refreshes the bearer per call.  Same
+# discovery-driven model list pattern as codex-oauth — xAI's /v1/models
+# is the source of truth, picked up by the UI's Discover button.
+XAI_OAUTH_MODELS: List[ModelInfo] = []
+
+PROVIDER_XAI_OAUTH = OpenAIProvider(
+    id="xai-oauth",
+    name="Grok (xAI OAuth)",
+    base_url="https://api.x.ai/v1",
+    api_key="oauth",
+    api_key_prefix="",
+    require_api_key=False,
+    models=XAI_OAUTH_MODELS,
+    chat_model="OpenAIChatModel",
+    freeze_url=True,
+    support_model_discovery=True,
+    meta={
+        "api_key_hint": (
+            "No API key required — run `qwenpaw xai login` once to "
+            "populate ~/.xai/auth.json. Requires an X Premium+ or "
+            "SuperGrok subscription on the signing-in account."
+        ),
+    },
+)
+
 # Claude Code OAuth — authenticates against Anthropic's ``/v1/messages``
 # using the access_token stored in ``~/.claude/.credentials.json`` by
 # the official ``claude`` CLI.  Users don't type an API key; the
@@ -1190,6 +1218,7 @@ class ProviderManager:  # pylint: disable=too-many-public-methods
         self._add_builtin(PROVIDER_CLAUDE_OAUTH)
         self._add_builtin(PROVIDER_CLAUDE_ACPX)
         self._add_builtin(PROVIDER_CODEX_OAUTH)
+        self._add_builtin(PROVIDER_XAI_OAUTH)
         self._add_builtin(PROVIDER_GEMINI)
         self._add_builtin(PROVIDER_DEEPSEEK)
         self._add_builtin(PROVIDER_KIMI_CN)
