@@ -745,9 +745,14 @@ class SignalChannel(BaseChannel):
                     TextContent(type=ContentType.TEXT, text=body),
                 )
 
+            # Peer-id preference MUST match the framework's
+            # ``effective_sender`` ordering (``source or source_uuid``)
+            # below — otherwise outbound's ``to_handle`` lands under a
+            # different cache key than inbound and reverse-lookup
+            # misses 100% of the time.  Number first, UUID fallback.
             chat_bucket = self._chat_bucket(
                 group_id,
-                source_uuid or source,
+                source or source_uuid,
             )
             if downloaded_media and timestamp:
                 self._record_inbound_media(
