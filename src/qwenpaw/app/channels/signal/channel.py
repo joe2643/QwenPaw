@@ -266,6 +266,16 @@ class SignalChannel(BaseChannel):
         self._media_dir = _MEDIA_DIR
         self._group_history: Dict[str, list] = {}
         self._group_history_limit = 50
+        # Reverse-lookup of inbound + outbound media by (chat_bucket,
+        # message_timestamp). Signal's quote envelope only carries the
+        # parent message timestamp (``quote.id``) and a media metadata
+        # stub WITHOUT the per-attachment download key, so the quote
+        # handler can't re-fetch — it can only reuse what we already
+        # have on disk. Mirrors WhatsApp's _inbound_media. FIFO eviction
+        # caps memory at ``_inbound_media_limit``.
+        self._inbound_media: Dict[tuple[str, int], list[Dict[str, str]]] = {}
+        self._inbound_media_order: list[tuple[str, int]] = []
+        self._inbound_media_limit: int = 200
         self._sender_names: Dict[str, str] = {}
         # 8-char UUID prefix → full UUID. Populated every time we see a
         # sender in a group so the outbound mention compiler can recover
@@ -735,7 +745,21 @@ class SignalChannel(BaseChannel):
                     TextContent(type=ContentType.TEXT, text=body),
                 )
 
-            quote_parts = await self._extract_quote_content(data_message)
+            chat_bucket = self._chat_bucket(
+                group_id,
+                source_uuid or source,
+            )
+            if downloaded_media and timestamp:
+                self._record_inbound_media(
+                    chat_bucket,
+                    int(timestamp),
+                    downloaded_media,
+                )
+
+            quote_parts = await self._extract_quote_content(
+                data_message,
+                chat_bucket,
+            )
             if quote_parts:
                 content_parts = quote_parts + content_parts
 
@@ -1087,6 +1111,67 @@ class SignalChannel(BaseChannel):
                 return True
         return False
 
+    @staticmethod
+    def _chat_bucket(group_id: str, peer: str) -> str:
+        """Canonical cache key for a Signal conversation.
+
+        Groups use ``g:<groupId>``.  DMs use ``dm:<peer>`` where *peer*
+        is whatever identifier we have for the other party — UUID
+        preferred, number as fallback.  Inbound and outbound code paths
+        must agree on which form of *peer* they pass in or the cache
+        won't round-trip (typical match: inbound uses
+        ``source or source_uuid``, outbound's ``to_handle`` for a DM is
+        derived from the same field on the original inbound).
+        """
+        if group_id:
+            return f"g:{group_id}"
+        return f"dm:{peer}" if peer else ""
+
+    def _record_inbound_media(
+        self,
+        chat_bucket: str,
+        msg_ts: int,
+        media: List[Dict[str, str]],
+    ) -> None:
+        """Cache local paths + content types for a message that may be
+        quoted later. ``media`` follows the same shape used by the
+        inbound handler (``{"path": str, "type": str}`` entries).
+        Skips entries whose file no longer exists so we never hand the
+        quote handler a dead path. FIFO eviction at
+        ``_inbound_media_limit``.
+        """
+        if not chat_bucket or not msg_ts:
+            return
+        live = [m for m in media if m.get("path") and os.path.isfile(m["path"])]
+        if not live:
+            return
+        key = (chat_bucket, int(msg_ts))
+        if key in self._inbound_media:
+            existing = self._inbound_media[key]
+            existing_paths = {m.get("path") for m in existing}
+            for m in live:
+                if m.get("path") not in existing_paths:
+                    existing.append(m)
+            return
+        self._inbound_media[key] = list(live)
+        self._inbound_media_order.append(key)
+        while len(self._inbound_media_order) > self._inbound_media_limit:
+            old = self._inbound_media_order.pop(0)
+            self._inbound_media.pop(old, None)
+
+    def _lookup_inbound_media(
+        self,
+        chat_bucket: str,
+        msg_ts: int,
+    ) -> List[Dict[str, str]]:
+        """Reverse-lookup. Returns only entries whose file still
+        exists on disk. Empty list on cache miss (or no paths survive).
+        """
+        if not chat_bucket or not msg_ts:
+            return []
+        entries = self._inbound_media.get((chat_bucket, int(msg_ts)), [])
+        return [m for m in entries if m.get("path") and os.path.isfile(m["path"])]
+
     def _remember_sender(
         self,
         source: str,
@@ -1278,6 +1363,7 @@ class SignalChannel(BaseChannel):
     async def _extract_quote_content(
         self,
         data_message: Dict[str, Any],
+        chat_bucket: str = "",
     ) -> List[Any]:
         quote = data_message.get("quote")
         if not quote:
@@ -1296,10 +1382,78 @@ class SignalChannel(BaseChannel):
                     m.get("name") or "",
                 )
             quote_text = self._expand_mentions(quote_text, quote_mentions)
-        quote_id = quote.get("id") or ""
+        quote_id_raw = quote.get("id")
+        quote_id = str(quote_id_raw) if quote_id_raw else ""
+        try:
+            quote_id_int = int(quote_id_raw) if quote_id_raw else 0
+        except (TypeError, ValueError):
+            quote_id_int = 0
 
-        quote_attachments = quote.get("attachments") or []
         media_labels: List[str] = []
+
+        # Cache hit path: Signal's quote envelope can't be re-downloaded
+        # (the per-attachment download key isn't echoed in
+        # ``quote.attachments``, and for the bot's own outbound the
+        # quote is referencing a message that never had an inbound
+        # signal-cli attachment id to begin with).  Mirror WhatsApp's
+        # _lookup_inbound_media pattern: if we already saved this
+        # message's media on disk, reuse those paths and skip the
+        # download loop entirely so the agent gets real files instead
+        # of a "Media: image/png" placeholder.
+        cached_media = (
+            self._lookup_inbound_media(chat_bucket, quote_id_int)
+            if quote_id_int
+            else []
+        )
+        quote_attachments = quote.get("attachments") or []
+        if cached_media:
+            for entry in cached_media:
+                local_path_str = entry["path"]
+                att_ct = entry.get("type") or ""
+                if not att_ct or att_ct == "application/octet-stream":
+                    try:
+                        with open(local_path_str, "rb") as _qf:
+                            detected = _detect_mime(_qf.read(16))
+                        if detected:
+                            att_ct = detected
+                    except Exception:
+                        pass
+                att_media_url = await resolve_media_url(local_path_str)
+                if att_ct.startswith("image/"):
+                    parts.append(
+                        ImageContent(
+                            type=ContentType.IMAGE,
+                            image_url=att_media_url,
+                        ),
+                    )
+                    media_labels.append(f"image: {local_path_str}")
+                elif att_ct.startswith("video/"):
+                    parts.append(
+                        VideoContent(
+                            type=ContentType.VIDEO,
+                            video_url=att_media_url,
+                        ),
+                    )
+                    media_labels.append(f"video: {local_path_str}")
+                elif att_ct.startswith("audio/"):
+                    parts.append(
+                        AudioContent(
+                            type=ContentType.AUDIO,
+                            data=att_media_url,
+                        ),
+                    )
+                    media_labels.append(f"audio: {local_path_str}")
+                else:
+                    parts.append(
+                        FileContent(
+                            type=ContentType.FILE,
+                            file_url=att_media_url,
+                        ),
+                    )
+                    media_labels.append(f"file: ({local_path_str})")
+            # Skip the fallback download loop — cache is authoritative.
+            quote_attachments = []
+
         for att in quote_attachments:
             att_ct = att.get("contentType") or ""
             att_fname = att.get("fileName") or ""
@@ -1541,7 +1695,7 @@ class SignalChannel(BaseChannel):
                     chunk.count("￼"),
                     len(self._uuid_prefix_lookup),
                 )
-            await self.client.send_message(
+            sent_ts = await self.client.send_message(
                 to_handle,
                 chunk,
                 is_group=is_group,
@@ -1551,6 +1705,20 @@ class SignalChannel(BaseChannel):
                 quote_timestamp=qt if i == 0 else 0,
                 quote_author=qa if i == 0 else "",
             )
+            if sent_ts and atts:
+                # Record the bot's own outbound media so that when the
+                # recipient quotes this message, ``_extract_quote_content``
+                # can resolve the original local paths instead of falling
+                # back to a "Media: image/png" stub (Signal's quote
+                # envelope can't be re-downloaded for outbound parents).
+                chat_bucket_out = (
+                    f"g:{to_handle}" if is_group else f"dm:{to_handle}"
+                )
+                self._record_inbound_media(
+                    chat_bucket_out,
+                    int(sent_ts),
+                    [{"path": p, "type": ""} for p in atts],
+                )
 
     async def send_media(
         self,
@@ -1593,12 +1761,27 @@ class SignalChannel(BaseChannel):
         if not file_path or not os.path.isfile(file_path):
             logger.warning("signal: media file not found: %s", file_path)
             return
-        await self.client.send_message(
+        sent_ts = await self.client.send_message(
             to_handle,
             "",
             is_group=is_group,
             attachments=[file_path],
         )
+        if sent_ts:
+            type_str = {
+                ContentType.IMAGE: "image/*",
+                ContentType.VIDEO: "video/*",
+                ContentType.AUDIO: "audio/*",
+                ContentType.FILE: "application/octet-stream",
+            }.get(t, "")
+            chat_bucket_out = (
+                f"g:{to_handle}" if is_group else f"dm:{to_handle}"
+            )
+            self._record_inbound_media(
+                chat_bucket_out,
+                int(sent_ts),
+                [{"path": file_path, "type": type_str}],
+            )
 
     async def send_reaction_to(
         self,
