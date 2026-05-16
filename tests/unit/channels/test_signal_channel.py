@@ -9,10 +9,13 @@ subprocess is spawned.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock
 
 import pytest
+
+from agentscope_runtime.engine.schemas.agent_schemas import ContentType
 
 from qwenpaw.app.channels.signal.channel import (
     SignalChannel,
@@ -1869,3 +1872,361 @@ def test_signal_timestamp_renders_in_local_tz():
     # Format: YYYY-MM-DD HH:MM <ZONE>
     assert "-04-" in out
     assert ":" in out
+
+
+# ───────────────────────────── quote cache (filename embedding) ──────
+
+
+def test_chat_bucket_uses_group_prefix_when_group_id_present() -> None:
+    assert SignalChannel._chat_bucket("GID==", "+852123") == "g:GID=="
+    assert SignalChannel._chat_bucket("", "+85298765432") == "dm:+85298765432"
+    assert SignalChannel._chat_bucket("", "") == ""
+
+
+def test_safe_bucket_token_sanitizes_filename_unsafe_chars() -> None:
+    # Group IDs are base64-ish and contain +/= ; phone numbers start
+    # with +.  The on-disk filename must round-trip through glob safely.
+    assert SignalChannel._safe_bucket_token("g:AAA/BBB+CCC==") == (
+        "g_AAA_BBB_CCC__"
+    )
+    assert SignalChannel._safe_bucket_token("dm:+85298765432") == (
+        "dm__85298765432"
+    )
+
+
+def test_guess_mime_prefers_extension_then_header(tmp_path) -> None:
+    jpg = tmp_path / "foo.jpg"
+    jpg.write_bytes(b"\xff\xd8\xff" + b"x" * 16)
+    assert SignalChannel._guess_mime(jpg) == "image/jpeg"
+
+    # No extension → falls through to header sniff.
+    noext = tmp_path / "noextfile"
+    noext.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 16)
+    assert SignalChannel._guess_mime(noext) == "image/png"
+
+
+def test_record_then_lookup_inbound_media_round_trip(tmp_path) -> None:
+    """Hard-link a source file into the embed-named slot, glob it back."""
+    ch = _make_channel()
+    ch._media_dir = tmp_path
+
+    src = tmp_path / "att-abc.jpg"
+    src.write_bytes(b"\xff\xd8\xff" + b"x" * 64)
+
+    bucket = "dm:+85298765432"
+    ts = 1_700_000_000_001
+
+    ch._record_inbound_media(
+        bucket,
+        ts,
+        [{"path": str(src), "type": "image/jpeg"}],
+    )
+
+    hits = ch._lookup_inbound_media(bucket, ts)
+    assert len(hits) == 1
+    assert "image/jpeg" in hits[0]["type"]
+    assert Path(hits[0]["path"]).is_file()
+    # Embedded filename encodes both bucket and timestamp.
+    assert f"sig_dm__85298765432_{ts}_" in hits[0]["path"]
+
+
+def test_lookup_inbound_media_survives_simulated_restart(tmp_path) -> None:
+    """The whole point of filename embedding: a new channel instance
+    with the same media_dir sees previously-embedded files via glob,
+    no in-memory state required."""
+    ch_a = _make_channel()
+    ch_a._media_dir = tmp_path
+    src = tmp_path / "live.jpg"
+    src.write_bytes(b"\xff\xd8\xff" + b"x" * 32)
+    bucket = "g:GID=="
+    ts = 1_700_000_001_234
+    ch_a._record_inbound_media(
+        bucket,
+        ts,
+        [{"path": str(src), "type": "image/jpeg"}],
+    )
+
+    # Fresh channel, same media_dir — no shared in-memory state.
+    ch_b = _make_channel()
+    ch_b._media_dir = tmp_path
+    hits = ch_b._lookup_inbound_media(bucket, ts)
+    assert len(hits) == 1
+    assert Path(hits[0]["path"]).is_file()
+
+
+def test_record_inbound_media_is_idempotent(tmp_path) -> None:
+    ch = _make_channel()
+    ch._media_dir = tmp_path
+    src = tmp_path / "dup.jpg"
+    src.write_bytes(b"\xff\xd8\xff" + b"x" * 16)
+    bucket = "dm:+85298765432"
+    ts = 42
+
+    for _ in range(3):
+        ch._record_inbound_media(
+            bucket,
+            ts,
+            [{"path": str(src), "type": "image/jpeg"}],
+        )
+
+    # Glob should still see exactly one embedded file (no _1 / _2 / etc.)
+    matches = list(tmp_path.glob(f"sig_dm__85298765432_{ts}_*"))
+    assert len(matches) == 1
+
+
+def test_lookup_returns_empty_when_bucket_or_ts_missing(tmp_path) -> None:
+    ch = _make_channel()
+    ch._media_dir = tmp_path
+    assert ch._lookup_inbound_media("", 123) == []
+    assert ch._lookup_inbound_media("dm:x", 0) == []
+
+
+async def test_extract_quote_uses_cached_path_when_available(tmp_path) -> None:
+    """Quote handler must short-circuit to the cache when an embedded
+    file exists for (bucket, quote.id) — this is the whole reason the
+    cache exists (signal-cli quotes can't be re-downloaded for bot's
+    own outbound)."""
+    ch = _make_channel()
+    ch._media_dir = tmp_path
+
+    bucket = "dm:+85298765432"
+    quote_ts = 1_778_916_478_789
+    src = tmp_path / "bot_image.jpg"
+    src.write_bytes(b"\xff\xd8\xff" + b"x" * 64)
+    ch._record_inbound_media(
+        bucket,
+        quote_ts,
+        [{"path": str(src), "type": "image/jpeg"}],
+    )
+
+    # download_attachment must NOT be called when cache hits.
+    ch.client.download_attachment = AsyncMock(
+        side_effect=AssertionError("cache hit should skip download"),
+    )
+
+    data_message = {
+        "quote": {
+            "text": "look at this",
+            "author": "+85298765432",
+            "id": quote_ts,
+            "attachments": [
+                {
+                    "contentType": "image/jpeg",
+                    "fileName": "bot_image.jpg",
+                    # No "id" — the bot's own outbound has no
+                    # download key, which is the entire reason
+                    # the cache exists.
+                },
+            ],
+        },
+    }
+
+    parts = await ch._extract_quote_content(data_message, bucket)
+    images = [p for p in parts if getattr(p, "type", None) == "image"]
+    assert len(images) == 1
+    text_block = next(p for p in parts if hasattr(p, "text"))
+    # Embedded filename, not the original src name.
+    assert "sig_dm__85298765432_" in text_block.text
+    assert "image:" in text_block.text
+
+
+# ───────────────────────────── send_content_parts override ──────────
+
+
+async def test_send_content_parts_routes_text_and_media_separately(
+    tmp_path,
+) -> None:
+    """The override exists to stop duplicate sending: with an
+    ImageContent + TextContent reply, base's default would have
+    appended ``[Image: <url>]`` to the body AND called send_media,
+    so the image went out twice (once as regex-extracted attachment,
+    once as native).  Our override sends one text msg + one media
+    msg, full stop."""
+    from agentscope_runtime.engine.schemas.agent_schemas import (
+        ImageContent as ImgC,
+        TextContent as TxtC,
+    )
+
+    ch = _make_channel()
+    ch.client.connected = True
+    ch._media_dir = tmp_path
+
+    img = tmp_path / "outbound.jpg"
+    img.write_bytes(b"\xff\xd8\xff" + b"x" * 32)
+
+    await ch.send_content_parts(
+        "+85298765432",
+        [
+            TxtC(type=ContentType.TEXT, text="here you go"),
+            ImgC(type=ContentType.IMAGE, image_url=str(img)),
+        ],
+    )
+
+    # Two send_message calls: one text (no [Image: ...] appended),
+    # one media-only attachment.
+    assert len(ch.client.sent) == 2
+    text_frame = ch.client.sent[0]
+    media_frame = ch.client.sent[1]
+    assert "[Image:" not in text_frame["text"]
+    assert text_frame["text"].strip() == "here you go"
+    assert not text_frame["attachments"]
+    assert media_frame["attachments"] == [str(img)]
+
+
+async def test_send_media_records_outbound_to_cache(tmp_path) -> None:
+    """After send_media, a later quote-lookup keyed on the returned
+    timestamp must find the embedded copy."""
+    from agentscope_runtime.engine.schemas.agent_schemas import (
+        ImageContent as ImgC,
+    )
+
+    ch = _make_channel()
+    ch.client.connected = True
+    ch._media_dir = tmp_path
+
+    img = tmp_path / "out.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
+
+    await ch.send_media(
+        "+85298765432",
+        ImgC(type=ContentType.IMAGE, image_url=str(img)),
+    )
+
+    sent_ts = 1_700_000_000  # FakeClient.send_message returns this.
+    hits = ch._lookup_inbound_media("dm:+85298765432", sent_ts)
+    assert len(hits) == 1
+    assert hits[0]["type"].startswith("image/")
+
+
+# ───────────────────────────── inbound + require_mention ─────────────
+
+
+async def test_require_mention_drop_still_caches_inbound_media(
+    tmp_path,
+) -> None:
+    """User's explicit ask: in a group with require_mention=True,
+    if Alice (allowed sender) sends an image without @-tagging the
+    bot, the bot must NOT process the message but MUST still embed
+    the file — so a later @-mentioned reply quoting Alice's image
+    resolves the local path."""
+    ch = _make_channel(require_mention=True, group_policy="open")
+    ch.client.connected = True
+    ch._media_dir = tmp_path
+    ch._enqueue = lambda _r: (_ for _ in ()).throw(
+        AssertionError("require_mention should not enqueue"),
+    )
+
+    # Fake the per-attachment download.
+    fake_path = tmp_path / "alice_img.jpg"
+    fake_path.write_bytes(b"\xff\xd8\xff" + b"x" * 64)
+    ch.client.download_attachment = AsyncMock(return_value=fake_path)
+
+    group_id = "GID=="
+    ts = 1_700_000_500
+    await ch._on_notification(
+        {
+            "envelope": {
+                "sourceNumber": "+85211111111",
+                "sourceName": "Alice",
+                "timestamp": ts,
+                "dataMessage": {
+                    "message": "no mention",
+                    "groupInfo": {"groupId": group_id},
+                    "attachments": [
+                        {"id": "att-x", "contentType": "image/jpeg"},
+                    ],
+                },
+            },
+        },
+    )
+
+    hits = ch._lookup_inbound_media(f"g:{group_id}", ts)
+    assert len(hits) == 1
+    assert Path(hits[0]["path"]).is_file()
+
+
+async def test_out_of_allowlist_group_does_not_cache(tmp_path) -> None:
+    """Defence: groups blocked by allowlist should NOT embed — we
+    don't keep evidence for conversations the bot has no business
+    processing."""
+    ch = _make_channel(
+        group_policy="allowlist",
+        groups=["OTHER_GID"],
+    )
+    ch.client.connected = True
+    ch._media_dir = tmp_path
+
+    fake = tmp_path / "blocked.jpg"
+    fake.write_bytes(b"\xff\xd8\xff" + b"x" * 32)
+    ch.client.download_attachment = AsyncMock(return_value=fake)
+
+    group_id = "GID=="
+    ts = 1_700_000_777
+    await ch._on_notification(
+        {
+            "envelope": {
+                "sourceNumber": "+85211111111",
+                "timestamp": ts,
+                "dataMessage": {
+                    "groupInfo": {"groupId": group_id},
+                    "attachments": [
+                        {"id": "att-y", "contentType": "image/jpeg"},
+                    ],
+                },
+            },
+        },
+    )
+
+    assert ch._lookup_inbound_media(f"g:{group_id}", ts) == []
+
+
+# ───────────────────────────── outbound→quote round-trip ─────────────
+
+
+async def test_outbound_image_then_inbound_quote_resolves_local_path(
+    tmp_path,
+) -> None:
+    """The headline scenario: bot sends image, user quotes it,
+    quote handler returns ImageContent with the embedded path.
+    This is what was previously surfacing as 'Media: image/jpeg'
+    with no path because signal-cli's quote envelope can't be
+    re-downloaded for outbound parents."""
+    from agentscope_runtime.engine.schemas.agent_schemas import (
+        ImageContent as ImgC,
+    )
+
+    ch = _make_channel()
+    ch.client.connected = True
+    ch._media_dir = tmp_path
+
+    # 1. Bot sends an image to a DM.
+    img = tmp_path / "kayan_out.jpg"
+    img.write_bytes(b"\xff\xd8\xff" + b"x" * 64)
+    await ch.send_media(
+        "+85298765432",
+        ImgC(type=ContentType.IMAGE, image_url=str(img)),
+    )
+    # FakeClient.send_message returned 1_700_000_000 — the user's
+    # quote.id should match.
+    sent_ts = 1_700_000_000
+
+    # 2. User replies, quoting the bot's image.
+    parts = await ch._extract_quote_content(
+        {
+            "quote": {
+                "text": "nice",
+                "author": "+85298765432",
+                "id": sent_ts,
+                "attachments": [
+                    {"contentType": "image/jpeg"},  # no id — bot outbound
+                ],
+            },
+        },
+        "dm:+85298765432",
+    )
+
+    images = [p for p in parts if getattr(p, "type", None) == "image"]
+    assert len(images) == 1
+    text = next(p.text for p in parts if hasattr(p, "text")).lower()
+    assert "image:" in text
+    assert "sig_dm__85298765432_" in text
