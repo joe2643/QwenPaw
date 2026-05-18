@@ -700,7 +700,6 @@ class SafeJSONSession(SessionBase):
         )
 
 
-
 def migrate_legacy_weixin_session_files(save_dir: str) -> None:
     """No-op stub kept for upstream call sites added in v1.1.6 #3605.
 

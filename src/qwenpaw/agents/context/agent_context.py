@@ -296,9 +296,7 @@ class AgentContext(InMemoryMemory):
             seen.add(msg.id)
         initial_size = len(self.content)
         self.content = [
-            (msg, marks)
-            for msg, marks in self.content
-            if msg.id not in seen
+            (msg, marks) for msg, marks in self.content if msg.id not in seen
         ]
         removed_count = initial_size - len(self.content)
         for msg_id in ordered_msg_ids:

@@ -89,7 +89,9 @@ def status_cmd() -> None:
     click.echo(f"base_url:   {auth.base_url}")
     click.echo(f"expires_in: {creds.seconds_until_expiry}s")
     last = (
-        json.loads(path.read_text()).get("last_refresh") if path.exists() else None
+        json.loads(path.read_text()).get("last_refresh")
+        if path.exists()
+        else None
     )
     if last:
         click.echo(f"last_refresh: {last}")

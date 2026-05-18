@@ -71,9 +71,13 @@ _STDOUT_LINE_LIMIT: int = 16 * 1024 * 1024
 # ``error: unknown option`` and rc=1 with no JSON output.  See smoke
 # test 2026-04-27 — first integration run surfaced this immediately.
 DEFAULT_ACPX_CMD: tuple[str, ...] = (
-    "npx", f"acpx@{_PINNED_ACPX_VERSION}",
-    "--format", "json", "--json-strict",
-    "claude", "exec",
+    "npx",
+    f"acpx@{_PINNED_ACPX_VERSION}",
+    "--format",
+    "json",
+    "--json-strict",
+    "claude",
+    "exec",
 )
 
 
@@ -146,13 +150,22 @@ def content_to_acp_blocks(content: Any) -> list[dict]:
                 out.append({"type": "text", "text": text})
         elif t in ("image_url", "input_image"):
             iu = item.get("image_url")
-            url = iu.get("url", "") if isinstance(iu, dict) else (str(iu) if iu else "")
+            url = (
+                iu.get("url", "")
+                if isinstance(iu, dict)
+                else (str(iu) if iu else "")
+            )
             if url.startswith("data:"):
                 # data:image/png;base64,XXXX → split header from payload
                 try:
                     header, b64 = url.split(",", 1)
-                    mime = header.split(";")[0].removeprefix("data:") or "image/png"
-                    out.append({"type": "image", "mimeType": mime, "data": b64})
+                    mime = (
+                        header.split(";")[0].removeprefix("data:")
+                        or "image/png"
+                    )
+                    out.append(
+                        {"type": "image", "mimeType": mime, "data": b64},
+                    )
                 except ValueError:
                     pass
             elif url:
@@ -160,11 +173,13 @@ def content_to_acp_blocks(content: Any) -> list[dict]:
         elif t == "image":
             source = item.get("source") or {}
             if source.get("type") == "base64":
-                out.append({
-                    "type": "image",
-                    "mimeType": source.get("media_type") or "image/png",
-                    "data": source.get("data", ""),
-                })
+                out.append(
+                    {
+                        "type": "image",
+                        "mimeType": source.get("media_type") or "image/png",
+                        "data": source.get("data", ""),
+                    },
+                )
             elif source.get("type") == "url" and source.get("url"):
                 out.append({"type": "resource_link", "uri": source["url"]})
     return out or [{"type": "text", "text": ""}]
@@ -261,10 +276,12 @@ def extract_tail_from_history(
         elif role == "tool":
             tcid = msg.get("tool_call_id", "")
             text = _plain(content)
-            blocks.append({
-                "type": "text",
-                "text": f"[tool-result tool_call_id={tcid}]\n{text}",
-            })
+            blocks.append(
+                {
+                    "type": "text",
+                    "text": f"[tool-result tool_call_id={tcid}]\n{text}",
+                },
+            )
         elif role == "assistant":
             # Expected: agentscope appends Claude's previous reply to
             # the message list between turns, so the next turn's
@@ -296,8 +313,10 @@ def _plain(content: Any) -> str:
                 # media_blocks_in_message`` has run. Surface it so
                 # Claude Code can Read on demand.
                 iu = item.get("image_url")
-                url = iu.get("url", "") if isinstance(iu, dict) else (
-                    str(iu) if iu else ""
+                url = (
+                    iu.get("url", "")
+                    if isinstance(iu, dict)
+                    else (str(iu) if iu else "")
                 )
                 if url and not url.startswith("data:"):
                     parts.append(_image_attach_marker(url, label="image"))
@@ -358,13 +377,19 @@ class StreamState:
         self.session_id: str | None = None
 
 
-def _chat_chunk(state: StreamState, delta: dict, finish_reason: str | None = None) -> dict:
+def _chat_chunk(
+    state: StreamState,
+    delta: dict,
+    finish_reason: str | None = None,
+) -> dict:
     return {
         "id": state.response_id,
         "object": "chat.completion.chunk",
         "created": state.created,
         "model": state.model,
-        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        "choices": [
+            {"index": 0, "delta": delta, "finish_reason": finish_reason},
+        ],
     }
 
 
@@ -465,9 +490,9 @@ async def translate_acp_updates_to_chat_chunks(
             # raise ``FunctionNotFoundError`` — there's no CoPaw-side
             # function to bind to (the work is done over reverse-RPC).
             # finish_reason therefore maps from ``stopReason`` only.
-            state.finish_reason = (
-                state.finish_reason
-                or _STOP_REASON_MAP.get(stop, "stop")
+            state.finish_reason = state.finish_reason or _STOP_REASON_MAP.get(
+                stop,
+                "stop",
             )
             break
 
@@ -559,7 +584,8 @@ async def translate_acp_updates_to_chat_chunks(
                             f"\n[claude-code: {tc['name']}({args_repr})]\n"
                         )
                         yield _chat_chunk(
-                            state, {"reasoning_content": preview},
+                            state,
+                            {"reasoning_content": preview},
                         )
                     elif status in _TERMINAL_TOOL_STATUSES:
                         # Tool reached a terminal state without ever
@@ -568,7 +594,8 @@ async def translate_acp_updates_to_chat_chunks(
                         tc["preview_emitted"] = True
                         preview = f"\n[claude-code: {tc['name']}({{}})]\n"
                         yield _chat_chunk(
-                            state, {"reasoning_content": preview},
+                            state,
+                            {"reasoning_content": preview},
                         )
                 if status == "failed":
                     logger.info("acpx: tool_call %s failed", tcid)
@@ -615,7 +642,9 @@ async def collect_as_chat_completion(
 
         err = msg.get("error")
         if isinstance(err, dict):
-            raise RuntimeError(f"acpx claude error: {err.get('message') or err}")
+            raise RuntimeError(
+                f"acpx claude error: {err.get('message') or err}",
+            )
 
         if msg.get("method") != "session/update":
             continue
@@ -687,11 +716,13 @@ async def collect_as_chat_completion(
         "object": "chat.completion",
         "created": state.created,
         "model": state.model,
-        "choices": [{
-            "index": 0,
-            "message": message,
-            "finish_reason": state.finish_reason or "stop",
-        }],
+        "choices": [
+            {
+                "index": 0,
+                "message": message,
+                "finish_reason": state.finish_reason or "stop",
+            },
+        ],
     }
 
 
@@ -789,13 +820,15 @@ def _sanitize_for_marker(value: str) -> str:
     return value.translate(_MARKER_TRANSLATE)
 
 
-_MARKER_TRANSLATE = str.maketrans({
-    "]": "_RBRACK_",
-    "\n": " ",
-    "\r": " ",
-    "\t": " ",
-    "\x00": "",
-})
+_MARKER_TRANSLATE = str.maketrans(
+    {
+        "]": "_RBRACK_",
+        "\n": " ",
+        "\r": " ",
+        "\t": " ",
+        "\x00": "",
+    },
+)
 
 
 # Per-process cache for base64-image spills. Keyed by SHA-256 of the

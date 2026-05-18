@@ -244,6 +244,7 @@ async def post_console_chat(
         if queue is None:
             return
     elif _is_immediate_console_control_command(native_payload):
+
         async def control_event_generator() -> AsyncGenerator[str, None]:
             try:
                 async for event_data in console_channel.stream_one(

@@ -281,9 +281,7 @@ _BROWSER_IDLE_TIMEOUT = 600.0
 # Healthy Linux installs that DO close cleanly still finish in <200ms.
 # Other platforms keep the longer budget because their close paths
 # usually work.
-_BROWSER_CLOSE_TIMEOUT = (
-    0.5 if sys.platform.startswith("linux") else 2.0
-)
+_BROWSER_CLOSE_TIMEOUT = 0.5 if sys.platform.startswith("linux") else 2.0
 
 # Per-signal wait when killing a Chromium PID tree.  SIGTERM gets
 # ``_KILL_WAIT_S`` to drain, then SIGKILL gets the same.  Bounded so a
@@ -323,9 +321,7 @@ def _capture_chromium_pids(
     me = psutil.Process(os.getpid())
     matched: list[int] = []
     fallback: list[int] = []
-    needle = (
-        f"--user-data-dir={user_data_dir}" if user_data_dir else ""
-    )
+    needle = f"--user-data-dir={user_data_dir}" if user_data_dir else ""
     try:
         descendants = me.children(recursive=True)
     except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -1509,8 +1505,10 @@ async def _action_stop(state: dict) -> ToolResponse:
     _reset_browser_state(state)
 
     label = (
-        f"cdp-stop pid={pid}" if is_cdp
-        else "sync-stop" if is_sync
+        f"cdp-stop pid={pid}"
+        if is_cdp
+        else "sync-stop"
+        if is_sync
         else "pw-stop"
     )
 
@@ -1698,9 +1696,14 @@ async def _safe_goto(page, url: str, label: str) -> tuple[bool, str]:
                 ready_state = await page.evaluate("document.readyState")
         except Exception:
             pass
-        if cur_url and cur_url != pre_url and ready_state in (
-            "interactive",
-            "complete",
+        if (
+            cur_url
+            and cur_url != pre_url
+            and ready_state
+            in (
+                "interactive",
+                "complete",
+            )
         ):
             warn = (
                 f"{label}: page committed (readyState={ready_state}) "

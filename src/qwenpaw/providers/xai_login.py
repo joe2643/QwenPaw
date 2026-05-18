@@ -62,7 +62,9 @@ LOOPBACK_REDIRECT_URI = f"http://{LOOPBACK_HOST}:{LOOPBACK_PORT}/callback"
 
 # Hermes ships a generic scope set covering chat + image + video + TTS.
 # ``offline_access`` is what gets us the refresh_token.
-XAI_OAUTH_SCOPE = "openid profile email offline_access grok-cli:access api:access"
+XAI_OAUTH_SCOPE = (
+    "openid profile email offline_access grok-cli:access api:access"
+)
 
 # Default callback wait window — the user has 5 minutes to complete
 # the consent screen before we give up and the local server shuts down.
@@ -70,7 +72,11 @@ CALLBACK_TIMEOUT_S = 300
 
 
 def _pkce_verifier() -> str:
-    return base64.urlsafe_b64encode(secrets.token_bytes(96)).rstrip(b"=").decode("ascii")
+    return (
+        base64.urlsafe_b64encode(secrets.token_bytes(96))
+        .rstrip(b"=")
+        .decode("ascii")
+    )
 
 
 def _pkce_challenge(verifier: str) -> str:
@@ -95,7 +101,11 @@ async def _discover(timeout: float = 15.0) -> dict[str, str]:
     # would otherwise steer the user's browser to a phishing host.
     for label, ep in (("authorization", authorize), ("token", token)):
         parsed = urllib.parse.urlparse(ep)
-        if parsed.scheme != "https" or not parsed.hostname or not parsed.hostname.endswith(".x.ai"):
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or not parsed.hostname.endswith(".x.ai")
+        ):
             raise RuntimeError(
                 f"xAI OIDC {label}_endpoint refused: not https on .x.ai ({ep})",
             )
@@ -109,7 +119,11 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
     result_holder: dict[str, Any] = {}
     expected_state: str = ""
 
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+    def log_message(  # pylint: disable=redefined-builtin
+        self,
+        format: str,  # noqa: A002
+        *args: Any,
+    ) -> None:
         # Suppress default stderr access logs — they'd leak the auth
         # code (which is in the query string) to journalctl.
         logger.debug("xai-loopback: " + format, *args)
@@ -121,9 +135,9 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
         params = urllib.parse.parse_qs(parsed.query)
-        code = (params.get("code") or [None])[0]
-        state = (params.get("state") or [None])[0]
-        error = (params.get("error") or [None])[0]
+        code: str | None = (params.get("code") or [""])[0] or None
+        state: str | None = (params.get("state") or [""])[0] or None
+        error: str | None = (params.get("error") or [""])[0] or None
 
         body = b"<html><body><h1>xAI login complete</h1><p>You can close this tab.</p></body></html>"
         if error:
@@ -138,9 +152,9 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
             # CSRF defense — never trust a code that arrives without
             # the state value we issued, even if the user appears to
             # be the only person hitting loopback.
-            self.result_holder["error"] = (
-                f"State mismatch (got {state!r}, expected {self.expected_state!r})"
-            )
+            self.result_holder[
+                "error"
+            ] = f"State mismatch (got {state!r}, expected {self.expected_state!r})"
         else:
             self.result_holder["code"] = code
 
@@ -151,7 +165,9 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def _start_callback_server(state: str) -> tuple[socketserver.TCPServer, dict[str, Any]]:
+def _start_callback_server(
+    state: str,
+) -> tuple[socketserver.TCPServer, dict[str, Any]]:
     result_holder: dict[str, Any] = {}
 
     class _Handler(_CallbackHandler):
@@ -161,7 +177,10 @@ def _start_callback_server(state: str) -> tuple[socketserver.TCPServer, dict[str
     _Handler.expected_state = state
 
     try:
-        server = socketserver.TCPServer((LOOPBACK_HOST, LOOPBACK_PORT), _Handler)
+        server = socketserver.TCPServer(
+            (LOOPBACK_HOST, LOOPBACK_PORT),
+            _Handler,
+        )
     except OSError as exc:
         raise RuntimeError(
             f"Could not bind {LOOPBACK_HOST}:{LOOPBACK_PORT} for xAI loopback "
@@ -300,7 +319,9 @@ async def run_loopback_login(
         + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
     )
 
-    print(f"\nOpen this URL in your browser to sign in to xAI:\n\n  {authorize_url}\n")
+    print(
+        f"\nOpen this URL in your browser to sign in to xAI:\n\n  {authorize_url}\n",
+    )
     if open_browser:
         try:
             webbrowser.open(authorize_url)

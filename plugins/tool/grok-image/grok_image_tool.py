@@ -129,8 +129,8 @@ async def generate_image_grok(
 
         model = (cfg.get("model") or DEFAULT_MODEL).strip()
         endpoint = (
-            (cfg.get("endpoint") or "").strip() or DEFAULT_ENDPOINT_GENERATE
-        )
+            cfg.get("endpoint") or ""
+        ).strip() or DEFAULT_ENDPOINT_GENERATE
         timeout = _coerce_timeout(cfg.get("timeout"))
 
         bearer, source = await _resolve_bearer(cfg)
@@ -228,9 +228,7 @@ async def edit_image_grok(
 
         cfg = _get_tool_config("edit_image_grok") or {}
         model = (cfg.get("model") or DEFAULT_MODEL).strip()
-        endpoint = (
-            (cfg.get("endpoint") or "").strip() or DEFAULT_ENDPOINT_EDIT
-        )
+        endpoint = (cfg.get("endpoint") or "").strip() or DEFAULT_ENDPOINT_EDIT
         timeout = _coerce_timeout(cfg.get("timeout"))
 
         bearer, source = await _resolve_bearer(cfg)
@@ -329,8 +327,9 @@ def _to_image_payload(src: str) -> dict:
     size = path.stat().st_size
     if size > _MAX_LOCAL_IMAGE_BYTES:
         raise _SourceImageError(
-            f"image {path} is {size/1024/1024:.1f} MB; cap is "
-            f"{_MAX_LOCAL_IMAGE_BYTES/1024/1024:.0f} MB for inline upload — "
+            f"image {path} is {size / 1024 / 1024:.1f} MB; cap is "
+            f"{_MAX_LOCAL_IMAGE_BYTES / 1024 / 1024:.0f} MB "
+            f"for inline upload — "
             f"resize before retrying.",
         )
 

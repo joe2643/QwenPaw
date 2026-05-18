@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """End-to-end probe of the steer pipeline using the real production code.
 
 What this exercises:
@@ -46,9 +47,7 @@ class _FakeAgent:
     # Bind the real method off QwenPawAgent so we test the production logic.
     from qwenpaw.agents.react_agent import QwenPawAgent  # noqa: E402
 
-    _drain_pending_steer_messages = (
-        QwenPawAgent._drain_pending_steer_messages
-    )
+    _drain_pending_steer_messages = QwenPawAgent._drain_pending_steer_messages
 
 
 def _print(label: str, **fields: Any) -> None:
@@ -74,7 +73,9 @@ async def main() -> int:
 
     # 1) Start a run (simulates first user message hitting attach_or_start)
     queue, is_new = await tracker.attach_or_start(
-        chat_id, {"text": "first message"}, fake_stream,
+        chat_id,
+        {"text": "first message"},
+        fake_stream,
     )
     assert is_new is True, "attach_or_start should report a new run"
     _print(
@@ -100,9 +101,7 @@ async def main() -> int:
         "step3.drain",
         drained_count=len(drained),
         memory_added_count=len(agent.memory.added),
-        first_text=(
-            drained[0].get_text_content() if drained else "<empty>"
-        ),
+        first_text=(drained[0].get_text_content() if drained else "<empty>"),
     )
     if len(drained) != 1:
         failures.append(
@@ -134,7 +133,8 @@ async def main() -> int:
 
     # 6) After run finishes, enqueue should refuse (no active run)
     refused_q = await tracker.enqueue_pending_input(
-        chat_id, Msg("user", "too late", "user"),
+        chat_id,
+        Msg("user", "too late", "user"),
     )
     _print("step6.no_run_refusal", returned_none=refused_q is None)
     if refused_q is not None:

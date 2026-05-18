@@ -236,7 +236,9 @@ def _model_short(model: str) -> str:
         if fam in m:
             # Pull the first numeric token after the family name.
             tail = m.split(fam, 1)[1].lstrip("-")
-            digits = "".join(c if c.isdigit() or c == "." else "-" for c in tail).strip("-")
+            digits = "".join(
+                c if c.isdigit() or c == "." else "-" for c in tail
+            ).strip("-")
             return f"{prefix}{digits.replace('-', '.')[:6]}"
     return m[:6]
 
@@ -529,7 +531,11 @@ class Registry:
         try:
             await self._tear_down(name)
         except Exception as e:  # noqa: BLE001
-            logger.warning("acpx registry: deferred tear_down(%s) failed: %s", name, e)
+            logger.warning(
+                "acpx registry: deferred tear_down(%s) failed: %s",
+                name,
+                e,
+            )
 
     def _spawn_tear_down(self, session_name: str) -> None:
         """Fire-and-forget ``_tear_down_safe`` with strong-ref retention.

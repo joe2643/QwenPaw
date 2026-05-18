@@ -96,7 +96,9 @@ def _is_streaming_platform_url(url: str) -> bool:
         return False
     host = (parsed.hostname or "").lower()
     full = (parsed.hostname or "") + (parsed.path or "")
-    return any(hint in host or hint in full for hint in _STREAMING_PLATFORM_HOST_HINTS)
+    return any(
+        hint in host or hint in full for hint in _STREAMING_PLATFORM_HOST_HINTS
+    )
 
 
 def _streaming_platform_error(url: str, media_type: str) -> ToolResponse:
@@ -403,7 +405,9 @@ async def _transcode_animated_webp_to_apng(src_path: str) -> str | None:
     try:
         from PIL import Image, ImageSequence
     except ImportError:
-        logger.warning("view_image: Pillow not available — cannot transcode webp")
+        logger.warning(
+            "view_image: Pillow not available — cannot transcode webp",
+        )
         return None
 
     if not src_path or not os.path.exists(src_path):
@@ -416,7 +420,10 @@ async def _transcode_animated_webp_to_apng(src_path: str) -> str | None:
     p = Path(src_path)
     out = p.with_name(p.stem + ".apng")
     if out.exists() and out.stat().st_size > 0:
-        logger.debug("view_image: reusing existing webp→apng transcode %s", out)
+        logger.debug(
+            "view_image: reusing existing webp→apng transcode %s",
+            out,
+        )
         return str(out)
 
     def _do_transcode() -> str | None:

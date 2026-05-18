@@ -274,9 +274,7 @@ class ClaudeAcpxStatus(BaseModel):
     )
     claude_credentials_present: bool = Field(
         ...,
-        description=(
-            "Whether ~/.claude/.credentials.json exists and decoded"
-        ),
+        description=("Whether ~/.claude/.credentials.json exists and decoded"),
     )
     credentials_path: str = Field(
         ...,
@@ -288,9 +286,7 @@ class ClaudeAcpxStatus(BaseModel):
     )
     error: Optional[str] = Field(
         None,
-        description=(
-            "Reason either check could not be completed, if any"
-        ),
+        description=("Reason either check could not be completed, if any"),
     )
 
 
@@ -509,9 +505,13 @@ async def claude_acpx_test_connection() -> ClaudeAcpxStatus:
             else:
                 err_txt = (stderr or stdout).decode("utf-8", "replace").strip()
                 cli_error = (
-                    f"npx acpx --version failed (exit {proc.returncode}): "
-                    f"{err_txt[:200]}"
-                ) if err_txt else f"npx acpx --version exit {proc.returncode}"
+                    (
+                        f"npx acpx --version failed (exit {proc.returncode}): "
+                        f"{err_txt[:200]}"
+                    )
+                    if err_txt
+                    else f"npx acpx --version exit {proc.returncode}"
+                )
     except FileNotFoundError:
         # ``npx`` itself is missing — tell the user to install Node.
         cli_error = (

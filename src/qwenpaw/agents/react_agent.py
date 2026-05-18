@@ -337,8 +337,10 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                 False,
             ),
         )
-        signal_tools_allowed = (
-            allow_cross_channel or active_channel in ("", "console", "signal")
+        signal_tools_allowed = allow_cross_channel or active_channel in (
+            "",
+            "console",
+            "signal",
         )
 
         # Track hardcoded built-in tools for backward compatibility
@@ -1100,7 +1102,7 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
         if not callable(drain):
             return []
 
-        pending_items = await drain(chat_id)
+        pending_items = await drain(chat_id)  # pylint: disable=not-callable
         if not pending_items:
             return []
 
@@ -1109,7 +1111,9 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
             if isinstance(item, Msg):
                 pending_msgs.append(item)
             elif isinstance(item, list):
-                pending_msgs.extend([msg for msg in item if isinstance(msg, Msg)])
+                pending_msgs.extend(
+                    [msg for msg in item if isinstance(msg, Msg)],
+                )
             elif item is not None:
                 pending_msgs.append(Msg("user", str(item), "user"))
 
@@ -1327,9 +1331,7 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
         safe_sid = sanitize_filename(session_id)
         safe_uid = sanitize_filename(user_id) if user_id else ""
         fname = (
-            f"{safe_uid}_{safe_sid}.json"
-            if safe_uid
-            else f"{safe_sid}.json"
+            f"{safe_uid}_{safe_sid}.json" if safe_uid else f"{safe_sid}.json"
         )
         sessions_dir = Path(workspace) / "sessions"
         if channel:
@@ -1516,7 +1518,6 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
             nb._plan_text_only_after_mutation = False
             tool_choice = "none"
 
-
         # --- Proactive filtering layer ---
         should_strip = (
             not get_active_model_supports_multimodal()
@@ -1570,7 +1571,9 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                         e,
                     )
                     msg = await super()._reasoning(tool_choice=tool_choice)
-                    if model_key and not self._is_format_specific_media_error(e):
+                    if model_key and not self._is_format_specific_media_error(
+                        e,
+                    ):
                         get_capability_cache().learn(
                             model_key,
                             "rejects_media",
@@ -1720,10 +1723,7 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
     # Kept short and actionable so channels with strict character limits
     # (e.g. SMS-style fallbacks) still render the whole thing.
     _CONTEXT_EXCEEDED_TEXT = {
-        "zh": (
-            "對話歷史已超出模型上下文窗口，無法繼續推理。"
-            "請輸入 /new 開新對話，或 /compact 壓縮現有歷史後再試。"
-        ),
+        "zh": ("對話歷史已超出模型上下文窗口，無法繼續推理。" "請輸入 /new 開新對話，或 /compact 壓縮現有歷史後再試。"),
         "en": (
             "The conversation has exceeded the model's context window. "
             "Please send /new to start a fresh chat, or /compact to "
@@ -1757,7 +1757,9 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
         3. Return it for the ReAct loop to use as ``reply_msg`` — no
            tool_use → the loop exits naturally.
         """
-        from agentscope.message import TextBlock  # local: avoid cycle on import
+        from agentscope.message import (
+            TextBlock,
+        )  # local: avoid cycle on import
 
         lang = (self._language or "en").lower()
         text = self._CONTEXT_EXCEEDED_TEXT.get(
@@ -1808,7 +1810,11 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
             msg = None
 
         if msg is None:
-            msg = Msg(self.name, [TextBlock(type="text", text=text)], "assistant")
+            msg = Msg(
+                self.name,
+                [TextBlock(type="text", text=text)],
+                "assistant",
+            )
             try:
                 await self.memory.add(msg)
             except Exception:  # pylint: disable=broad-exception-caught
@@ -1897,8 +1903,11 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
                             e,
                         )
                         msg = await super()._summarizing()
-                        if model_key and not self._is_format_specific_media_error(
-                            e,
+                        if (
+                            model_key
+                            and not self._is_format_specific_media_error(
+                                e,
+                            )
                         ):
                             get_capability_cache().learn(
                                 model_key,

@@ -127,7 +127,11 @@ repos:
           --disable=R0915,  # too-many-statements: same
           --disable=R0911,  # too-many-return-statements: same
           --disable=R0904,  # too-many-public-methods: same
-          --disable=R0917,  # too-many-positional-arguments: same
+          # R0917 (too-many-positional-arguments) is a pylint 3.x
+          # message; the CI runner pins an older pylint that doesn't
+          # know the symbol and emits W0012 (unknown-option-value)
+          # when we try to disable it.  Re-add once the runner is on
+          # pylint >= 3.0.
           --disable=R0916,  # too-many-boolean-expressions: same
           --disable=R1702,  # too-many-nested-blocks: same
           --disable=W0613,  # unused-argument: common in mock signatures and base classes

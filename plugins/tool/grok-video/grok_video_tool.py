@@ -103,7 +103,7 @@ async def generate_video_grok(
                 if isinstance(cfg_dur, (int, float)) and cfg_dur > 0
                 else DEFAULT_DURATION_S
             )
-        if not (1 <= effective_duration <= 15):
+        if not 1 <= effective_duration <= 15:
             return _text_error(
                 f"duration must be 1-15 seconds (got {effective_duration})",
             )

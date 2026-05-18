@@ -18,7 +18,7 @@ from typing import Any, Optional, TYPE_CHECKING
 from ..config.config import load_agent_config
 
 if TYPE_CHECKING:
-    from ..config.config import HeartbeatConfig
+    from ..config.config import ChannelConfig, HeartbeatConfig
     from .workspace.workspace import Workspace
 
 logger = logging.getLogger(__name__)
@@ -145,7 +145,7 @@ class AgentConfigWatcher:
             self._last_heartbeat_hash = None
 
     @staticmethod
-    def _channels_hash(channels: ChannelConfig) -> int:
+    def _channels_hash(channels: "ChannelConfig") -> int:
         """Fast hash of channels section for quick change detection."""
         return hash(str(channels.model_dump(mode="json")))
 
@@ -164,7 +164,7 @@ class AgentConfigWatcher:
         self,
         name: str,
         new_ch: Any,
-        new_channels: ChannelConfig,
+        new_channels: "ChannelConfig",
         old_ch: Any,
     ) -> None:
         """Reload a single channel; on failure revert new_channels entry."""

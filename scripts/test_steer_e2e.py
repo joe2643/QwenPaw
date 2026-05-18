@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """End-to-end steer-mode probe against the live qwenpaw server.
 
 Runs N rounds. For each round:
@@ -67,7 +68,10 @@ def _stream_text_acc(line: str, sink: dict[str, str]) -> None:
     _walk(evt)
 
 
-async def _drain_stream(client: httpx.AsyncClient, body: dict[str, Any]) -> str:
+async def _drain_stream(
+    client: httpx.AsyncClient,
+    body: dict[str, Any],
+) -> str:
     """POST /console/chat and return the concatenated text payload of all SSE events."""
     sink = {"full": ""}
     async with client.stream(
@@ -89,7 +93,10 @@ async def _post_steer(client: httpx.AsyncClient, body: dict[str, Any]) -> int:
         async with client.stream(
             "POST",
             f"{BASE_URL}/api/console/chat",
-            headers={"X-Agent-Id": AGENT_ID, "Content-Type": "application/json"},
+            headers={
+                "X-Agent-Id": AGENT_ID,
+                "Content-Type": "application/json",
+            },
             json=body,
             timeout=httpx.Timeout(60.0, connect=5.0),
         ) as r:
@@ -105,8 +112,14 @@ async def _post_steer(client: httpx.AsyncClient, body: dict[str, Any]) -> int:
         return -1
 
 
-async def run_round(round_idx: int, secret: str, delay: float) -> dict[str, Any]:
-    session_id = f"steer-probe-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
+async def run_round(
+    round_idx: int,
+    secret: str,
+    delay: float,
+) -> dict[str, Any]:
+    session_id = (
+        f"steer-probe-{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
+    )
     base_prompt = (
         "Please think out loud step by step over multiple paragraphs. "
         "Take your time. Slowly count from 1 up to 5, with one paragraph "
@@ -175,10 +188,12 @@ async def main() -> int:
         print()
         await asyncio.sleep(2.0)
 
-    summary = {
+    summary: dict[str, Any] = {
         "total": len(results),
         "found_secret_count": sum(1 for r in results if r.get("found_secret")),
-        "found_count_5_count": sum(1 for r in results if r.get("found_count_5")),
+        "found_count_5_count": sum(
+            1 for r in results if r.get("found_count_5")
+        ),
         "errors": [r for r in results if "error" in r],
     }
     print("=== SUMMARY ===")
@@ -187,7 +202,7 @@ async def main() -> int:
     if summary["found_secret_count"] >= 1:
         print(
             f"PASS — steer affected {summary['found_secret_count']}/"
-            f"{summary['total']} runs."
+            f"{summary['total']} runs.",
         )
         return 0
     print("FAIL — steer text never appeared in any run's output.")

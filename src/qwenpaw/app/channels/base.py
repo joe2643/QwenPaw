@@ -614,7 +614,8 @@ class BaseChannel(ABC):
                         steer_queue,
                     )
                     log_kind = (
-                        "race-recovered inject" if attempt > 0
+                        "race-recovered inject"
+                        if attempt > 0
                         else "injected into active run"
                     )
                     logger.info(

@@ -842,9 +842,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
                     "- 關閉: /listen off"
                 ),
                 "disabled": (
-                    "**已停用 Listen 模式**\n\n"
-                    "- 目標: {key}\n"
-                    "- 已停止觀察呢個 chat。"
+                    "**已停用 Listen 模式**\n\n" "- 目標: {key}\n" "- 已停止觀察呢個 chat。"
                 ),
                 "status_active": (
                     "**Listen 模式** — 正監聽 {key}，每 {minutes} 分鐘 tick 一次。"

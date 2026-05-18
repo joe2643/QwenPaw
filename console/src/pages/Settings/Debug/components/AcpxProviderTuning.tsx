@@ -37,7 +37,9 @@ export function AcpxProviderTuning() {
         message.error(
           t(
             "debug.acpx.loadError",
-            `Failed to load acpx config: ${err instanceof Error ? err.message : String(err)}`,
+            `Failed to load acpx config: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
           ),
         );
       } finally {

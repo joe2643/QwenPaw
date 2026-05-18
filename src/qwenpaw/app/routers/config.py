@@ -708,10 +708,14 @@ async def put_acpx_provider_config(
 
     config = load_config()
     current = config.acpx_provider.model_dump()
-    merged = {**current, **{
-        k: v for k, v in body.items()
-        if k in ("turn_timeout_seconds", "terminal_wait_seconds")
-    }}
+    merged = {
+        **current,
+        **{
+            k: v
+            for k, v in body.items()
+            if k in ("turn_timeout_seconds", "terminal_wait_seconds")
+        },
+    }
     try:
         config.acpx_provider = AcpxProviderConfig(**merged)
     except Exception as e:  # noqa: BLE001 — pydantic ValidationError

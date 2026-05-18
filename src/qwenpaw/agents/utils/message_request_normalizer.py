@@ -354,7 +354,10 @@ def _strip_historical_media_blocks_in_place(msgs: list[Msg]) -> int:
         new_content: list = []
         replaced_this_message = 0
         for block in msg.content:
-            if isinstance(block, dict) and block.get("type") in _MEDIA_BLOCK_TYPES:
+            if (
+                isinstance(block, dict)
+                and block.get("type") in _MEDIA_BLOCK_TYPES
+            ):
                 new_content.append(
                     _historical_media_placeholder(
                         block["type"],
@@ -439,7 +442,10 @@ def _strip_media_blocks_in_place(
                 and block.get("type") == "tool_result"
                 and isinstance(block.get("output"), list)
             ):
-                new_output, local_stripped = _replace_media_in_tool_result_output(
+                (
+                    new_output,
+                    local_stripped,
+                ) = _replace_media_in_tool_result_output(
                     block["output"],
                     historical=False,
                     support=support,

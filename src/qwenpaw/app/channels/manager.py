@@ -878,7 +878,7 @@ class ChannelManager:
                     target = ch
                     target_index = i
                     break
-            if target is None:
+            if target is None or target_index is None:
                 return False
             self.channels.pop(target_index)
 

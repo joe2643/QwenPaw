@@ -95,7 +95,7 @@ def _parse_session_id(session_id: str) -> Optional[Tuple[str, str]]:
     if not rest:
         return None
     if rest.startswith("group:"):
-        rest = rest[len("group:"):]
+        rest = rest[len("group:") :]
     rest = rest.strip()
     if not rest:
         return None

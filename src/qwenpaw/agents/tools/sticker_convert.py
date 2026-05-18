@@ -87,16 +87,16 @@ _APNG_MAX_FPS = 30
 # the file size while keeping animation length constant (neighbour
 # durations get coalesced — see ``_encode_until_fits_apng``).
 _APNG_LADDER: tuple[tuple[str, int | None, int], ...] = (
-    ("RGBA",     None, 1),  # full fidelity, all frames
-    ("RGBA",     None, 2),  # half frames, still no palette
-    ("P_SHARED", 256,  1),  # shared 256-colour palette, all frames
-    ("P_SHARED", 128,  1),
-    ("P_SHARED", 64,   1),
-    ("P_SHARED", 64,   2),
-    ("P_SHARED", 32,   2),
-    ("P_SHARED", 32,   3),
-    ("P_SHARED", 16,   3),
-    ("P_SHARED", 16,   4),
+    ("RGBA", None, 1),  # full fidelity, all frames
+    ("RGBA", None, 2),  # half frames, still no palette
+    ("P_SHARED", 256, 1),  # shared 256-colour palette, all frames
+    ("P_SHARED", 128, 1),
+    ("P_SHARED", 64, 1),
+    ("P_SHARED", 64, 2),
+    ("P_SHARED", 32, 2),
+    ("P_SHARED", 32, 3),
+    ("P_SHARED", 16, 3),
+    ("P_SHARED", 16, 4),
 )
 
 StickerFormat = Literal["png", "webp"]
@@ -197,7 +197,9 @@ def prepare_sticker_webp(
     if frames_with_durations is not None:
         # Animated APNG path.  Each frame is letterboxed to
         # _SIZE×_SIZE; the ladder encoder handles the 300 KB cap.
-        canvases = [_letterbox_rgba(f, _SIZE) for f, _ in frames_with_durations]
+        canvases = [
+            _letterbox_rgba(f, _SIZE) for f, _ in frames_with_durations
+        ]
         durations = [d for _, d in frames_with_durations]
         canvases, durations = _enforce_duration_and_fps(canvases, durations)
         final_size = _encode_until_fits_apng(canvases, durations, out_path)

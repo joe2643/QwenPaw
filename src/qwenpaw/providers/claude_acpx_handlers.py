@@ -591,7 +591,10 @@ class AcpxTerminalHandlers:
 
     # ----- Internal helpers ---------------------------------------- #
 
-    async def _require_terminal(self, params: dict[str, Any]) -> _TerminalSession:
+    async def _require_terminal(
+        self,
+        params: dict[str, Any],
+    ) -> _TerminalSession:
         terminal_id = params.get("terminalId")
         if not isinstance(terminal_id, str):
             raise AcpxHandlerError(
@@ -665,7 +668,10 @@ class AcpxPermissionHandler:
     here.
     """
 
-    async def request_permission(self, params: dict[str, Any]) -> dict[str, Any]:
+    async def request_permission(
+        self,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
         options = params.get("options") or []
         if not isinstance(options, list) or not options:
             # No options offered — ACP spec says we still must respond;

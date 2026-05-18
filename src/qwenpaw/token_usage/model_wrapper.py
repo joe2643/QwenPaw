@@ -102,7 +102,9 @@ def _dump_wire_shape(
             os.makedirs(dump_dir, exist_ok=True)
             ts = time.strftime("%Y%m%d-%H%M%S")
             slug = uuid.uuid4().hex[:8]
-            path = f"{dump_dir}/{ts}-{provider_id.replace('/', '_')}-{slug}.json"
+            path = (
+                f"{dump_dir}/{ts}-{provider_id.replace('/', '_')}-{slug}.json"
+            )
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(
                     {
@@ -115,7 +117,12 @@ def _dump_wire_shape(
                     ensure_ascii=False,
                     indent=2,
                 )
-            logger.info("wire-dump-full[%s/%s] → %s", provider_id, model_name, path)
+            logger.info(
+                "wire-dump-full[%s/%s] → %s",
+                provider_id,
+                model_name,
+                path,
+            )
         except Exception as e:  # pragma: no cover
             logger.debug("wire-dump-full failed: %s", e)
 

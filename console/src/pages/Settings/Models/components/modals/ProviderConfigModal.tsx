@@ -883,11 +883,6 @@ export function ProviderConfigModal({
     return t("models.enterApiKeyOptional");
   }, [provider.api_key, provider.api_key_prefix, t]);
 
-  const apiKeyLabel =
-    isAnthropicProvider && authMode === "auth_token"
-      ? t("models.authModeAuthToken")
-      : t("models.apiKey");
-
   const baseUrlExtra = useMemo(() => {
     if (!canEditBaseUrl) {
       return undefined;

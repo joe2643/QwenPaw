@@ -92,7 +92,10 @@ async def is_chat_busy(
                 # group chats).  Channel mismatch is a hard reject.
                 if channel and getattr(chat, "channel", "") != channel:
                     continue
-                if session_id and getattr(chat, "session_id", "") == session_id:
+                if (
+                    session_id
+                    and getattr(chat, "session_id", "") == session_id
+                ):
                     candidate_run_keys.add(chat.id)
                     continue
                 if user_id and getattr(chat, "user_id", "") == user_id:

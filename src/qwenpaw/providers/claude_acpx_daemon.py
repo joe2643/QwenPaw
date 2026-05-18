@@ -445,10 +445,7 @@ class AcpxDaemon:
             if proc is not None:
                 # Close stdin now (defensive — acpx is already done).
                 try:
-                    if (
-                        proc.stdin is not None
-                        and not proc.stdin.is_closing()
-                    ):
+                    if proc.stdin is not None and not proc.stdin.is_closing():
                         proc.stdin.close()
                 except Exception:  # noqa: BLE001
                     pass
@@ -757,16 +754,14 @@ class AcpxDaemon:
             _kill_proc_tree(proc)
             await proc.wait()
             logger.warning(
-                "acpx set-mode bypassPermissions: timed out for "
-                "session %s",
+                "acpx set-mode bypassPermissions: timed out for " "session %s",
                 session_name,
             )
             return
         if proc.returncode != 0:
             err_msg = (stderr or b"").decode("utf-8", errors="replace")
             logger.warning(
-                "acpx set-mode bypassPermissions: rc=%s for session "
-                "%s: %s",
+                "acpx set-mode bypassPermissions: rc=%s for session " "%s: %s",
                 proc.returncode,
                 session_name,
                 err_msg[:500],
@@ -977,7 +972,9 @@ class AcpxDaemon:
             logger.debug("acpx stdin closed; dropping reply %s", obj.get("id"))
             return
         try:
-            payload = json.dumps(obj, separators=(",", ":")).encode("utf-8") + b"\n"
+            payload = (
+                json.dumps(obj, separators=(",", ":")).encode("utf-8") + b"\n"
+            )
             proc.stdin.write(payload)
             await proc.stdin.drain()
         except (BrokenPipeError, ConnectionResetError):

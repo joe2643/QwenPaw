@@ -301,7 +301,12 @@ class XaiAuthError(RuntimeError):
     user to re-run ``qwenpaw xai login`` instead of silently retrying.
     """
 
-    def __init__(self, message: str, *, relogin_required: bool = False) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        relogin_required: bool = False,
+    ) -> None:
         super().__init__(message)
         self.relogin_required = relogin_required
 

@@ -11,11 +11,10 @@ import { useAppMessage } from "../../../../hooks/useAppMessage";
 import { Alert, ConfigProvider } from "antd";
 import { LinkOutlined } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
-import { useEffect } from "react";
 import type { FormInstance } from "antd";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getChannelLabel, type ChannelKey } from "./constants";
-import { useChannelQrcode } from "./useChannelQrcode";
+import { QrcodeAuthBlock } from "./QrcodeAuthBlock";
 import { api } from "../../../../api";
 import styles from "../index.module.less";
 import { useAgentStore } from "../../../../stores/agentStore";
@@ -140,89 +139,11 @@ export function ChannelDrawer({
     }
   }, [open, activeKey, initialValues, form]);
 
-  // WeChat QR code hook
-  const weixinQrcode = useChannelQrcode({
-    channel: "weixin",
-    successStatus: "confirmed",
-    successCredentialKey: "bot_token",
-    pollInterval: 2000,
-    onSuccess: useCallback(
-      (credentials: Record<string, string>) => {
-        form.setFieldsValue({ bot_token: credentials.bot_token });
-        message.success(t("channels.weixinLoginSuccess"));
-      },
-      [form, message, t],
-    ),
-    onError: useCallback(
-      (type: "fetch" | "expired") => {
-        if (type === "expired") {
-          message.warning(t("channels.weixinQrcodeExpired"));
-        } else {
-          message.error(t("channels.weixinQrcodeFailed"));
-        }
-      },
-      [message, t],
-    ),
-  });
-
-  // DingTalk QR code hook
-  const dingtalkQrcode = useChannelQrcode({
-    channel: "dingtalk",
-    successStatus: "success",
-    successCredentialKey: "client_id",
-    pollInterval: 5000,
-    onSuccess: useCallback(
-      (credentials: Record<string, string>) => {
-        form.setFieldsValue({
-          client_id: credentials.client_id,
-          client_secret: credentials.client_secret,
-        });
-        message.success(t("channels.dingtalkAuthSuccess"));
-      },
-      [form, message, t],
-    ),
-    onExpired: useCallback(() => {
-      message.warning(t("channels.dingtalkQrcodeExpired"));
-    }, [message, t]),
-    onError: useCallback(
-      (type: "fetch" | "expired") => {
-        if (type === "expired") {
-          message.warning(t("channels.dingtalkQrcodeExpired"));
-        } else {
-          message.error(t("channels.dingtalkQrcodeFailed"));
-        }
-      },
-      [message, t],
-    ),
-  });
-
-  // WeCom QR code hook
-  const wecomQrcode = useChannelQrcode({
-    channel: "wecom",
-    successStatus: "confirmed",
-    successCredentialKey: "bot_id",
-    pollInterval: 2000,
-    onSuccess: useCallback(
-      (credentials: Record<string, string>) => {
-        form.setFieldsValue({
-          bot_id: credentials.bot_id,
-          secret: credentials.secret,
-        });
-        message.success(t("channels.wecomAuthSuccess"));
-      },
-      [form, message, t],
-    ),
-    onError: useCallback(
-      (type: "fetch" | "expired") => {
-        if (type === "expired") {
-          message.warning(t("channels.weixinQrcodeExpired"));
-        } else {
-          message.error(t("channels.wecomAuthFailedGeneric"));
-        }
-      },
-      [message, t],
-    ),
-  });
+  // The per-channel QR-code hooks were dead code after the JSX was
+  // migrated to <QrcodeAuthBlock /> (which calls useChannelQrcode
+  // internally with the same params).  Removed to clear unused-var
+  // diagnostics; the success/error toast logic lives inline in each
+  // QrcodeAuthBlock's ``onSuccess`` / ``onError`` callbacks.
 
   // WhatsApp pair code state
   const [waPhone, setWaPhone] = useState<string>("");

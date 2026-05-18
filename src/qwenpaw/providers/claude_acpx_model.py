@@ -315,6 +315,7 @@ class ClaudeAcpxChatModel(OpenAIChatModel):
                 get_current_agent_id,
                 get_current_session_id,
             )
+
             agent_id = get_current_agent_id()
             session_id = get_current_session_id()
             if not agent_id or not session_id:
@@ -649,7 +650,7 @@ class _AcpxStreamAdapter:
             if aclose is None:
                 continue
             try:
-                await aclose()
+                await aclose()  # pylint: disable=not-callable
             except Exception as e:  # noqa: BLE001
                 logger.debug("acpx stream cleanup: %s", e)
         if commit and not self._committed:

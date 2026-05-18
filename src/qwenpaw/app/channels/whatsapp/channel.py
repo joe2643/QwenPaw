@@ -276,7 +276,9 @@ def _prepare_inline_image_for_whatsapp_send(
         return None, "file header is not a supported image"
 
     media_dir.mkdir(parents=True, exist_ok=True)
-    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", resolved.name) or f"image{suffix}"
+    safe_name = (
+        re.sub(r"[^A-Za-z0-9_.-]+", "_", resolved.name) or f"image{suffix}"
+    )
     dest = media_dir / f"outbound_inline_{uuid.uuid4().hex[:8]}_{safe_name}"
     try:
         shutil.copy2(resolved, dest)
@@ -365,9 +367,9 @@ def _str_to_jid(s: str):
     """
     s = s.strip()
     if s.startswith("group:"):
-        s = s[len("group:"):]
+        s = s[len("group:") :]
     elif s.startswith("dm:"):
-        s = s[len("dm:"):]
+        s = s[len("dm:") :]
     if "@" in s:
         user, server = s.split("@", 1)
         return build_jid(user, server)
@@ -1136,14 +1138,14 @@ class WhatsAppChannel(BaseChannel):
         # onto a real (non-live-location) message.  Skipped when
         # sender info is unavailable — keeps test calls pure.
         if sender_str and chat_str and (body or content_parts):
-            cached = self._live_location_cache.get((chat_str, sender_str))
-            if cached:
-                cached_text, ts = cached
+            loc_cached: Optional[
+                tuple[str, float]
+            ] = self._live_location_cache.get((chat_str, sender_str))
+            if loc_cached:
+                cached_text, ts = loc_cached
                 age_s = time.monotonic() - ts
                 if age_s <= LIVE_LOCATION_PIGGYBACK_TTL_S:
-                    note = (
-                        f"[Live location {int(age_s)}s ago]\n" + cached_text
-                    )
+                    note = f"[Live location {int(age_s)}s ago]\n" + cached_text
                     content_parts.append(
                         TextContent(type=ContentType.TEXT, text=note),
                     )
@@ -1371,8 +1373,13 @@ class WhatsAppChannel(BaseChannel):
             # ``.<ext>`` — the extension constraint silently
             # missed nameless docs because ``Path("wa_doc_x").suffix``
             # is ``""`` and never matches ``".bin"``.
-            cached = self._lookup_inbound_media(chat_str, stanza_id)
-            doc_path = cached[0] if cached else await _try_download(ext)
+            doc_cached: list[str] = self._lookup_inbound_media(
+                chat_str,
+                stanza_id,
+            )
+            doc_path = (
+                doc_cached[0] if doc_cached else await _try_download(ext)
+            )
             media_types.append(
                 f"{base_label} ({doc_path})" if doc_path else base_label,
             )
@@ -1387,10 +1394,14 @@ class WhatsAppChannel(BaseChannel):
             # path would shadow it, so prefer file names that
             # actually contain ``sticker`` to disambiguate.
             cached = self._lookup_inbound_media(chat_str, stanza_id)
-            st_path = next(
-                (p for p in cached if "sticker" in Path(p).stem.lower()),
-                None,
-            ) or _cached_quote_path({".webp"}) or await _try_download("webp")
+            st_path = (
+                next(
+                    (p for p in cached if "sticker" in Path(p).stem.lower()),
+                    None,
+                )
+                or _cached_quote_path({".webp"})
+                or await _try_download("webp")
+            )
             media_types.append(f"sticker: {st_path}" if st_path else "sticker")
 
         # Location quote: surface coords + place metadata so the agent
@@ -2099,7 +2110,8 @@ class WhatsAppChannel(BaseChannel):
                 envelope_prefix = f"{envelope}: "
                 for i, part in enumerate(content_parts):
                     if not hasattr(part, "text") or not isinstance(
-                        part.text, str,
+                        part.text,
+                        str,
                     ):
                         continue
                     # We wrapped the user's text with the exact
@@ -3034,7 +3046,11 @@ class WhatsAppChannel(BaseChannel):
                         "whatsapp: send_media → sticker path=%s",
                         file_path,
                     )
-                    await self._client.send_sticker(jid, file_path, passthrough=True)
+                    await self._client.send_sticker(
+                        jid,
+                        file_path,
+                        passthrough=True,
+                    )
                 else:
                     await self._client.send_image(jid, file_path)
             elif t == ContentType.VIDEO:

@@ -185,7 +185,8 @@ class TokenUsageManager:
                         prompt_tokens=entry.get("prompt_tokens", 0),
                         completion_tokens=entry.get("completion_tokens", 0),
                         cache_creation_tokens=entry.get(
-                            "cache_creation_tokens", 0,
+                            "cache_creation_tokens",
+                            0,
                         ),
                         cache_read_tokens=entry.get("cache_read_tokens", 0),
                         call_count=entry.get("call_count", 0),

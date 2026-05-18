@@ -70,10 +70,13 @@ _SKILL_WRITE_TOOL_NAMES = {
     "mv",
 }
 _SHELL_TOOL_NAMES = {"shell", "exec", "bash", "terminal", "exec_command"}
-_PATCH_PATH_RE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", re.MULTILINE)
+_PATCH_PATH_RE = re.compile(
+    r"^\*\*\* (?:Add|Update|Delete) File: (.+)$",
+    re.MULTILINE,
+)
 _SHELL_SKILL_PATH_RE = re.compile(
     r"([~./A-Za-z0-9_\-][^\n\"'`]*?"
-    r"(?:SKILL\.md|references/[^\s\"'`]+|scripts/[^\s\"'`]+|assets/[^\s\"'`]+|history/[^\s\"'`]+))"
+    r"(?:SKILL\.md|references/[^\s\"'`]+|scripts/[^\s\"'`]+|assets/[^\s\"'`]+|history/[^\s\"'`]+))",
 )
 _TOOL_RESULT_CONTENT_MAX_CHARS = 4_000
 _ERROR_PATTERNS: list[tuple[re.Pattern, str]] = [
@@ -109,8 +112,14 @@ _ERROR_PATTERNS: list[tuple[re.Pattern, str]] = [
         ),
         "command_not_found",
     ),
-    (re.compile(r"timed?\s*out|TimeoutError|ETIMEDOUT", re.IGNORECASE), "timeout"),
-    (re.compile(r"(?:^|\W)(?:Error|Exception):\s", re.MULTILINE), "generic_error"),
+    (
+        re.compile(r"timed?\s*out|TimeoutError|ETIMEDOUT", re.IGNORECASE),
+        "timeout",
+    ),
+    (
+        re.compile(r"(?:^|\W)(?:Error|Exception):\s", re.MULTILINE),
+        "generic_error",
+    ),
 ]
 
 
@@ -173,7 +182,9 @@ class SkillClawCaptureHook:
         self._inject_catalog = bool(inject_catalog)
         cfg_skills_dir, cfg_public_root = _read_skillclaw_skill_config()
         self._skills_dir = Path(
-            skills_dir or cfg_skills_dir or Path.home() / ".copaw" / "skill_pool",
+            skills_dir
+            or cfg_skills_dir
+            or Path.home() / ".copaw" / "skill_pool",
         ).expanduser()
         self._skills_public_root = (
             str(Path(skills_public_root).expanduser())
@@ -181,7 +192,9 @@ class SkillClawCaptureHook:
             else str(cfg_public_root or "")
         )
         self._max_skills_prompt_chars = int(max_skills_prompt_chars or 30_000)
-        self._read_tool_name = str(read_tool_name or "read_file").strip() or "read_file"
+        self._read_tool_name = (
+            str(read_tool_name or "read_file").strip() or "read_file"
+        )
         self._catalog_fingerprint: tuple[tuple[str, int, int], ...] = ()
         self._catalog_skills: list[dict[str, Any]] = []
         self._skill_path_map: dict[str, dict[str, str]] = {}
@@ -217,7 +230,10 @@ class SkillClawCaptureHook:
         """
         await self.pre_reasoning(agent, kwargs)
         try:
-            messages = self._pending_prompt_messages or await self._prompt_messages(agent)
+            messages = (
+                self._pending_prompt_messages
+                or await self._prompt_messages(agent)
+            )
             read, modified = _scan_messages_for_skill_io(messages)
             injected = self._pending_injected_skills or (
                 self._catalog_skill_names()
@@ -277,7 +293,10 @@ class SkillClawCaptureHook:
     ) -> Any:
         """Publish a proxy-style record after the model response."""
         try:
-            messages = self._pending_prompt_messages or await self._prompt_messages(agent)
+            messages = (
+                self._pending_prompt_messages
+                or await self._prompt_messages(agent)
+            )
             injected = self._pending_injected_skills or (
                 self._catalog_skill_names()
                 if self._inject_catalog
@@ -286,7 +305,10 @@ class SkillClawCaptureHook:
             tool_calls = _extract_tool_calls_from_msg(output)
             response_text = _response_text_from_msg(output, tool_calls)
             reasoning = _reasoning_content_from_msg(output)
-            read_skills, modified_skills = self._extract_skills_from_tool_calls(
+            (
+                read_skills,
+                modified_skills,
+            ) = self._extract_skills_from_tool_calls(
                 tool_calls,
             )
             record = self._build_record(
@@ -299,7 +321,9 @@ class SkillClawCaptureHook:
                 reasoning_content=reasoning,
             )
             await self._publish_new_record(record)
-            self._last_record = json.loads(json.dumps(record, ensure_ascii=False))
+            self._last_record = json.loads(
+                json.dumps(record, ensure_ascii=False),
+            )
             self._last_patched_turn = 0
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning(
@@ -431,7 +455,10 @@ class SkillClawCaptureHook:
         skills = self._catalog_skills
         if not skills:
             return "", []
-        full_prompt = _format_skills_for_prompt(skills, self._skills_public_root)
+        full_prompt = _format_skills_for_prompt(
+            skills,
+            self._skills_public_root,
+        )
         if len(full_prompt) <= self._max_skills_prompt_chars:
             catalog = full_prompt
         else:
@@ -463,8 +490,14 @@ class SkillClawCaptureHook:
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         self._refresh_catalog_if_changed()
         return (
-            _extract_read_skills_from_tool_calls(tool_calls, self._skill_path_map),
-            _extract_modified_skills_from_tool_calls(tool_calls, self._skill_path_map),
+            _extract_read_skills_from_tool_calls(
+                tool_calls,
+                self._skill_path_map,
+            ),
+            _extract_modified_skills_from_tool_calls(
+                tool_calls,
+                self._skill_path_map,
+            ),
         )
 
     def _resolve_injected_skills(self) -> list[str]:
@@ -582,18 +615,24 @@ def _skill_md_paths(skills_dir: Path) -> list[str]:
     if os.path.realpath(root) == os.path.realpath(
         os.path.join(os.path.expanduser("~"), ".hermes", "skills"),
     ):
-        return sorted(glob.glob(os.path.join(root, "**", "SKILL.md"), recursive=True))
+        return sorted(
+            glob.glob(os.path.join(root, "**", "SKILL.md"), recursive=True),
+        )
     return sorted(glob.glob(os.path.join(root, "*", "SKILL.md")))
 
 
-def _skill_catalog_fingerprint(skills_dir: Path) -> tuple[tuple[str, int, int], ...]:
+def _skill_catalog_fingerprint(
+    skills_dir: Path,
+) -> tuple[tuple[str, int, int], ...]:
     out: list[tuple[str, int, int]] = []
     for path in _skill_md_paths(skills_dir):
         try:
             stat = os.stat(path)
         except OSError:
             continue
-        out.append((os.path.realpath(path), int(stat.st_mtime_ns), int(stat.st_size)))
+        out.append(
+            (os.path.realpath(path), int(stat.st_mtime_ns), int(stat.st_size)),
+        )
     return tuple(out)
 
 
@@ -603,7 +642,10 @@ def _load_skill_catalog(skills_dir: Path) -> list[dict[str, Any]]:
         skill = _parse_skill_md(path)
         if skill is None:
             continue
-        if skill.get("_extra_frontmatter", {}).get("disable-model-invocation", False):
+        if skill.get("_extra_frontmatter", {}).get(
+            "disable-model-invocation",
+            False,
+        ):
             continue
         skills.append(skill)
     return skills
@@ -628,7 +670,10 @@ def _public_skill_path(skill: dict[str, Any], public_root: str) -> str:
     return os.path.join(root, name, "SKILL.md")
 
 
-def _format_skills_for_prompt(skills: list[dict[str, Any]], public_root: str) -> str:
+def _format_skills_for_prompt(
+    skills: list[dict[str, Any]],
+    public_root: str,
+) -> str:
     if not skills:
         return ""
     lines = [
@@ -646,14 +691,20 @@ def _format_skills_for_prompt(skills: list[dict[str, Any]], public_root: str) ->
         lines.append(
             f"    <description>{_escape_xml(skill.get('description', ''))}</description>",
         )
-        location = _public_skill_path(skill, public_root) or skill.get("file_path", "")
+        location = _public_skill_path(skill, public_root) or skill.get(
+            "file_path",
+            "",
+        )
         lines.append(f"    <location>{_escape_xml(location)}</location>")
         lines.append("  </skill>")
     lines.append("</available_skills>")
     return "\n".join(lines)
 
 
-def _format_skills_compact(skills: list[dict[str, Any]], public_root: str) -> str:
+def _format_skills_compact(
+    skills: list[dict[str, Any]],
+    public_root: str,
+) -> str:
     if not skills:
         return ""
     lines = [
@@ -668,7 +719,10 @@ def _format_skills_compact(skills: list[dict[str, Any]], public_root: str) -> st
     for skill in skills:
         lines.append("  <skill>")
         lines.append(f"    <name>{_escape_xml(skill.get('name', ''))}</name>")
-        location = _public_skill_path(skill, public_root) or skill.get("file_path", "")
+        location = _public_skill_path(skill, public_root) or skill.get(
+            "file_path",
+            "",
+        )
         lines.append(f"    <location>{_escape_xml(location)}</location>")
         lines.append("  </skill>")
     lines.append("</available_skills>")
@@ -724,9 +778,13 @@ def _build_skill_path_map(
         for rel_path in bundle_paths:
             locations = []
             if skill_dir:
-                locations.append(os.path.realpath(os.path.join(skill_dir, rel_path)))
+                locations.append(
+                    os.path.realpath(os.path.join(skill_dir, rel_path)),
+                )
             if public_dir:
-                locations.append(os.path.realpath(os.path.join(public_dir, rel_path)))
+                locations.append(
+                    os.path.realpath(os.path.join(public_dir, rel_path)),
+                )
             for file_path in locations:
                 path_map[file_path] = {
                     "skill_id": str(skill.get("id", "") or ""),
@@ -884,7 +942,10 @@ def _extract_modified_skills_from_tool_calls(
         normalized = tool_name.lower()
         if normalized in _READ_TOOL_NAMES:
             continue
-        if normalized not in _SKILL_WRITE_TOOL_NAMES and normalized not in _SHELL_TOOL_NAMES:
+        if (
+            normalized not in _SKILL_WRITE_TOOL_NAMES
+            and normalized not in _SHELL_TOOL_NAMES
+        ):
             continue
         for path in skill_paths:
             skill_ref = _resolve_skill_reference(path, skill_path_map)
@@ -894,14 +955,19 @@ def _extract_modified_skills_from_tool_calls(
             modified_skills.append(
                 {
                     **skill_ref,
-                    "action": "shell" if normalized in _SHELL_TOOL_NAMES else normalized,
+                    "action": "shell"
+                    if normalized in _SHELL_TOOL_NAMES
+                    else normalized,
                 },
             )
             seen.add(dedupe)
     return modified_skills
 
 
-def _tool_use_block_to_openai(block: dict[str, Any], index: int) -> dict[str, Any]:
+def _tool_use_block_to_openai(
+    block: dict[str, Any],
+    index: int,
+) -> dict[str, Any]:
     args = block.get("input", block.get("arguments", {}))
     if isinstance(args, str):
         args_s = args
@@ -914,7 +980,9 @@ def _tool_use_block_to_openai(block: dict[str, Any], index: int) -> dict[str, An
         "id": str(block.get("id") or f"call_{index}"),
         "type": "function",
         "function": {
-            "name": _normalize_tool_call_name(block.get("name") or "unknown_tool"),
+            "name": _normalize_tool_call_name(
+                block.get("name") or "unknown_tool",
+            ),
             "arguments": args_s,
         },
     }
@@ -927,7 +995,9 @@ def _extract_tool_calls_from_msg(msg: Any) -> list[dict[str, Any]]:
     tool_calls: list[dict[str, Any]] = []
     for block in content:
         if isinstance(block, dict) and block.get("type") == "tool_use":
-            tool_calls.append(_tool_use_block_to_openai(block, len(tool_calls)))
+            tool_calls.append(
+                _tool_use_block_to_openai(block, len(tool_calls)),
+            )
     return tool_calls
 
 
@@ -1019,7 +1089,9 @@ def _extract_recent_tool_results(messages: list[Any]) -> list[dict[str, Any]]:
     return results
 
 
-def _build_tool_summaries(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _build_tool_summaries(
+    tool_calls: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     summaries: list[dict[str, Any]] = []
     for tc in tool_calls:
         func = tc.get("function", {})
@@ -1037,7 +1109,12 @@ def _build_tool_summaries(tool_calls: list[dict[str, Any]]) -> list[dict[str, An
             command = str(args.get("command") or args.get("cmd") or "")
             if command:
                 summary["command"] = command[:400]
-        path = str(args.get("path") or args.get("file") or args.get("file_path") or "")
+        path = str(
+            args.get("path")
+            or args.get("file")
+            or args.get("file_path")
+            or "",
+        )
         if path:
             summary["path"] = path
         elif skill_paths:
@@ -1074,7 +1151,11 @@ def _merge_tool_results(
     turn_record["tool_errors"] = [
         {
             "tool_name": s.get("tool_name", "unknown"),
-            **({"tool_call_id": s["tool_call_id"]} if s.get("tool_call_id") else {}),
+            **(
+                {"tool_call_id": s["tool_call_id"]}
+                if s.get("tool_call_id")
+                else {}
+            ),
             **({"error_type": s["error_type"]} if s.get("error_type") else {}),
             **({"content": s["content"]} if s.get("content") else {}),
         }

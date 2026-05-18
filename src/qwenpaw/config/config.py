@@ -2130,7 +2130,7 @@ class Config(BaseModel):
     )
     acp: ACPConfig = Field(default_factory=ACPConfig)
     acpx_provider: "AcpxProviderConfig" = Field(
-        default_factory=lambda: AcpxProviderConfig(),
+        default_factory=AcpxProviderConfig,
         description="Operational tuning for the claude-acpx provider "
         "(per-turn timeout, terminal wait_for_exit timeout). Live-"
         "reloaded on each turn — no service restart required.",

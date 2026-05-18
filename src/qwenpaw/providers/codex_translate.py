@@ -61,6 +61,7 @@ def _translate_responses_usage_to_chat(
         out["completion_tokens_details"] = {"reasoning_tokens": int(reasoning)}
     return out
 
+
 # Models the ChatGPT backend actually serves under Codex OAuth.  Any
 # caller-supplied model ID outside this set is silently forced to the
 # default (upstream 400s otherwise — ``o3``, ``gpt-5-codex``, etc. are

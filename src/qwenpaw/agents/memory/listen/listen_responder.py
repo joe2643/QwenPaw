@@ -164,8 +164,7 @@ async def _load_session_history(
         messages = await memory.get_memory()
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.debug(
-            "listen: failed to materialise InMemoryMemory for "
-            "%s/%s: %s",
+            "listen: failed to materialise InMemoryMemory for " "%s/%s: %s",
             config.channel_name,
             session_id,
             e,
@@ -345,7 +344,11 @@ async def _ask_llm_to_chime_in(
     # Branch on whether we have a workspace handle to snapshot.
     if workspace is not None:
         prompt_text, raw = await _ask_with_snapshot(
-            workspace, config, agent_id, template, history_text,
+            workspace,
+            config,
+            agent_id,
+            template,
+            history_text,
         )
     else:
         prompt_text, raw = await _ask_with_text_render(
@@ -834,9 +837,7 @@ async def _maybe_compact_snapshot(
     # Apply: drop compacted messages from snapshot.content, set new
     # summary.  We mutate the snapshot in place — it's a transient
     # InMemoryMemory created just for this tick, never persisted.
-    keep_ids = {
-        getattr(m, "id", None) for m in messages_to_keep
-    }
+    keep_ids = {getattr(m, "id", None) for m in messages_to_keep}
     keep_ids.discard(None)
     try:
         snapshot_memory.content = [
@@ -964,8 +965,7 @@ async def _append_chime_to_real_session(
         )
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.warning(
-            "listen: session read failed before append "
-            "(%s/%s/%s): %s",
+            "listen: session read failed before append " "(%s/%s/%s): %s",
             config.channel_name,
             user_id,
             session_id,
@@ -999,8 +999,7 @@ async def _append_chime_to_real_session(
         await memory.add(listen_msg)
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.warning(
-            "listen: building assistant Msg for memory append "
-            "failed: %s",
+            "listen: building assistant Msg for memory append " "failed: %s",
             e,
         )
         return False
@@ -1275,7 +1274,7 @@ async def execute_chime_action(
     # channel.send below as a literal ``"[listen chime-in] ..."``
     # message.  Strip it defensively.
     if reply.startswith(_LISTEN_REPLY_MEMORY_PREFIX):
-        reply = reply[len(_LISTEN_REPLY_MEMORY_PREFIX):].lstrip()
+        reply = reply[len(_LISTEN_REPLY_MEMORY_PREFIX) :].lstrip()
     if not reply:
         return None
 

@@ -457,7 +457,10 @@ class _MCPClientMixin:
             )
 
 
-class StdIOStatefulClient(_MCPClientMixin, StatefulClientBase):
+class StdIOStatefulClient(  # pylint: disable=abstract-method
+    _MCPClientMixin,
+    StatefulClientBase,
+):
     """StdIO MCP client with proper cross-task lifecycle management.
 
     Drop-in replacement for agentscope.mcp.StdIOStatefulClient that solves
@@ -542,7 +545,9 @@ class StdIOStatefulClient(_MCPClientMixin, StatefulClientBase):
         # an attribute keep working.  Falls back to ``tool_call_timeout``
         # when explicit, otherwise the documented default.
         self.read_timeout_seconds = (
-            tool_call_timeout if tool_call_timeout is not None else read_timeout_seconds
+            tool_call_timeout
+            if tool_call_timeout is not None
+            else read_timeout_seconds
         )
 
         # Lifecycle management
@@ -676,7 +681,8 @@ class StdIOStatefulClient(_MCPClientMixin, StatefulClientBase):
             early return there leaks the lifecycle task forever.
         """
         has_running_lifecycle = (
-            self._lifecycle_task is not None and not self._lifecycle_task.done()
+            self._lifecycle_task is not None
+            and not self._lifecycle_task.done()
         )
         if not self.is_connected and not has_running_lifecycle:
             if not ignore_errors:
@@ -906,7 +912,9 @@ class HttpStatefulClient(StatefulClientBase):
         # For HTTP transports the SSE read timeout is the natural
         # ceiling; explicit ``tool_call_timeout`` still wins.
         self.read_timeout_seconds = (
-            tool_call_timeout if tool_call_timeout is not None else sse_read_timeout
+            tool_call_timeout
+            if tool_call_timeout is not None
+            else sse_read_timeout
         )
 
         # Lifecycle management
@@ -1068,7 +1076,8 @@ class HttpStatefulClient(StatefulClientBase):
             applies to HTTP/SSE clients during reconnect sleep.
         """
         has_running_lifecycle = (
-            self._lifecycle_task is not None and not self._lifecycle_task.done()
+            self._lifecycle_task is not None
+            and not self._lifecycle_task.done()
         )
         if not self.is_connected and not has_running_lifecycle:
             if not ignore_errors:

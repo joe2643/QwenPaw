@@ -776,7 +776,7 @@ class WeChatChannel(BaseChannel):
 
                     stop_func = await self.start_typing(
                         from_user_id,
-                        context_token,
+                        {"context_token": context_token},
                     )
                     with self._typing_stop_lock:
                         self._typing_stop_funcs[from_user_id] = stop_func
@@ -1445,20 +1445,32 @@ class WeChatChannel(BaseChannel):
 
         return ""
 
-    async def start_typing(
+    async def start_typing(  # type: ignore[override]
         self,
-        user_id: str,
-        context_token: str,
+        to_handle: str,
+        meta: dict[str, Any] | None = None,
     ) -> Callable[[], None]:
         """Start typing indicator for a user.
 
         Args:
-            user_id: User ID
-            context_token: Context token for the user
+            to_handle: WeChat user_id (BaseChannel uses ``to_handle``
+                as the cross-channel routing identifier; for WeChat
+                that's the user_id).
+            meta: must carry ``context_token`` for the typing-ticket
+                exchange — WeChat's signed-typing API needs it where
+                other channels just need a handle.
 
         Returns:
             A stop function that cancels the typing indicator
         """
+        user_id = to_handle
+        context_token = (meta or {}).get("context_token", "")
+        if not context_token:
+            logger.debug(
+                "wechat start_typing: missing context_token in meta " "for %s",
+                user_id,
+            )
+            return lambda: None
         logger.info(f"wechat start_typing called for user_id={user_id}")
         ticket = await self._get_typing_ticket(user_id, context_token)
         if not ticket:
