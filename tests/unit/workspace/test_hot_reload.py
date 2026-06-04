@@ -433,6 +433,9 @@ class TestHotReloadChannelState:
         from unittest.mock import MagicMock
 
         mock_cm = MagicMock()
+        # create_channel_service iterates cm.channels to propagate the agent
+        # language; a bare MagicMock isn't iterable, so give it an empty list.
+        mock_cm.channels = []
         mock_runner = MagicMock()
 
         ws = MagicMock()
@@ -441,9 +444,10 @@ class TestHotReloadChannelState:
         ws.workspace_dir = MagicMock()
         ws.agent_id = "test"
 
-        result = asyncio.get_event_loop().run_until_complete(
-            create_channel_service(ws, mock_cm),
-        )
+        # Use asyncio.run (fresh loop) rather than get_event_loop, which
+        # raises "no current event loop" when a prior test's asyncio.run
+        # already closed the thread's loop (test-ordering robustness).
+        result = asyncio.run(create_channel_service(ws, mock_cm))
         assert (
             result is mock_cm
         ), "create_channel_service must return existing_cm, not create a new one"

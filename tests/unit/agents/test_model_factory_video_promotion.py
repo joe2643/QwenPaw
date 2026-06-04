@@ -247,7 +247,7 @@ def test_promote_empty_when_no_video_tool_results() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_formatter_emits_video_url_for_glm5v_turbo_primary() -> None:
+def test_formatter_emits_video_url_for_glm5v_turbo_primary(monkeypatch) -> None:
     """Regression guard for ``provider_manager.py`` glm-5v-turbo flag.
 
     With ``glm-5v-turbo`` set as the active model (``supports_video=True``,
@@ -266,6 +266,7 @@ def test_formatter_emits_video_url_for_glm5v_turbo_primary() -> None:
 
     from qwenpaw.agents.model_factory import _create_formatter_instance
     from qwenpaw.providers.provider_manager import (
+        ModelInfo,
         ModelSlotConfig,
         ProviderManager,
     )
@@ -275,6 +276,24 @@ def test_formatter_emits_video_url_for_glm5v_turbo_primary() -> None:
     mgr.active_model = ModelSlotConfig(
         provider_id="zhipu-intl-codingplan",
         model="glm-5v-turbo",
+    )
+    # _get_active_model_info() reads the persisted agent config (e.g. glm-5.1,
+    # supports_video=False), which takes precedence over mgr.active_model on a
+    # configured machine — isolate it to glm-5v-turbo so the test exercises
+    # only the video_url emission, not real ~/.qwenpaw state.
+    monkeypatch.setattr(
+        "qwenpaw.agents.prompt._get_active_model_info",
+        lambda: (
+            ModelInfo(
+                id="glm-5v-turbo",
+                name="glm-5v-turbo",
+                supports_image=True,
+                supports_video=True,
+                supports_multimodal=True,
+                probe_source="probed",
+            ),
+            "glm-5v-turbo",
+        ),
     )
     try:
         fmt = _create_formatter_instance(OpenAIChatModel)

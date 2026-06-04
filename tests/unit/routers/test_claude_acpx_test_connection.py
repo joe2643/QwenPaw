@@ -57,6 +57,9 @@ class _FakeProc:
         self._stderr = stderr
         self._hang = hang
         self.killed = False
+        # Fake PID: os.getpgid(9999) raises ProcessLookupError, exercising
+        # the timeout handler's proc.kill() fallback path.
+        self.pid = 9999
 
     async def communicate(self) -> tuple[bytes, bytes]:
         if self._hang:
@@ -66,6 +69,10 @@ class _FakeProc:
 
     def kill(self) -> None:
         self.killed = True
+
+    async def wait(self) -> int:
+        """Reaped by the timeout handler after kill()."""
+        return self.returncode
 
 
 class _FakeCreds:

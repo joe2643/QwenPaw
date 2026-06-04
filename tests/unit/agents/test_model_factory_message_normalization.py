@@ -168,6 +168,19 @@ def test_multimodal_support_preserves_media(monkeypatch) -> None:
         "_supports_multimodal_for_current_model",
         lambda: True,
     )
+    # _normalize_messages_for_formatter also consults per-type media
+    # support, which reads the real ~/.qwenpaw active model on a configured
+    # machine (e.g. glm-4.7 with supports_image=False) and would strip the
+    # media.  Mock it permissive so the test checks only the preserve path.
+    monkeypatch.setattr(
+        "qwenpaw.agents.prompt.get_active_model_media_support",
+        lambda: {
+            "image": True,
+            "video": True,
+            "audio": None,
+            "multimodal": True,
+        },
+    )
 
     original = _media_messages()
     (
