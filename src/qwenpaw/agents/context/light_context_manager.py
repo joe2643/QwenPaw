@@ -827,7 +827,7 @@ class LightContextManager(BaseContextManager):
                         as_llm_formatter=agent.formatter,
                         as_token_counter=token_counter,
                         language=agent_config.language,
-                        max_input_length=running_config.max_input_length,
+                        max_input_length=max_input_length,
                         compact_ratio=ccc.compact_threshold_ratio,
                         add_thinking_block=ccc.compact_with_thinking_block,
                     )
