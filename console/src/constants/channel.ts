@@ -15,6 +15,7 @@ export const CHANNELS = {
   xiaoyi: "xiaoyi",
   weixin: "weixin",
   whatsapp: "whatsapp",
+  yuanbao: "yuanbao",
 };
 
 export const CHANNEL_COLORS: Record<string, string> = {
@@ -34,4 +35,5 @@ export const CHANNEL_COLORS: Record<string, string> = {
   xiaoyi: "cyan",
   weixin: "green",
   whatsapp: "green",
+  yuanbao: "lime",
 };

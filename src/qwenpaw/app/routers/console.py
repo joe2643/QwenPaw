@@ -19,6 +19,7 @@ from ...utils.logging import LOG_FILE_PATH
 from ..agent_context import get_agent_for_request
 from ..runner import control_commands
 from ..runner.title_generator import generate_and_update_title
+from ..utils import check_upload_size
 
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,6 @@ class MarkInboxReadRequest(BaseModel):
     all: bool = False
 
 
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_DEBUG_LOG_LINES = 1000
 DEFAULT_CONSOLE_PARALLEL_MAX_CONCURRENT_RUNS = 3
 
@@ -381,12 +381,7 @@ async def post_console_upload(
     media_dir = console_channel.media_dir
     media_dir.mkdir(parents=True, exist_ok=True)
     data = await file.read()
-    if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=400,
-            detail="File too large (max "
-            f"{MAX_UPLOAD_BYTES // (1024 * 1024)} MB)",
-        )
+    check_upload_size(data)
     safe_name = _safe_filename(file.filename or "file")
     stored_name = f"{uuid.uuid4().hex}_{safe_name}"
 

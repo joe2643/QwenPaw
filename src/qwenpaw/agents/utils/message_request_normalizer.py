@@ -16,8 +16,6 @@ from agentscope.message import Msg
 from ...constant import MEDIA_UNSUPPORTED_PLACEHOLDER
 from .tool_message_utils import _sanitize_tool_messages
 
-_MEDIA_BLOCK_TYPES = {"image", "audio", "video", "file"}
-
 # Formerly the all-or-nothing ``supports_multimodal`` decision
 # stripped every media block regardless of the model's actual
 # per-type capabilities.  That mis-handles the common case of a
@@ -34,6 +32,7 @@ _MEDIA_BLOCK_TYPES = {"image", "audio", "video", "file"}
 # so the agent can still reason about "there is a video at X" and
 # call other tools (ffmpeg frames + view_image, transcribe) against
 # the same file.
+_MEDIA_BLOCK_TYPES = {"image", "audio", "video", "file"}
 
 # Fields that are provider-specific and should not leak across families.
 # Gemini: extra_content carries thought_signature.
@@ -78,6 +77,28 @@ def _clean_provider_specific_fields(
                 continue
             for field in strip_fields:
                 block.pop(field, None)
+
+
+def _strip_unsigned_thinking_for_anthropic(msgs: list[Msg]) -> None:
+    """Drop thinking blocks that lack a non-empty ``signature``.
+
+    Anthropic requires ``thinking.signature`` on every thinking block in the
+    request. Blocks carried over from other providers (OpenAI/Qwen reasoning,
+    Gemini thoughts, etc.) have no signature and would 400 the request. Native
+    Claude thinking blocks always carry one, so they survive untouched.
+    """
+    for msg in msgs:
+        if not isinstance(msg.content, list):
+            continue
+        msg.content = [
+            block
+            for block in msg.content
+            if not (
+                isinstance(block, dict)
+                and block.get("type") == "thinking"
+                and not block.get("signature")
+            )
+        ]
 
 
 def _clone_msg(msg: Msg) -> Msg:
@@ -495,6 +516,9 @@ def normalize_messages_for_model_request(
     # the repair has had its chance.
     normalized = _sanitize_tool_messages(normalized)
     _clean_provider_specific_fields(normalized, target_family)
+    # Upstream: drop unsigned thinking blocks that Anthropic rejects.
+    if target_family == "anthropic":
+        _strip_unsigned_thinking_for_anthropic(normalized)
 
     # First enforce the turn boundary regardless of model capability:
     # historical media becomes path placeholders, while current-turn media

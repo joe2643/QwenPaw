@@ -1337,7 +1337,7 @@ export function ProviderConfigModal({
         {!isOAuthProvider && (
           <Form.Item
             name="api_key"
-            label={t("models.apiKey")}
+            label={apiKeyLabel}
             extra={apiKeyHint}
             rules={[
               {

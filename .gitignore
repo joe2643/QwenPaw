@@ -3,6 +3,10 @@
 # Local deploy script
 deploy.sh
 
+# AI agent / copilot local config
+.aone_copilot/
+.agents/
+
 # dependencies
 /.pnp
 .pnp.js
@@ -15,6 +19,8 @@ sessions_mount_dir/
 coverage.xml
 htmlcov/
 htmlcov.zip
+htmlcov-integration/
+.integration_coverage/
 
 # cookbook
 cookbook/_build
@@ -115,8 +121,21 @@ src/.hypothesis/
 # Qoder IDE
 .qoder/
 
+# Cursor IDE
+.cursor/
+
 # Worktrees
 .worktrees/
+.qwenpaw/worktrees/
+
+# Local File
+/localfile/
+
+# E2E test artifacts
+e2e/reports/
+e2e/data/
+e2e/.pytest_cache/
+e2e/__pycache__/
 
 # Local scratch / tool output (not for repo)
 .codex

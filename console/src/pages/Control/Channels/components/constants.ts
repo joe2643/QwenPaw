@@ -23,6 +23,7 @@ export const CHANNEL_LABELS: Record<string, string> = {
   signal: "Signal",
   whatsapp: "WhatsApp",
   onebot: "OneBot",
+  yuanbao: "Yuanbao",
 };
 
 function formatCustomChannelKey(key: string): string {

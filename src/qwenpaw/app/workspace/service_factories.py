@@ -78,6 +78,11 @@ async def create_channel_service(ws: "Workspace", existing_cm):
     from ...config import Config, update_last_dispatch
     from ..channels.manager import ChannelManager
     from ..channels.utils import make_process_from_runner
+    from ..channels.access_control import init_access_control_store
+
+    # Initialise the access-control store for this workspace so that
+    # each workspace maintains its own access_control.json.
+    init_access_control_store(ws.workspace_dir)
 
     runner = ws._service_manager.services["runner"]
 
@@ -108,6 +113,13 @@ async def create_channel_service(ws: "Workspace", existing_cm):
 
     # Always inject workspace into ChannelManager, all channels, and runner
     cm.set_workspace(ws)
+
+    # Propagate agent language to channels for i18n deny messages
+    agent_language = getattr(ws._config, "language", "zh") or "zh"
+    for ch in cm.channels:
+        ch._language = agent_language
+
+    # Inject workspace into runner for control command handlers
     runner.set_workspace(ws)
 
     return cm

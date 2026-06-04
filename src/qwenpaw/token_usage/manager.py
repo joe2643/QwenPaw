@@ -293,11 +293,11 @@ class TokenUsageManager:
             total_calls=total_calls,
             by_model={
                 k: TokenUsageByModel.model_validate(v)
-                for k, v in by_model_raw.items()
+                for k, v in sorted(by_model_raw.items())
             },
             by_provider={
                 k: TokenUsageStats.model_validate(v)
-                for k, v in by_provider_raw.items()
+                for k, v in sorted(by_provider_raw.items())
             },
             by_date={
                 k: TokenUsageStats.model_validate(v)

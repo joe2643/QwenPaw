@@ -40,6 +40,7 @@ export interface FeishuConfig extends BaseChannelConfig {
   verification_token: string;
   media_dir: string;
   domain?: "feishu" | "lark";
+  streaming_enabled?: boolean;
 }
 
 export interface QQConfig extends BaseChannelConfig {
@@ -181,6 +182,13 @@ export interface WeixinConfig extends BaseChannelConfig {
   message_merge_delay_ms?: number;
 }
 
+export interface YuanbaoConfig extends BaseChannelConfig {
+  app_id: string;
+  app_secret: string;
+  api_domain: string;
+  media_dir?: string;
+}
+
 export interface OneBotConfig extends BaseChannelConfig {
   ws_host: string;
   ws_port: number;
@@ -206,6 +214,7 @@ export interface ChannelConfig {
   whatsapp: WhatsAppConfig;
   signal: SignalConfig;
   weixin: WeixinConfig;
+  yuanbao: YuanbaoConfig;
   onebot: OneBotConfig;
 }
 
@@ -227,4 +236,5 @@ export type SingleChannelConfig =
   | WhatsAppConfig
   | SignalConfig
   | WeixinConfig
+  | YuanbaoConfig
   | OneBotConfig;

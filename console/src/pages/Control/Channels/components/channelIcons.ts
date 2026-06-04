@@ -31,6 +31,8 @@ export const CHANNEL_ICON_URLS: Record<string, string> = {
   whatsapp: "https://upload.wikimedia.org/wikipedia/commons/6/6b/WhatsApp.svg",
   onebot:
     "https://gw.alicdn.com/imgextra/i3/O1CN01xqM0EN1oKrRiAFX3K_!!6000000005207-2-tps-400-400.png",
+  yuanbao:
+    "https://img.alicdn.com/imgextra/i4/O1CN0164yBmJ1a2AftSglge_!!6000000003271-2-tps-225-225.png",
 };
 
 export const CHANNEL_DEFAULT_ICON_URL =
@@ -58,6 +60,7 @@ const LETTER_ICON_COLORS: Record<string, string> = {
   imessage: "#34C759",
   voice: "#F44336",
   xiaoyi: "#CF1322",
+  yuanbao: "#1677FF",
 };
 
 /** A palette of fallback colors for channels without a predefined color. */
