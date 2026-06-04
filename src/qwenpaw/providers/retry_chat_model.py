@@ -138,6 +138,39 @@ def _get_httpx_retryable() -> tuple[type[Exception], ...]:
     return _httpx_retryable
 
 
+# Anthropic error-body ``type`` values that denote a transient,
+# server-side condition worth retrying.  These surface during streaming
+# (see _is_anthropic_stream_transient) where the HTTP status is unusable.
+_ANTHROPIC_STREAM_TRANSIENT_TYPES = frozenset({"overloaded_error", "api_error"})
+
+
+def _is_anthropic_stream_transient(exc: Exception) -> bool:
+    """Return *True* for Anthropic streaming-phase transient errors.
+
+    When Anthropic returns ``overloaded_error`` (529) or ``api_error``
+    (500) *during a stream*, the HTTP 200 response is already established
+    and the error arrives as an SSE ``error`` event.  The SDK builds the
+    exception via ``_make_status_error(..., response=<the 200 stream>)``,
+    so ``exc.status_code`` is **200**, not 5xx — the status-code check in
+    :func:`_is_retryable` misses it and the request fails without retry.
+
+    The error *body* ``type`` is the only reliable signal in this case::
+
+        {'type': 'error', 'error': {'type': 'overloaded_error', ...}}
+
+    We read the parsed ``body`` when present and fall back to the string
+    form (``APIStatusError`` stringifies to its body dict).
+    """
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            if err.get("type") in _ANTHROPIC_STREAM_TRANSIENT_TYPES:
+                return True
+    text = str(exc)
+    return any(t in text for t in _ANTHROPIC_STREAM_TRANSIENT_TYPES)
+
+
 def _is_retryable(exc: Exception) -> bool:
     """Return *True* if *exc* should trigger a retry."""
     retryable = (
@@ -150,6 +183,11 @@ def _is_retryable(exc: Exception) -> bool:
 
     status = getattr(exc, "status_code", None)
     if status is not None and status in RETRYABLE_STATUS_CODES:
+        return True
+
+    # Streaming-phase Anthropic transients carry status_code=200 and slip
+    # past the checks above; detect them by their error-body type instead.
+    if _is_anthropic_stream_transient(exc):
         return True
 
     return False

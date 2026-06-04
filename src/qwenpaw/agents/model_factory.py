@@ -79,11 +79,28 @@ _SUPPORTED_VIDEO_EXTENSIONS: dict[str, str] = {
 
 
 def _supports_multimodal_for_current_model() -> bool:
-    """Best-effort lookup of current model multimodal support."""
-    try:
-        from .prompt import get_active_model_supports_multimodal
+    """Best-effort lookup of current model multimodal support.
 
-        return get_active_model_supports_multimodal()
+    Uses the *permissive* signal: a model counts as multimodal when
+    EITHER ``supports_multimodal`` is True OR a per-type flag
+    (``supports_image`` / ``supports_video``) is True.  This removes a
+    cold-start race — the request-layer media kill-switch no longer
+    depends on the async probe back-filling ``supports_multimodal``.
+    That matters because for image-capable models (Claude, GPT, Gemini,
+    GLM, Qwen-VL …) ``view_image`` never triggers the probe (it short-
+    circuits on ``supports_image=True``), so ``supports_multimodal``
+    stays ``None`` and the strict gate would strip the image on every
+    request until some unrelated probe happened to run.
+
+    ``is True`` preserves the fail-safe: unknown (None) and explicit
+    text-only (False) still strip media.  Per-type stripping (incl.
+    video) is unaffected — it is driven by ``supports_video`` plus the
+    Anthropic video/audio hard-cap downstream, not by this gate.
+    """
+    try:
+        from .prompt import get_active_model_multimodal_raw
+
+        return get_active_model_multimodal_raw() is True
     except Exception:  # pragma: no cover - config lookup safety
         logger.debug(
             "Falling back to multimodal=True during request-time "

@@ -21,6 +21,10 @@ from qwenpaw.providers.multimodal_prober import (
     evaluate_image_probe_answer,
 )
 from qwenpaw.providers.provider import ModelInfo, Provider
+from qwenpaw.local_models.tag_parser import (
+    parse_tool_calls_from_text,
+    text_contains_tool_call_tag,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +52,25 @@ OAUTH_API_KEY_SENTINEL = "oauth"
 # subprocess + stateful session registry; see
 # :class:`qwenpaw.providers.claude_acpx_model.ClaudeAcpxChatModel`).
 ACPX_API_KEY_SENTINEL = "acpx"
+
+
+# Beta flag that opts a Claude Code OAuth request into "fast mode" —
+# the faster-output, 6x-billing variant of Opus 4.6/4.7.  Server only
+# honours it when the body also carries top-level ``speed: "fast"`` AND
+# the account has Extra usage enabled (otherwise the request 429s with
+# ``Extra usage is required for fast mode``).  Confirmed against the
+# Claude Code CLI binary (2.1.150) which uses the exact same wire shape.
+FAST_MODE_BETA = "fast-mode-2026-02-01"
+
+# Model substrings for which the CLI surfaces fast mode.  Used to gate
+# the toggle so flipping ``fast_mode`` on the provider does not poison
+# unrelated routes (e.g., a haiku probe inside the same provider).
+FAST_MODE_MODELS = ("opus-4-8", "opus-4-7", "opus-4-6")
+
+
+def _model_supports_fast_mode(model_id: str) -> bool:
+    s = (model_id or "").lower()
+    return any(tag in s for tag in FAST_MODE_MODELS)
 
 
 # Tool-name prefix required by Anthropic OAuth billing validation when
@@ -157,6 +180,67 @@ def _strip_tool_use_names_inplace(
             block["name"] = _unprefix_tool_name(block["name"], reverse)
 
 
+def _recover_text_tool_calls_inplace(resp: Any) -> None:
+    """Recover tool calls that the model emitted as XML inside a text block.
+
+    Some Claude revisions (and Qwen / GLM models distilled on Claude
+    transcripts) occasionally emit ``<invoke name="..."><parameter ...>
+    </invoke>`` directly inside an assistant ``text`` block instead of as
+    a structured ``tool_use`` block.  Without recovery the framework
+    parses no tool_use, the call vanishes, and the XML leaks to whatever
+    channel rendered the assistant message.
+
+    When this fallback fires we log a WARNING so the leak is visible.
+    """
+    content = getattr(resp, "content", None)
+    if not content:
+        return
+    if any(
+        isinstance(b, dict) and b.get("type") == "tool_use" for b in content
+    ):
+        # The model already produced structured tool_use blocks — trust
+        # those and ignore any stray XML that may also appear in text
+        # (avoids double-dispatch).
+        return
+
+    new_content: list = []
+    recovered_names: list[str] = []
+    for block in content:
+        if not (isinstance(block, dict) and block.get("type") == "text"):
+            new_content.append(block)
+            continue
+        text = block.get("text") or ""
+        if not text_contains_tool_call_tag(text):
+            new_content.append(block)
+            continue
+        parsed = parse_tool_calls_from_text(text)
+        if not parsed.tool_calls:
+            new_content.append(block)
+            continue
+        clean_text = parsed.text_before.strip()
+        if clean_text:
+            new_content.append({**block, "text": clean_text})
+        for ptc in parsed.tool_calls:
+            new_content.append(
+                {
+                    "type": "tool_use",
+                    "id": ptc.id,
+                    "name": ptc.name,
+                    "input": ptc.arguments,
+                },
+            )
+            recovered_names.append(ptc.name)
+    if recovered_names:
+        logger.warning(
+            "Recovered %d tool_use block(s) from XML in assistant text "
+            "(model emitted prompted-tool-use format instead of native "
+            "tool_use): %s",
+            len(recovered_names),
+            recovered_names,
+        )
+        resp.content = new_content
+
+
 def _strip_haiku_incompatible_kwargs(call_kwargs: dict[str, Any]) -> None:
     """Silently remove reasoning-related kwargs that Haiku rejects.
 
@@ -210,6 +294,16 @@ def _inject_identity_system(system: Any, identity: str) -> list[dict]:
     if not system:
         return [identity_block]
     if isinstance(system, str):
+        # Idempotent on the string-shape too — callers that send
+        # only the identity preamble (or it concatenated to extra
+        # rules) should not pay for it twice.
+        if system == identity:
+            return [identity_block]
+        if system.startswith(identity):
+            return [
+                identity_block,
+                {"type": "text", "text": system[len(identity) :].lstrip()},
+            ]
         return [identity_block, {"type": "text", "text": system}]
     if isinstance(system, list):
         # Idempotent: don't double-insert if caller already has it.
@@ -528,6 +622,7 @@ class ClaudeOAuthChatModel(AnthropicChatModel):
         # ContextVars are reset.
         if self.stream:
             return self._wrap_stream_response(result, reverse_map, cache_buf)
+        _recover_text_tool_calls_inplace(result)
         _strip_tool_use_names_inplace(result, reverse_map)
         _inject_cache_metadata(result, cache_buf)
         return result
@@ -539,6 +634,7 @@ class ClaudeOAuthChatModel(AnthropicChatModel):
         cache_buf: dict[str, int],
     ) -> Any:
         async for chunk in gen:
+            _recover_text_tool_calls_inplace(chunk)
             _strip_tool_use_names_inplace(chunk, reverse_map)
             _inject_cache_metadata(chunk, cache_buf)
             yield chunk
@@ -925,6 +1021,22 @@ class AnthropicProvider(Provider):
             client_kwargs["auth_token"] = creds.access_token
             merged_headers = dict(client_kwargs.get("default_headers") or {})
             merged_headers.update(auth.default_headers())
+            oauth_generate_kwargs = self.get_effective_generate_kwargs(model_id)
+            if self.fast_mode and _model_supports_fast_mode(model_id):
+                # Append the fast-mode beta to whatever auth.default_headers
+                # already shipped (CLAUDE_BASE_BETAS) so cache-ttl + oauth
+                # markers stay intact.
+                beta = merged_headers.get("anthropic-beta", "")
+                if FAST_MODE_BETA not in beta:
+                    merged_headers["anthropic-beta"] = (
+                        f"{beta},{FAST_MODE_BETA}" if beta else FAST_MODE_BETA
+                    )
+                # Top-level body field — anthropic SDK funnels extra_body
+                # into the request body root, which is where the CLI puts
+                # ``speed`` (see fast-mode-2026-02-01 wire shape).
+                extra_body = dict(oauth_generate_kwargs.get("extra_body") or {})
+                extra_body["speed"] = "fast"
+                oauth_generate_kwargs["extra_body"] = extra_body
             client_kwargs["default_headers"] = merged_headers
             return ClaudeOAuthChatModel(
                 auth=auth,
@@ -934,7 +1046,7 @@ class AnthropicProvider(Provider):
                 api_key=None,
                 stream_tool_parsing=False,
                 client_kwargs=client_kwargs,
-                generate_kwargs=self.get_effective_generate_kwargs(model_id),
+                generate_kwargs=oauth_generate_kwargs,
             )
 
         return AnthropicChatModel(

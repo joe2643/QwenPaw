@@ -26,6 +26,12 @@ THINK_END = "</think>"
 TOOL_CALL_START = "<tool_call>"
 TOOL_CALL_END = "</tool_call>"
 
+# Anthropic prompted-tool-use format leaks into assistant text from Claude
+# (and from Qwen / GLM models distilled on Claude transcripts) when the model
+# falls back to its XML training distribution instead of emitting a native
+# ``tool_use`` block.  See parse_tool_calls_from_text below for handling.
+INVOKE_START = "<invoke "
+
 # Regex to find a complete <think>...</think> block (non-greedy).
 _THINK_RE = re.compile(
     r"<think>(.*?)</think>",
@@ -35,6 +41,21 @@ _THINK_RE = re.compile(
 # Regex to find complete <tool_call>...</tool_call> blocks (non-greedy).
 _TOOL_CALL_RE = re.compile(
     r"<tool_call>\s*(.*?)\s*</tool_call>",
+    re.DOTALL,
+)
+
+# Regex for Anthropic-style invocation:
+#   <invoke name="func_name">
+#     <parameter name="param_name">value</parameter>
+#     ...
+#   </invoke>
+# Accepts single or double quotes around the name attribute.
+_INVOKE_RE = re.compile(
+    r"""<invoke\s+name=["']([^"']+)["']\s*>(.*?)</invoke>""",
+    re.DOTALL,
+)
+_INVOKE_PARAM_RE = re.compile(
+    r"""<parameter\s+name=["']([^"']+)["']\s*>(.*?)</parameter>""",
     re.DOTALL,
 )
 
@@ -305,9 +326,41 @@ def extract_thinking_from_text(text: str) -> TextWithThinking:
     return TextWithThinking(remaining_text=text)
 
 
+def _parse_invoke_block(name: str, body: str) -> ParsedToolCall | None:
+    """Parse the body of an ``<invoke>...</invoke>`` block."""
+    name = name.strip()
+    if not name:
+        return None
+    arguments: dict = {}
+    for param_match in _INVOKE_PARAM_RE.finditer(body):
+        param_name = param_match.group(1).strip()
+        if not param_name:
+            continue
+        # Anthropic format embeds the value verbatim — preserve whitespace
+        # (multi-line heredocs depend on it) but trim a single leading and
+        # trailing newline introduced by pretty-printing.
+        param_value = param_match.group(2)
+        if param_value.startswith("\n"):
+            param_value = param_value[1:]
+        if param_value.endswith("\n"):
+            param_value = param_value[:-1]
+        arguments[param_name] = param_value
+    if not arguments and "<parameter" in body:
+        # Tags were present but malformed; treat as a parse failure so the
+        # caller can leave the text untouched rather than dispatch a call
+        # with no inputs.
+        return None
+    return ParsedToolCall(
+        id=_generate_call_id(),
+        name=name,
+        arguments=arguments,
+        raw_arguments=json.dumps(arguments, ensure_ascii=False),
+    )
+
+
 def text_contains_tool_call_tag(text: str) -> bool:
-    """Fast substring check for a ``<tool_call>`` tag."""
-    return TOOL_CALL_START in text
+    """Fast substring check for a tool-call tag in any supported format."""
+    return TOOL_CALL_START in text or INVOKE_START in text
 
 
 def parse_tool_calls_from_text(text: str) -> TextWithToolCalls:
@@ -325,6 +378,24 @@ def parse_tool_calls_from_text(text: str) -> TextWithToolCalls:
     matches = list(_TOOL_CALL_RE.finditer(text))
 
     if not matches:
+        # No <tool_call> blocks — try Anthropic-style <invoke> as a fallback
+        # before reporting any unclosed-tag state.
+        invoke_matches = list(_INVOKE_RE.finditer(text))
+        if invoke_matches:
+            tool_calls = [
+                tc
+                for m in invoke_matches
+                if (tc := _parse_invoke_block(m.group(1), m.group(2)))
+                is not None
+            ]
+            text_before = text[: invoke_matches[0].start()].rstrip()
+            text_after = text[invoke_matches[-1].end() :].strip()
+            return TextWithToolCalls(
+                text_before=text_before,
+                text_after=text_after,
+                tool_calls=tool_calls,
+            )
+
         # No complete blocks.  Check for an unclosed opening tag.
         open_idx = text.rfind(TOOL_CALL_START)
         if open_idx != -1:
