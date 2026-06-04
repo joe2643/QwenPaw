@@ -46,7 +46,8 @@ class GrokImageToolPlugin:
             tool_func=tool.generate_image_grok,
             description=(
                 "Generate a new image from a text prompt using xAI "
-                "Grok Imagine (Aurora). Text-to-image only."
+                "Grok Imagine (Aurora). Text-to-image only — to edit "
+                "an existing image, use the `edit_image_grok` tool instead."
             ),
             icon="🎨",
         )

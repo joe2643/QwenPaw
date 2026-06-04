@@ -634,6 +634,14 @@ ANTHROPIC_MODELS: List[ModelInfo] = []
 # with heredocs) don't get truncated mid-stream.
 CLAUDE_OAUTH_MODELS: List[ModelInfo] = [
     ModelInfo(
+        id="claude-opus-4-8",
+        name="Claude Opus 4.8",
+        supports_image=True,
+        supports_video=False,
+        probe_source="documentation",
+        generate_kwargs={"max_tokens": 32000},
+    ),
+    ModelInfo(
         id="claude-opus-4-7",
         name="Claude Opus 4.7",
         supports_image=True,
@@ -973,13 +981,15 @@ PROVIDER_CODEX_OAUTH = OpenAIProvider(
 
 # xAI OAuth — authenticates against ``https://api.x.ai/v1`` using the
 # access_token stored in ``~/.xai/auth.json`` by ``qwenpaw xai login``.
-# The ``oauth`` sentinel + provider id ``xai-oauth`` route through
-# ``XaiOAuthChatModel`` which refreshes the bearer per call.  Same
-# discovery-driven model list pattern as codex-oauth — xAI's /v1/models
-# is the source of truth, picked up by the UI's Discover button.
+# Standalone ``XaiOAuthProvider`` subclass owns all OAuth-specific
+# behaviour (bearer refresh, /v1/models discovery, chat instance
+# construction) — keeps openai_provider.py free of provider-specific
+# branches.  Discovery-driven model list pattern matches codex-oauth.
 XAI_OAUTH_MODELS: List[ModelInfo] = []
 
-PROVIDER_XAI_OAUTH = OpenAIProvider(
+from .xai_oauth_provider import XaiOAuthProvider  # noqa: E402
+
+PROVIDER_XAI_OAUTH = XaiOAuthProvider(
     id="xai-oauth",
     name="Grok (xAI OAuth)",
     base_url="https://api.x.ai/v1",
@@ -1972,6 +1982,8 @@ class ProviderManager:  # pylint: disable=too-many-public-methods
                 builtin.api_key = provider.api_key
                 if provider.auth_mode != "api_key":
                     builtin.auth_mode = provider.auth_mode
+                if provider.fast_mode:
+                    builtin.fast_mode = provider.fast_mode
                 if provider.custom_headers:
                     builtin.custom_headers = provider.custom_headers
                 builtin_model_ids = {m.id for m in builtin.models}

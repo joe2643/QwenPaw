@@ -81,6 +81,14 @@ class ProviderConfigRequest(BaseModel):
             "Only applies to Anthropic-compatible providers."
         ),
     )
+    fast_mode: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Claude Code fast-mode opt-in (claude-oauth + Opus 4.6/4.7 only). "
+            "Adds `anthropic-beta: fast-mode-2026-02-01` plus body field "
+            "`speed: \"fast\"`. Requires Extra usage on the Anthropic org."
+        ),
+    )
 
 
 class ModelSlotRequest(BaseModel):
@@ -580,6 +588,7 @@ async def configure_provider(
             "generate_kwargs": body.generate_kwargs,
             "custom_headers": body.custom_headers,
             "auth_mode": body.auth_mode,
+            "fast_mode": body.fast_mode,
         },
     )
     if not ok:

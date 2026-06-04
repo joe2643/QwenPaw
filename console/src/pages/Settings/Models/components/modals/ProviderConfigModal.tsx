@@ -8,6 +8,7 @@ import {
   Button,
   Select,
   Radio,
+  Switch,
 } from "@agentscope-ai/design";
 import { theme } from "antd";
 import {
@@ -642,6 +643,7 @@ interface ProviderConfigModalProps {
     require_api_key?: boolean;
     custom_headers?: Record<string, string>;
     auth_mode?: "api_key" | "auth_token";
+    fast_mode?: boolean;
     meta?: Record<string, unknown>;
   };
   activeModels: any;
@@ -666,6 +668,9 @@ export function ProviderConfigModal({
   const { message } = useAppMessage();
   const [authMode, setAuthMode] = useState<"api_key" | "auth_token">(
     provider.auth_mode ?? "api_key",
+  );
+  const [fastMode, setFastMode] = useState<boolean>(
+    Boolean(provider.fast_mode),
   );
   const [customHeaders, setCustomHeaders] = useState<HeaderEntry[]>(
     Object.entries(provider.custom_headers ?? {}).map(([key, value]) => ({
@@ -972,6 +977,7 @@ export function ProviderConfigModal({
       setAdvancedOpen(false);
       setFormDirty(false);
       setAuthMode(provider.auth_mode ?? "api_key");
+      setFastMode(Boolean(provider.fast_mode));
       setCustomHeaders(
         Object.entries(provider.custom_headers ?? {}).map(([key, value]) => ({
           key,
@@ -1028,6 +1034,7 @@ export function ProviderConfigModal({
         generate_kwargs: hasGenerateConfigInput ? generateConfig : {},
         custom_headers: headersObj,
         auth_mode: isAnthropicProvider ? authMode : undefined,
+        fast_mode: isClaudeOAuth ? fastMode : undefined,
       });
 
       await onSaved();
@@ -1402,6 +1409,24 @@ export function ProviderConfigModal({
                   {t("models.authModeAuthToken")}
                 </Radio>
               </Radio.Group>
+            </Form.Item>
+          )}
+
+          {/* Claude Code fast-mode toggle (claude-oauth only).  Server-side
+              gated to Opus 4.6/4.7; off by default because it requires
+              Extra usage on the Anthropic org and bills at ~6x. */}
+          {isClaudeOAuth && advancedOpen && (
+            <Form.Item
+              label={t("models.fastMode")}
+              extra={t("models.fastModeHint")}
+            >
+              <Switch
+                checked={fastMode}
+                onChange={(checked) => {
+                  setFastMode(checked);
+                  setFormDirty(true);
+                }}
+              />
             </Form.Item>
           )}
 

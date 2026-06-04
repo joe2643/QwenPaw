@@ -982,6 +982,8 @@
     "authMode": "Режим аутентификации",
     "authModeApiKey": "API Key (x-api-key)",
     "authModeAuthToken": "Auth Token (Authorization: Bearer)",
+    "fastMode": "Fast Mode",
+    "fastModeHint": "Только для Opus 4.6/4.7. Ответы быстрее, но тарифицируются примерно в 6× раз. Требуется включить Extra usage в аккаунте Anthropic — иначе запрос вернёт 429.",
     "customHeaders": "Пользовательские заголовки",
     "customHeadersHint": "Добавляются к каждому запросу API, например x-app: cli",
     "customHeaderKey": "Название заголовка",

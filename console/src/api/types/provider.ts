@@ -35,6 +35,10 @@ export interface ProviderInfo {
   custom_headers?: Record<string, string>;
   /** Authentication mode: 'api_key' (x-api-key) or 'auth_token' (Authorization: Bearer). */
   auth_mode?: "api_key" | "auth_token";
+  /** Claude Code fast-mode opt-in. Only honoured for claude-oauth on Opus 4.6/4.7;
+   * adds `anthropic-beta: fast-mode-2026-02-01` plus body field `speed: "fast"`.
+   * Requires Extra usage enabled on the Anthropic org; bills at ~6x. */
+  fast_mode?: boolean;
   /** Provider-specific metadata (e.g. api_key_hint, api_key_url, base_url_options for region selection). */
   meta?: Record<string, unknown>;
 }
@@ -76,6 +80,7 @@ export interface ProviderConfigRequest {
   generate_kwargs?: Record<string, unknown>;
   custom_headers?: Record<string, string>;
   auth_mode?: "api_key" | "auth_token";
+  fast_mode?: boolean;
 }
 
 export interface ModelSlotConfig {

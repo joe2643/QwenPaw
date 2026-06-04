@@ -25,8 +25,10 @@ from qwenpaw.providers.codex_oauth_model import (
     _CodexOAuthAsyncStream,
     _MAX_STRIP_RETRIES,
     _extract_unfetchable_url,
+    _is_url_less_download_failure,
     _prune_expired_signed_urls,
     _raise_for_upstream_status,
+    _strip_probably_unfetchable_images_from_body,
     _strip_unfetchable_image_from_body,
 )
 from qwenpaw.providers.codex_translate import StreamState
@@ -451,6 +453,75 @@ class TestStripUnfetchableImageFromBody:
         assert _strip_unfetchable_image_from_body(body, "https://bad")
         for entry in body["input"]:
             assert entry["content"][0]["type"] == "input_text"
+
+
+class TestStripUrlLessDownloadFailures:
+    def test_detects_codex_download_failure_without_url(self) -> None:
+        body = '{"error":{"message":"Error while downloading file. Upstream status code: 530."}}'
+        assert _is_url_less_download_failure(body) is True
+
+    def test_strips_probable_media_server_signed_url(self) -> None:
+        body = {
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "describe"},
+                        {
+                            "type": "input_image",
+                            "image_url": "https://media.joe2643.work/media?t=tok&exp=9999999999&sig=deadbeef",
+                        },
+                        {
+                            "type": "input_image",
+                            "image_url": "https://example.com/stable.png",
+                        },
+                    ],
+                },
+            ],
+        }
+        stripped = _strip_probably_unfetchable_images_from_body(body)
+        assert stripped == 1
+        content = body["input"][0]["content"]
+        assert content[1]["type"] == "input_text"
+        assert "no longer fetchable" in content[1]["text"]
+        assert content[2]["type"] == "input_image"
+        assert content[2]["image_url"] == "https://example.com/stable.png"
+
+    def test_strips_single_remote_image_as_last_resort(self) -> None:
+        body = {
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "image_url": "https://example.com/only-image.png",
+                        },
+                    ],
+                },
+            ],
+        }
+        assert _strip_probably_unfetchable_images_from_body(body) == 1
+        assert body["input"][0]["content"][0]["type"] == "input_text"
+
+    def test_does_not_strip_multiple_unidentified_remote_images(self) -> None:
+        body = {
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_image", "image_url": "https://a.example/1.png"},
+                        {"type": "input_image", "image_url": "https://b.example/2.png"},
+                    ],
+                },
+            ],
+        }
+        snapshot = json.loads(json.dumps(body))
+        assert _strip_probably_unfetchable_images_from_body(body) == 0
+        assert body == snapshot
 
 
 class TestPruneExpiredSignedUrls:

@@ -50,7 +50,8 @@ import httpx
 from fastapi import APIRouter, Body, Header, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from ...providers.claude_auth import ClaudeAuth
+from ...providers.anthropic_provider import _inject_identity_system
+from ...providers.claude_auth import CLAUDE_CODE_IDENTITY, ClaudeAuth
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,7 @@ ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 # (only API-key tokens), so we hand-publish what works.  Update
 # when Anthropic ships a new generation.
 _KNOWN_MODELS = [
+    "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-opus-4-6",
     "claude-sonnet-4-6",
@@ -123,6 +125,18 @@ async def messages(
     # would reach the client as undecodable gibberish.  Cheap to
     # disable — Anthropic responses are small JSON / SSE.
     headers["accept-encoding"] = "identity"
+
+    # Claude Code OAuth bearer is scope-gated to Claude-Code-like
+    # usage: Anthropic byte-compares system[0] against the canonical
+    # identity preamble and silently throttles (429) anything that
+    # doesn't match.  Mirror AnthropicProvider's idempotent injector
+    # so external SDK / Claude Code CLI clients alike round-trip
+    # cleanly — passthrough is the right shape, but this one field
+    # has to be massaged before forwarding.
+    body = {**body, "system": _inject_identity_system(
+        body.get("system"),
+        CLAUDE_CODE_IDENTITY,
+    )}
 
     client_wants_stream = bool(body.get("stream", False))
 

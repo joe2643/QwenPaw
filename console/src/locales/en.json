@@ -1277,6 +1277,8 @@
     "authMode": "Authentication Mode",
     "authModeApiKey": "API Key (x-api-key)",
     "authModeAuthToken": "Auth Token (Authorization: Bearer)",
+    "fastMode": "Fast Mode",
+    "fastModeHint": "Opus 4.6/4.7 only. Sends faster but bills ~6x. Requires Extra usage enabled on the Anthropic org — without it the request will return 429.",
     "customHeaders": "Custom Headers",
     "customHeadersHint": "Appended to every API request, e.g. x-app: cli",
     "customHeaderKey": "Header Name",

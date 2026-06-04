@@ -1125,6 +1125,8 @@
     "authMode": "鉴权方式",
     "authModeApiKey": "API Key（x-api-key）",
     "authModeAuthToken": "Auth Token（Authorization: Bearer）",
+    "fastMode": "Fast Mode",
+    "fastModeHint": "仅适用于 Opus 4.6/4.7：响应更快但按约 6× 计费。需在 Anthropic 账号开启 Extra usage，否则会 429。",
     "customHeaders": "自定义 Headers",
     "customHeadersHint": "会附加到每次 API 请求中，例如 x-app: cli",
     "customHeaderKey": "Header 名称",

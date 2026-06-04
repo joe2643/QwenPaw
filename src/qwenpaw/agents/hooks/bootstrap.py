@@ -17,6 +17,10 @@ from ..utils import (
 logger = logging.getLogger(__name__)
 
 
+class _MemPalaceDisabled(Exception):
+    """Sentinel raised when MemPalace is disabled in agent config."""
+
+
 class BootstrapHook:
     """Hook for bootstrap guidance on first user interaction.
 
@@ -65,7 +69,21 @@ class BootstrapHook:
             # calls also preserve the wake-up. We also detect compaction events
             # via memory.get_compressed_summary() markers and refresh wake-up
             # so the prompt reflects the latest palace state after compaction.
+            # Gated on agent_config.mempalace.enabled (same flag as diary hooks
+            # in react_agent.py) — when disabled, skip the wake-up entirely
+            # (WAL recovery + BOOTSTRAP.md below still run).
             try:
+                _mp_cfg = getattr(
+                    getattr(agent, "_agent_config", None),
+                    "mempalace",
+                    None,
+                )
+                _mp_enabled = bool(
+                    _mp_cfg is not None
+                    and getattr(_mp_cfg, "enabled", False),
+                )
+                if not _mp_enabled:
+                    raise _MemPalaceDisabled
                 import subprocess
                 import sys
 
@@ -195,6 +213,8 @@ class BootstrapHook:
                     # Steady state — keep tracking the marker
                     if first_time is False and last_marker is None:
                         agent._mempalace_summary_marker = summary_marker
+            except _MemPalaceDisabled:
+                pass
             except Exception as e:
                 logger.warning("MemPalace wake-up skipped: %s", e)
 

@@ -117,3 +117,10 @@ src/.hypothesis/
 
 # Worktrees
 .worktrees/
+
+# Local scratch / tool output (not for repo)
+.codex
+.firecrawl/
+graphify-out/
+records/
+*.bak.*

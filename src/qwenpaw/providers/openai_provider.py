@@ -35,10 +35,6 @@ TOKEN_PLAN_BASE_URL = (
 # (no new pydantic field) — users set api_key to this literal string.
 CODEX_OAUTH_API_KEY_SENTINEL = "oauth"
 
-# Reuses the same sentinel for xAI OAuth — guarded by provider id so
-# the two OAuth flows never collide.
-XAI_OAUTH_API_KEY_SENTINEL = "oauth"
-
 if os.environ.get("LANGFUSE_SECRET_KEY") and importlib.util.find_spec(
     "langfuse",
 ):
@@ -74,24 +70,6 @@ class OpenAIProvider(Provider):
 
         return CodexAuth()
 
-    @property
-    def _is_xai_oauth(self) -> bool:
-        """Detect the xAI OAuth mode.  Guarded by provider id so an
-        unrelated ``OpenAIProvider`` config with ``api_key="oauth"``
-        doesn't accidentally route through XaiAuth."""
-        return (
-            self.id == "xai-oauth"
-            and self.api_key == XAI_OAUTH_API_KEY_SENTINEL
-        )
-
-    def _get_xai_oauth(self) -> "Any":
-        """Build a fresh ``XaiAuth`` instance (reads ~/.xai/auth.json).
-        Raises ``FileNotFoundError`` when ``qwenpaw xai login`` has not run.
-        """
-        from qwenpaw.providers.xai_auth import XaiAuth
-
-        return XaiAuth()
-
     def _build_default_headers(self) -> dict:
         return dict(self.custom_headers) if self.custom_headers else {}
 
@@ -126,18 +104,6 @@ class OpenAIProvider(Provider):
                 model_name=model_id,
                 stream=False,
                 api_key=None,
-                stream_tool_parsing=False,
-                client_kwargs={},
-                generate_kwargs={},
-            )
-            return model.client
-        if self._is_xai_oauth:
-            from .xai_oauth_model import XaiOAuthChatModel
-
-            model = XaiOAuthChatModel(
-                auth=self._get_xai_oauth(),
-                model_name=model_id,
-                stream=False,
                 stream_tool_parsing=False,
                 client_kwargs={},
                 generate_kwargs={},
@@ -181,27 +147,6 @@ class OpenAIProvider(Provider):
                 return False, f"Codex OAuth not set up: {e}"
             except Exception as e:
                 return False, f"Codex OAuth refresh failed: {e}"
-
-        if self._is_xai_oauth:
-            try:
-                auth = self._get_xai_oauth()
-                creds = await auth.ensure_fresh()
-                # xAI /v1/models works with the OAuth bearer (unlike
-                # ChatGPT-backend) — do a quick reachability hit too.
-                client = AsyncOpenAI(
-                    base_url=auth.base_url,
-                    api_key=creds.access_token,
-                    timeout=timeout,
-                )
-                try:
-                    await client.models.list(timeout=timeout)
-                except APIError as e:
-                    return False, f"xAI API error: {e}"
-                return True, ""
-            except FileNotFoundError as e:
-                return False, f"xAI OAuth not set up: {e}"
-            except Exception as e:
-                return False, f"xAI OAuth refresh failed: {e}"
 
         client = self._client()
         try:
@@ -263,23 +208,6 @@ class OpenAIProvider(Provider):
                 )
             return infos
 
-        if self._is_xai_oauth:
-            # xAI /v1/models works with the OAuth bearer — fetch the
-            # live catalogue so a newly-released grok-* slug shows up
-            # without a release.
-            try:
-                auth = self._get_xai_oauth()
-                creds = await auth.ensure_fresh()
-                client = AsyncOpenAI(
-                    base_url=auth.base_url,
-                    api_key=creds.access_token,
-                    timeout=timeout,
-                )
-                payload = await client.models.list(timeout=timeout)
-                return self._normalize_models_payload(payload)
-            except Exception:
-                return []
-
         try:
             client = self._client(timeout=timeout)
             payload = await client.models.list(timeout=timeout)
@@ -333,34 +261,6 @@ class OpenAIProvider(Provider):
                 return False, f"Codex OAuth not set up: {e}"
             except Exception as e:
                 return False, f"Codex OAuth model check failed: {e}"
-
-        if self._is_xai_oauth:
-            try:
-                from .xai_oauth_model import XaiOAuthChatModel
-
-                auth = self._get_xai_oauth()
-                await auth.ensure_fresh()
-                model = XaiOAuthChatModel(
-                    auth=auth,
-                    model_name=model_id,
-                    stream=True,
-                    stream_tool_parsing=False,
-                    client_kwargs={},
-                    generate_kwargs={},
-                )
-                res = await model.client.chat.completions.create(
-                    model=model_id,
-                    messages=[{"role": "user", "content": "ping"}],
-                    stream=True,
-                    max_tokens=1,
-                )
-                async for _ in res:
-                    break
-                return True, ""
-            except FileNotFoundError as e:
-                return False, f"xAI OAuth not set up: {e}"
-            except Exception as e:
-                return False, f"xAI OAuth model check failed: {e}"
 
         try:
             client = self._client(timeout=timeout)

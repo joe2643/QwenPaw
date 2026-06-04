@@ -24,6 +24,8 @@ The file layout we expect::
 from __future__ import annotations
 
 import base64
+import contextlib
+import errno
 import json
 import logging
 import os
@@ -34,6 +36,11 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+
+try:
+    import fcntl  # POSIX-only; absent on Windows.
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +152,84 @@ def _resolve_auth_path() -> Path:
     return Path(os.path.expanduser(home)) / "auth.json"
 
 
+# How long a process will wait to acquire the cross-process refresh lock
+# before giving up and proceeding without it (so a stale/orphaned lock can
+# never hard-block token refresh forever).  A refresh round-trip is well
+# under this; the wait only matters when a *sibling* process is mid-refresh.
+_REFRESH_LOCK_TIMEOUT_S = 30.0
+_REFRESH_LOCK_POLL_S = 0.2
+
+
+@contextlib.contextmanager
+def _cross_process_refresh_lock(auth_path: Path):
+    """Serialize codex-token refreshes across *every* process that shares the
+    same ``~/.codex/auth.json``.
+
+    Root cause this guards against (see
+    research/codex-oauth-revoke-diagnosis-20260602.md): OpenAI rotates the
+    ``refresh_token`` on every refresh and runs reuse-detection — if two
+    processes (the long-lived ``copaw app`` runtime *and* a transient
+    ``copaw task`` / cron worker, which each spawn their own interpreter and
+    therefore their own ``threading.Lock``) refresh concurrently, the slower
+    one replays an already-rotated refresh_token and OpenAI revokes the whole
+    token family → fleet-wide ``token_revoked``.
+
+    A ``flock`` on a sibling lock-file makes refresh fleet-wide single-flight:
+    at most one process performs a refresh at a time, and every other process
+    blocks until the holder has written the new tokens to disk (after which
+    they re-read disk and adopt the fresh token instead of refreshing again).
+
+    Degrades gracefully:
+      * On non-POSIX / no-``fcntl`` builds it is a no-op (single-process
+        ``threading.Lock`` still applies).
+      * If the lock cannot be acquired within ``_REFRESH_LOCK_TIMEOUT_S`` it
+        proceeds anyway (logged) so a crashed lock-holder cannot deadlock
+        token refresh permanently.
+    """
+    if fcntl is None:
+        # No cross-process locking primitive available; rely on the
+        # in-process threading.Lock only.
+        yield False
+        return
+
+    lock_path = auth_path.with_suffix(auth_path.suffix + ".refresh.lock")
+    fd = None
+    acquired = False
+    try:
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        deadline = time.monotonic() + _REFRESH_LOCK_TIMEOUT_S
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                    raise
+                if time.monotonic() >= deadline:
+                    logger.warning(
+                        "[CodexAuth] refresh lock busy >%.0fs — proceeding "
+                        "without cross-process lock (possible stale holder)",
+                        _REFRESH_LOCK_TIMEOUT_S,
+                    )
+                    break
+                time.sleep(_REFRESH_LOCK_POLL_S)
+        yield acquired
+    finally:
+        if fd is not None:
+            try:
+                if acquired:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+
 @dataclass
 class CodexCredential:
     access_token: str
@@ -252,59 +337,97 @@ class CodexAuth:
     # ------------------------------------------------------------- #
 
     async def _refresh(self) -> None:
-        """Exchange the refresh_token for a fresh access_token."""
+        """Exchange the refresh_token for a fresh access_token.
+
+        Fleet-safe: the actual network refresh (which OpenAI rotates the
+        refresh_token on, and runs reuse-detection against) is serialized
+        across every process sharing this ``auth.json`` by a cross-process
+        ``flock``.  Once the lock is held we *re-read disk first* — if a
+        sibling process already refreshed while we were waiting, we simply
+        adopt its fresh token and skip the network call, so the
+        already-rotated refresh_token is never replayed (which is what
+        triggers OpenAI's family-wide ``token_revoked``).
+        """
         assert self._creds is not None
-        logger.info(
-            "[CodexAuth] refreshing access_token (expires in %ds)",
-            self._creds.seconds_until_expiry,
-        )
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                OPENAI_TOKEN_ENDPOINT,
-                data={
-                    "grant_type": "refresh_token",
-                    "client_id": OPENAI_OAUTH_CLIENT_ID,
-                    "refresh_token": self._creds.refresh_token,
-                    "scope": "openid profile email offline_access",
-                },
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-            resp.raise_for_status()
-            body = resp.json()
+        with _cross_process_refresh_lock(self._auth_path) as locked:
+            # Post-lock disk recheck: a sibling may have refreshed while we
+            # blocked on the lock.  Re-read the newest tokens from disk and,
+            # if they are now fresh, adopt them and return without hitting
+            # the network (avoids refresh_token reuse → family revoke).
+            try:
+                disk_mtime_ns = self._auth_path.stat().st_mtime_ns
+            except OSError:
+                disk_mtime_ns = self._loaded_mtime_ns
+            if disk_mtime_ns > self._loaded_mtime_ns:
+                with self._lock:
+                    self._load()
+                assert self._creds is not None
+            if not self._creds.needs_refresh:
+                logger.info(
+                    "[CodexAuth] token already refreshed by another process "
+                    "(adopted from disk, fresh for %ds) — skipping network "
+                    "refresh",
+                    self._creds.seconds_until_expiry,
+                )
+                return
 
-        new_access = body.get("access_token")
-        new_refresh = body.get("refresh_token") or self._creds.refresh_token
-        new_id = body.get("id_token") or self._creds.id_token
-        if not new_access:
-            raise RuntimeError(
-                "Codex token refresh succeeded but no access_token in response",
+            logger.info(
+                "[CodexAuth] refreshing access_token (expires in %ds)%s",
+                self._creds.seconds_until_expiry,
+                "" if locked else " [WITHOUT cross-process lock]",
             )
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    OPENAI_TOKEN_ENDPOINT,
+                    data={
+                        "grant_type": "refresh_token",
+                        "client_id": OPENAI_OAUTH_CLIENT_ID,
+                        # Always use the newest refresh_token on disk (set by
+                        # the recheck above), never a stale in-memory copy.
+                        "refresh_token": self._creds.refresh_token,
+                        "scope": "openid profile email offline_access",
+                    },
+                    headers={
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                )
+                resp.raise_for_status()
+                body = resp.json()
 
-        exp_ms = _decode_jwt_exp_ms(new_access) or (
-            int(time.time() * 1000) + 3600 * 1000
-        )
-        tokens_to_save: dict[str, Any] = {
-            "access_token": new_access,
-            "refresh_token": new_refresh,
-        }
-        if new_id:
-            tokens_to_save["id_token"] = new_id
+            new_access = body.get("access_token")
+            new_refresh = body.get("refresh_token") or self._creds.refresh_token
+            new_id = body.get("id_token") or self._creds.id_token
+            if not new_access:
+                raise RuntimeError(
+                    "Codex token refresh succeeded but no access_token in "
+                    "response",
+                )
 
-        with self._lock:
-            self._save(tokens=tokens_to_save)
-            self._creds = CodexCredential(
-                access_token=new_access,
-                refresh_token=new_refresh,
-                id_token=new_id,
-                account_id=self._creds.account_id,
-                expires_at_ms=exp_ms,
-                auth_path=self._auth_path,
-                auth_mode=self._creds.auth_mode,
+            exp_ms = _decode_jwt_exp_ms(new_access) or (
+                int(time.time() * 1000) + 3600 * 1000
             )
-        logger.info(
-            "[CodexAuth] refreshed — new expiry in %ds",
-            self._creds.seconds_until_expiry,
-        )
+            tokens_to_save: dict[str, Any] = {
+                "access_token": new_access,
+                "refresh_token": new_refresh,
+            }
+            if new_id:
+                tokens_to_save["id_token"] = new_id
+
+            with self._lock:
+                self._save(tokens=tokens_to_save)
+                self._creds = CodexCredential(
+                    access_token=new_access,
+                    refresh_token=new_refresh,
+                    id_token=new_id,
+                    account_id=self._creds.account_id,
+                    expires_at_ms=exp_ms,
+                    auth_path=self._auth_path,
+                    auth_mode=self._creds.auth_mode,
+                )
+            logger.info(
+                "[CodexAuth] refreshed — new expiry in %ds",
+                self._creds.seconds_until_expiry,
+            )
 
     # ------------------------------------------------------------- #
     # Public API                                                     #

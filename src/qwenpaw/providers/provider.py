@@ -149,6 +149,16 @@ class ProviderInfo(BaseModel):
             "Only applies to Anthropic-compatible providers."
         ),
     )
+    fast_mode: bool = Field(
+        default=False,
+        description=(
+            "Claude Code fast-mode opt-in: when true and the provider is "
+            "in OAuth mode against an Opus 4.6/4.7 model, requests carry "
+            "`anthropic-beta: fast-mode-2026-02-01` plus body field "
+            "`speed: \"fast\"`. Off by default — fast mode requires Extra "
+            "usage enabled on the Anthropic account and bills at 6x rate."
+        ),
+    )
     meta: Dict[str, Any] = Field(
         default_factory=dict,
         description="Additional metadata for the provider "
@@ -249,6 +259,8 @@ class Provider(ProviderInfo, ABC):
             "auth_token",
         ):
             self.auth_mode = config["auth_mode"]
+        if "fast_mode" in config and config["fast_mode"] is not None:
+            self.fast_mode = bool(config["fast_mode"])
         if "extra_models" in config and config["extra_models"] is not None:
             # Always go through model_validate with dict data to
             # avoid class-identity issues from dual module loading.

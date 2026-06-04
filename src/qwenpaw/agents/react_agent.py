@@ -2093,6 +2093,14 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
         "invalid video format",
         "unsupported video format",
         "invalid image format",
+        # Anthropic — mime/extension mismatch (e.g. PNG content tagged
+        # image/jpeg).  Without this the cache learns rejects_media=True
+        # for Claude on a single bad tool_result image; see incident on
+        # 2026-05-19 17:37:51 where Opus 4.7 went vision-blind for a
+        # whole session.
+        "media type, but the image appears",
+        "media type, but the audio appears",
+        "media type, but the video appears",
         # Generic codec markers
         "codec",
         "container",

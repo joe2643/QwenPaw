@@ -64,7 +64,7 @@ CLAUDE_CODE_IDENTITY = (
 # A recent Claude Code CLI version string; what matters is that it
 # parses as ``claude-cli/<semver>`` — upstream uses this for rough
 # client-version bucketing, not for gating.
-CLAUDE_CLI_VERSION = "2.1.90"
+CLAUDE_CLI_VERSION = "2.1.150"
 
 # Minimum required beta flags.  ``oauth-2025-04-20`` marks the request
 # as OAuth-authed, ``claude-code-20250219`` marks it as coming from the
@@ -130,6 +130,13 @@ class ClaudeAuth:
         # refresh_token lands on disk, invalidating the winner's.
         self._lock = asyncio.Lock()
         self._creds: ClaudeCredential | None = None
+        # mtime of credentials_path at the moment _load last read it.
+        # ``ensure_fresh`` compares against current mtime so an
+        # out-of-band rewrite by ``claude login`` / ``acpx claude``
+        # (both rotate refreshToken) is picked up automatically —
+        # without the check we keep using the rotated-away token and
+        # the next refresh attempt 400s with ``invalid_grant``.
+        self._loaded_mtime_ns: int = 0
         self._load()
 
     # ------------------------------------------------------------- #
@@ -142,6 +149,7 @@ class ClaudeAuth:
                 f"Claude Code credentials file not found: {self._path}. "
                 "Run `claude login` once to populate it.",
             )
+        self._loaded_mtime_ns = self._path.stat().st_mtime_ns
         raw = json.loads(self._path.read_text())
         oauth = raw.get("claudeAiOauth") or {}
         access = oauth.get("accessToken")
@@ -176,6 +184,13 @@ class ClaudeAuth:
         tmp.write_text(json.dumps(raw, indent=2))
         os.chmod(tmp, 0o600)
         os.replace(tmp, self._path)
+        # Track our own write so the next ensure_fresh doesn't see
+        # the new mtime as foreign and force a reload of what we
+        # just wrote (functionally harmless but wastes a load).
+        try:
+            self._loaded_mtime_ns = self._path.stat().st_mtime_ns
+        except OSError:
+            pass
 
     # ------------------------------------------------------------- #
     # Refresh                                                        #
@@ -252,6 +267,23 @@ class ClaudeAuth:
     async def ensure_fresh(self) -> ClaudeCredential:
         if self._creds is None:
             self._load()
+        else:
+            # Pick up out-of-band rewrites by the ``claude`` CLI or the
+            # ACPX subprocess.  Both rotate ``refreshToken`` whenever
+            # they refresh, so a stale in-memory copy would attempt
+            # the next refresh with a now-invalid token and hit 400.
+            try:
+                disk_mtime = self._path.stat().st_mtime_ns
+            except OSError:
+                disk_mtime = self._loaded_mtime_ns
+            if disk_mtime != self._loaded_mtime_ns:
+                logger.info(
+                    "[ClaudeAuth] credentials file mtime changed "
+                    "(was %d, now %d) — reloading",
+                    self._loaded_mtime_ns,
+                    disk_mtime,
+                )
+                self._load()
         assert self._creds is not None
         # Lock the "check + refresh" pair so concurrent callers in the
         # same event loop coalesce into one refresh round-trip.

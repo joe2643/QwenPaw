@@ -982,6 +982,8 @@
     "authMode": "認証モード",
     "authModeApiKey": "API Key (x-api-key)",
     "authModeAuthToken": "Auth Token (Authorization: Bearer)",
+    "fastMode": "Fast Mode",
+    "fastModeHint": "Opus 4.6/4.7 のみ。応答は速くなりますが約 6 倍課金されます。Anthropic アカウントで Extra usage を有効にする必要があり、未設定の場合は 429 を返します。",
     "customHeaders": "カスタムヘッダー",
     "customHeadersHint": "すべての API リクエストに追加されます（例: x-app: cli）",
     "customHeaderKey": "ヘッダー名",

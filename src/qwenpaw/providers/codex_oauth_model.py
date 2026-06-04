@@ -27,6 +27,7 @@ import json
 import logging
 import re
 from typing import Any, AsyncIterator
+from urllib.parse import urlparse
 
 import httpx
 from agentscope.model import OpenAIChatModel
@@ -187,6 +188,81 @@ def _strip_unfetchable_image_from_body(
     return stripped
 
 
+# ChatGPT sometimes suppresses the actual URL in its 400 body and
+# only returns e.g.:
+#   "Error while downloading file. Upstream status code: 530."
+# This happens with Cloudflare / origin failures for our signed media
+# proxy URLs (``media.joe2643.work/media?...&exp=...&sig=...``).  In
+# that case ``_extract_unfetchable_url`` cannot identify the single
+# bad URL, so fall back to stripping URLs that are almost certainly our
+# ephemeral media attachments.  If the body contains exactly one remote
+# image URL, strip that one as a last-resort compatibility path.
+_URLLESS_DOWNLOAD_FAILURE_RE = re.compile(
+    r"Error while downloading file\.\s*Upstream status code:\s*\d+",
+)
+_EPHEMERAL_MEDIA_HOSTS = {"media.joe2643.work"}
+
+
+def _is_url_less_download_failure(error_body: str) -> bool:
+    return bool(
+        error_body
+        and "Error while downloading" in error_body
+        and _URLLESS_DOWNLOAD_FAILURE_RE.search(error_body)
+    )
+
+
+def _is_probably_ephemeral_media_url(url: str) -> bool:
+    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        return False
+    if _SIGNED_URL_RE.fullmatch(url):
+        return True
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if parsed.hostname in _EPHEMERAL_MEDIA_HOSTS and parsed.path.startswith("/media"):
+        return True
+    # Extra conservative signature: our media-server links carry both
+    # exp and sig query params even when served through a different host.
+    q = parsed.query or ""
+    return "exp=" in q and "sig=" in q and "/media" in parsed.path
+
+
+def _strip_probably_unfetchable_images_from_body(body: dict) -> int:
+    """Strip image blocks when ChatGPT reports a download failure but
+    omits the URL.  Prefer clearly ephemeral media-server URLs; if none
+    exist and the request has exactly one remote image, strip that one.
+    Returns the number of replaced image blocks.
+    """
+    placeholder = (
+        "[image previously sent here is no longer fetchable; "
+        "ask the user to re-send if needed]"
+    )
+    image_items: list[tuple[list[dict], int, str]] = []
+    for entry in body.get("input") or []:
+        content = entry.get("content")
+        if not isinstance(content, list):
+            continue
+        for idx, c in enumerate(content):
+            if (
+                isinstance(c, dict)
+                and c.get("type") == "input_image"
+                and isinstance(c.get("image_url"), str)
+                and c["image_url"].startswith(("http://", "https://"))
+            ):
+                image_items.append((content, idx, c["image_url"]))
+
+    targets = [item for item in image_items if _is_probably_ephemeral_media_url(item[2])]
+    if not targets and len(image_items) == 1:
+        targets = image_items
+
+    stripped = 0
+    for content, idx, _url in targets:
+        content[idx] = {"type": "input_text", "text": placeholder}
+        stripped += 1
+    return stripped
+
+
 class CodexOAuthChatModel(OpenAIChatModel):
     """Codex OAuth variant of :class:`OpenAIChatModel`.
 
@@ -328,19 +404,33 @@ class CodexOAuthChatModel(OpenAIChatModel):
                                 )
                                 continue
                             bad_url = _extract_unfetchable_url(err_body)
-                            if (
-                                attempts_left > 0
-                                and bad_url
-                                and _strip_unfetchable_image_from_body(
+                            stripped_download_images = 0
+                            if attempts_left > 0:
+                                if bad_url and _strip_unfetchable_image_from_body(
                                     responses_body,
                                     bad_url,
-                                )
-                            ):
-                                logger.warning(
-                                    "Codex 400 on image URL %s — "
-                                    "stripped from request and retrying",
-                                    bad_url,
-                                )
+                                ):
+                                    stripped_download_images = 1
+                                    logger.warning(
+                                        "Codex 400 on image URL %s — "
+                                        "stripped from request and retrying",
+                                        bad_url,
+                                    )
+                                elif _is_url_less_download_failure(err_body):
+                                    stripped_download_images = (
+                                        _strip_probably_unfetchable_images_from_body(
+                                            responses_body,
+                                        )
+                                    )
+                                    if stripped_download_images:
+                                        logger.warning(
+                                            "Codex 400 download failure without "
+                                            "URL (%s) — stripped %d probable "
+                                            "ephemeral image URL(s) and retrying",
+                                            err_body[:120],
+                                            stripped_download_images,
+                                        )
+                            if stripped_download_images:
                                 # Reset translator state for the retry so the
                                 # second response replaces (not appends to)
                                 # the first.
@@ -491,20 +581,34 @@ class _CodexOAuthAsyncStream:
                 # block with a placeholder so the agent still sees
                 # something used to be there, and try once more.
                 bad_url = _extract_unfetchable_url(err_body)
-                if (
-                    self._retry_attempts_left > 0
-                    and bad_url
-                    and _strip_unfetchable_image_from_body(
+                stripped_download_images = 0
+                if self._retry_attempts_left > 0:
+                    if bad_url and _strip_unfetchable_image_from_body(
                         self._upstream_body,
                         bad_url,
-                    )
-                ):
+                    ):
+                        stripped_download_images = 1
+                        logger.warning(
+                            "Codex 400 on image URL %s — stripped from "
+                            "request and retrying stream",
+                            bad_url,
+                        )
+                    elif _is_url_less_download_failure(err_body):
+                        stripped_download_images = (
+                            _strip_probably_unfetchable_images_from_body(
+                                self._upstream_body,
+                            )
+                        )
+                        if stripped_download_images:
+                            logger.warning(
+                                "Codex 400 stream download failure without URL "
+                                "(%s) — stripped %d probable ephemeral image "
+                                "URL(s) and retrying stream",
+                                err_body[:120],
+                                stripped_download_images,
+                            )
+                if stripped_download_images:
                     self._retry_attempts_left -= 1
-                    logger.warning(
-                        "Codex 400 on image URL %s — stripped from "
-                        "request and retrying stream",
-                        bad_url,
-                    )
                     await self._open_stream()
                     assert self._upstream is not None
                     continue
