@@ -448,6 +448,21 @@ MINIMAX_MODELS: List[ModelInfo] = [
     ),
 ]
 
+# MiniMax-M3 via the OpenAI-compatible API (api.minimaxi.com/v1).  Unlike the
+# Anthropic endpoint — which cannot carry ``video_url`` blocks — the OpenAI
+# endpoint accepts ``{"type":"video_url","video_url":{"url":...}}`` blocks,
+# so this model is registered as a vision model. See
+# https://platform.minimaxi.com/docs/api-reference/text-chat-openai
+MINIMAX_OPENAI_MODELS: List[ModelInfo] = [
+    ModelInfo(
+        id="MiniMax-M3",
+        name="MiniMax M3",
+        supports_image=True,
+        supports_video=True,
+        probe_source="documentation",
+    ),
+]
+
 KIMI_MODELS: List[ModelInfo] = [
     ModelInfo(
         id="kimi-k2.5",
@@ -951,6 +966,18 @@ PROVIDER_MINIMAX_CN = AnthropicProvider(
     support_connection_check=False,
 )
 
+# OpenAI-compatible China endpoint — required for MiniMax video (``video_url``
+# blocks), which the Anthropic endpoint above cannot carry.  Kept as a
+# separate provider so the Anthropic one stays available for text/agent use.
+PROVIDER_MINIMAX_CN_OPENAI = OpenAIProvider(
+    id="minimax-cn-openai",
+    name="MiniMax (China, OpenAI API)",
+    base_url="https://api.minimaxi.com/v1",
+    api_key_prefix="",
+    models=MINIMAX_OPENAI_MODELS,
+    freeze_url=True,
+)
+
 PROVIDER_KIMI_CN = OpenAIProvider(
     id="kimi-cn",
     name="Kimi (China)",
@@ -1279,6 +1306,7 @@ class ProviderManager:  # pylint: disable=too-many-public-methods
         self._add_builtin(PROVIDER_KIMI_CN)
         self._add_builtin(PROVIDER_KIMI_INTL)
         self._add_builtin(PROVIDER_MINIMAX_CN)
+        self._add_builtin(PROVIDER_MINIMAX_CN_OPENAI)
         self._add_builtin(PROVIDER_MINIMAX)
         self._add_builtin(PROVIDER_ZHIPU_CN)
         self._add_builtin(PROVIDER_ZHIPU_CN_CODINGPLAN)

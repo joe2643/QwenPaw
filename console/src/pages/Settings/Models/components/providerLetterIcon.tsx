@@ -12,6 +12,7 @@ const PROVIDER_LETTER_COLORS: Record<string, string> = {
   anthropic: "#D97757",
   ollama: "#1A1A1A",
   "minimax-cn": "#1A1A2E",
+  "minimax-cn-openai": "#1A1A2E",
   minimax: "#1A1A2E",
   openai: "#10A37F",
   dashscope: "#6236FF",

@@ -20,6 +20,7 @@ export const providerIcon = (provider: string) => {
     case "ollama":
       return "https://gw.alicdn.com/imgextra/i3/O1CN01xZeNJ01R0Ufb3nqqb_!!6000000002049-2-tps-400-400.png";
     case "minimax-cn":
+    case "minimax-cn-openai":
     case "minimax":
       return "https://gw.alicdn.com/imgextra/i1/O1CN01B0FaVn1VzBcO4nF1C_!!6000000002723-2-tps-400-400.png";
     case "openai":

@@ -670,6 +670,23 @@ class ExpectedCapabilityRegistry:
                     note="MiniMax models are text-only",
                 ),
             )
+
+        # ---------------------------------------------------------------
+        # 12b. MiniMax (China, OpenAI API) — M3 is multimodal (image+video)
+        # ---------------------------------------------------------------
+        self._register(
+            ExpectedCapability(
+                provider_id="minimax-cn-openai",
+                model_id="MiniMax-M3",
+                expected_image=True,
+                expected_video=True,
+                doc_url=(
+                    "https://platform.minimaxi.com/docs/"
+                    "api-reference/text-chat-openai"
+                ),
+                note="MiniMax-M3 via OpenAI API accepts image + video_url",
+            ),
+        )
         # ---------------------------------------------------------------
         # 13. OpenCode (OpenCode Zen)
         #     https://opencode.ai/docs/zen
