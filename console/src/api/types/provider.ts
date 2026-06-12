@@ -41,6 +41,12 @@ export interface ProviderInfo {
    * adds `anthropic-beta: fast-mode-2026-02-01` plus body field `speed: "fast"`.
    * Requires Extra usage enabled on the Anthropic org; bills at ~6x. */
   fast_mode?: boolean;
+  /** Whether this provider supports OAuth login. */
+  supports_oauth?: boolean;
+  /** Whether OAuth is currently connected. */
+  oauth_connected?: boolean;
+  /** Whether this provider offers a free tier. */
+  is_free_tier?: boolean;
   /** Provider-specific metadata (e.g. api_key_hint, api_key_url, base_url_options for region selection). */
   meta?: Record<string, unknown>;
 }

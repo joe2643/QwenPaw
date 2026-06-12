@@ -15,6 +15,7 @@
 [![Discord](https://img.shields.io/badge/Discord-Join_Us-blueviolet.svg?logo=discord)](https://discord.gg/eYMpfnkG8h)
 [![X](https://img.shields.io/badge/X-Follow_Us-black.svg?logo=x)](https://x.com/agentscope_ai)
 [![钉钉群](https://img.shields.io/badge/DingTalk-Join_Us-orange.svg)](https://qr.dingtalk.com/action/joingroup?code=v1,k1,OmDlBXpjW+I2vWjKDsjvI9dhcXjGZi3bQiojOq3dlDw=&_dt_no_comment=1&origin=11)
+[![AgentScope 体验平台](https://img.shields.io/badge/%E2%98%81_AgentScope_Platform-%F0%9F%90%BE_7%2F24_Online_%26_Free-FF6B2B.svg)](https://platform.agentscope.io/)
 
 [[文档](https://qwenpaw.agentscope.io/)] [[English](README.md)] [[日本語](README_ja.md)] [[Русский](README_ru.md)]
 
@@ -60,17 +61,19 @@
 
 ## 新闻
 
-- [2026-06-01] **v1.1.10 — 子 Agent 派生 & 更多渠道** | Agent 可派生子 Agent 执行任务；腾讯元宝加入渠道。
+- [2026-06-11] **AgentScope 体验平台上线** — 支持免费部署 QwenPaw、插件分享与 Skill 市场。[立即体验 →](https://platform.agentscope.io/)
+
+- [2026-06-10] **v1.1.11 — 免费模型 OAuth & 插件市场** | 零配置免费模型一键 OAuth 认证；插件市场集成 AgentScope 平台。
 
   | 亮点 | 更新内容 |
   |------|----------|
-  | **Spawn Subagent** | 新增 `spawn_subagent` 工具，支持在工作区内派生临时子 Agent。 |
-  | **打开目录** | Coding 模式新增"打开目录"标签页，可直接引用本地项目而无需复制。 |
-  | **飞书话题回复** | Agent 支持在飞书消息话题中回复。 |
-  | **腾讯元宝渠道** | 新增腾讯元宝 Bot 渠道集成。 |
-  | **动态上传限制** | 上传大小限制可在控制台和渠道中动态配置。 |
+  | **免费模型 OAuth** | 零配置免费模型，一键 OAuth 认证即可使用。 |
+  | **插件市场** | 新增插件市场标签页，集成 AgentScope 平台。 |
+  | **MCP 工具白名单** | 支持按 MCP 服务器配置工具白名单，含前端开关 UI。 |
 
-  另有：OpenRouter 归因标头、桌面端内置 CLI、技能更新稳定性修复。[v1.1.10 发布说明 →](https://qwenpaw.agentscope.io/release-notes#v1.1.10)
+  另有：自进化技能创建、后端启动优化、飞书群会话共享、QQ 二维码授权。[v1.1.11 发布说明 →](https://qwenpaw.agentscope.io/release-notes#v1.1.11)
+
+- [2026-06-01] **v1.1.10** — 子 Agent 派生、打开目录、腾讯元宝渠道。[v1.1.10 发布说明 →](https://qwenpaw.agentscope.io/release-notes#v1.1.10)
 
 - [2026-05-27] **v1.1.9** — Coding 模式（三面板 Web IDE）、Tauri 桌面应用、统一访问控制。[v1.1.9 发布说明 →](https://qwenpaw.agentscope.io/release-notes#v1.1.9)
 
@@ -483,23 +486,22 @@ QwenPaw 内置多层安全防护机制，保障你的数据与系统安全：
 | **横向拓展**             | 更多频道、模型、技能、MCP 等 — **欢迎社区贡献**                                           | 征集中 |
 | **已有功能扩展与完善**   | 展示优化、下载提示、Windows 路径兼容等 — **欢迎社区贡献**                                 | 征集中 |
 | **客户端体验**           | 安装、更新、打包优化                                                                      | 进行中 |
-| **模型**                 | 端云模型智能切换                                                                          | 进行中 |
+| **模型**                 | 多模型切换                                                                                | 进行中 |
 |                          | OAuth                                                                                     | 计划中 |
 |                          | Response API                                                                              | 计划中 |
-| **主动性**               | 定时任务与心跳升级                                                                        | 进行中 |
-|                          | 主动式简报、定制推送                                                                      | 进行中 |
-|                          | 洞察系统：对话与交互挖掘需求                                                              | 计划中 |
 | **工作区**               | 结合 Sandbox 的文件权限管控                                                               | 进行中 |
 |                          | 子目录划分（配置、生产文件等）                                                            | 计划中 |
-| **Coding 能力**          | LSP、专用 Prompt、工作区版本控制、执行环境等配套 infra                                    | 计划中 |
+| **Coding 能力**          | LSP、专用 Prompt、工作区版本控制、执行环境等配套 infra                                    | 进行中 |
 |                          | 轻量原生接口                                                                              | 计划中 |
 |                          | 工具自进化                                                                                | 计划中 |
 |                          | 兼容 Claude Code 等既有 Agent                                                             | 计划中 |
 | **多智能体**             | 群聊                                                                                      | 计划中 |
-|                          | Subagent                                                                                  | 计划中 |
+|                          | Subagent 可视化                                                                           | 计划中 |
 |                          | HiClaw 企业级能力                                                                         | 计划中 |
-| **上下文管理**           | 上下文智能压缩                                                                            | 进行中 |
+| **上下文管理**           | 个人知识库                                                                                | 进行中 |
 |                          | 用户可选压缩（细粒度控制）                                                                | 计划中 |
+| **QwenPaw 应用**         | QwenPaw Creator                                                                           | 进行中 |
+|                          | QwenPaw Insight                                                                           | 进行中 |
 
 _状态说明：**进行中** — 正在积极开发；**计划中** — 已排队或设计中，也欢迎贡献；**征集中** — 我们强烈鼓励社区参与。_
 

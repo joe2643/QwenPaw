@@ -204,4 +204,19 @@ export const providerApi = {
     request<CodexOAuthStatus>("/models/codex-oauth/reload", {
       method: "POST",
     }),
+
+  /* ---- Provider OAuth ---- */
+
+  startOAuth: (providerId: string) =>
+    request<{ authorize_url: string; state: string; flow_type: string }>(
+      `/providers/${encodeURIComponent(providerId)}/oauth/start`,
+      { method: "POST" },
+    ),
+
+  getOAuthStatus: (providerId: string, state: string) =>
+    request<{ status: string; error?: string }>(
+      `/providers/${encodeURIComponent(
+        providerId,
+      )}/oauth/status?state=${encodeURIComponent(state)}`,
+    ),
 };

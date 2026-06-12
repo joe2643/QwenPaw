@@ -18,9 +18,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
+import signal
+import threading
 from contextlib import AsyncExitStack
 from datetime import timedelta
-from typing import Any, Literal
+from typing import Any, Dict, Literal
 
 import httpx
 from mcp import ClientSession
@@ -28,8 +32,81 @@ from mcp.client.stdio import StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamable_http_client
 
-from agentscope.mcp import StatefulClientBase
-from agentscope.mcp._mcp_function import MCPToolFunction
+from agentscope.mcp import MCPToolFunction, StatefulClientBase
+
+# OpenAI / Anthropic tool-call APIs reject any tools[].name that contains
+# characters outside this set. MCP, by contrast, allows '.', '/', ':' etc.,
+# so we have to sanitize before forwarding to the model and route back to the
+# original name on dispatch. Keep the regex identical to OpenAI's published
+# constraint to fail-fast against the strictest validator we know of.
+_TOOL_NAME_ALLOWED = re.compile(r"^[a-zA-Z0-9_-]+$")
+_TOOL_NAME_REPLACE = re.compile(r"[^a-zA-Z0-9_-]")
+
+
+def _sanitize_tool_name(raw: str, taken: set[str]) -> str:
+    """Map *raw* to a name matching ``^[a-zA-Z0-9_-]+$``, avoiding *taken*.
+
+    Returns *raw* unchanged when it is already valid AND not already in use.
+    Otherwise replaces every disallowed character with ``_`` and, if the
+    result collides with anything in *taken* (e.g. a real upstream tool that
+    happens to share the same sanitized form), appends ``_2``, ``_3``…
+    until unique. The empty-string edge case is mapped to ``_``.
+    """
+    if _TOOL_NAME_ALLOWED.match(raw) and raw not in taken:
+        return raw
+    base = _TOOL_NAME_REPLACE.sub("_", raw) or "_"
+    candidate = base
+    suffix = 2
+    while candidate in taken:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    return candidate
+
+
+class _SessionAliasProxy:
+    """Wrap a ``ClientSession`` to translate sanitized tool names back to
+    the real MCP names on ``call_tool``.
+
+    The toolkit dispatch path (``MCPToolFunction.__call__``) calls
+    ``self.session.call_tool(self.name, ...)`` directly on the underlying
+    ``mcp.ClientSession``, bypassing any ``call_tool`` override on this
+    client. Wrapping the session at the point we hand it to
+    ``MCPToolFunction`` is the only place the translation can happen
+    without forking ``MCPToolFunction`` itself. All other session
+    attributes are forwarded as-is via ``__getattr__``.
+    """
+
+    def __init__(
+        self,
+        session: ClientSession,
+        alias_to_real: dict[str, str],
+    ) -> None:
+        # Snapshot the mapping by reference; the client rebinds
+        # ``_name_alias_to_real`` to a fresh dict on reconnect, so this
+        # proxy keeps routing in-flight functions through the mapping
+        # that was current when the function was constructed.
+        self._session = session
+        self._alias_to_real = alias_to_real
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
+
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        real_name = self._alias_to_real.get(name, name)
+        # Forward ``arguments`` as keyword to match how
+        # ``MCPToolFunction.__call__`` invokes this method (and how the
+        # underlying ``ClientSession.call_tool`` is normally called).
+        return await self._session.call_tool(
+            real_name,
+            arguments=arguments,
+            **kwargs,
+        )
+
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +158,212 @@ def _is_401_error(exc: BaseException) -> bool:
     return False
 
 
+# Timeout for ``close()`` to wait for the lifecycle task before
+# cancelling and force-killing child processes.
+_CLOSE_TIMEOUT = 15.0
+
+# Graceful period between SIGTERM and SIGKILL when force-killing
+# orphaned MCP subprocesses.
+_FORCE_KILL_GRACE = 2.0
+
+# ----------------------------------------------------------------
+# Global PID registry for stdio MCP subprocesses.
+#
+# All StdIOStatefulClient instances share this registry so that
+# concurrent connections cannot mis-attribute PIDs.  A PID is
+# registered at spawn time and removed on normal teardown.  If
+# teardown fails, the PID is moved to _orphan_stdio_pids for
+# deferred cleanup by kill_orphaned_mcp_children().
+# ----------------------------------------------------------------
+_stdio_lock = threading.Lock()
+
+# pid -> server_name (active stdio children)
+_stdio_pids: Dict[int, str] = {}
+
+# pid -> pgid (captured at spawn time while child is alive)
+_stdio_pgids: Dict[int, int] = {}
+
+# PIDs that survived their session teardown (SDK cleanup failed).
+_orphan_stdio_pids: set = set()
+
+
+def _snapshot_child_pids() -> set[int]:
+    """Return PIDs of current child processes.
+
+    Uses ``/proc`` on Linux, falls back to ``psutil``,
+    then returns an empty set on unsupported platforms.
+    """
+    my_pid = os.getpid()
+    try:
+        children_path = f"/proc/{my_pid}/task/{my_pid}/children"
+        with open(
+            children_path,
+            encoding="utf-8",
+        ) as fh:
+            return {int(p) for p in fh.read().split() if p.strip()}
+    except (FileNotFoundError, OSError, ValueError):
+        pass
+    try:
+        import psutil  # type: ignore[import-untyped]
+
+        return {c.pid for c in psutil.Process(my_pid).children()}
+    except Exception:
+        pass
+    return set()
+
+
+def _pid_exists(pid: int) -> bool:
+    """Check whether *pid* is alive (cross-platform)."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+    except OSError:
+        return False
+
+
+def _register_stdio_pids(
+    pids: set[int],
+    server_name: str,
+) -> None:
+    """Register newly spawned stdio PIDs and their PGIDs.
+
+    Only stores pgid when pgid == pid (child is its own
+    process-group leader, guaranteed by start_new_session).
+    Skips storage otherwise to prevent killpg from hitting
+    the main application's process group.
+    """
+    pgids: Dict[int, int] = {}
+    for pid in pids:
+        try:
+            pgid = os.getpgid(pid)
+            if pgid == pid:
+                pgids[pid] = pgid
+        except (AttributeError, ProcessLookupError, OSError):
+            pass
+    with _stdio_lock:
+        for pid in pids:
+            _stdio_pids[pid] = server_name
+        _stdio_pgids.update(pgids)
+
+
+def _unregister_stdio_pids(pids: set[int]) -> None:
+    """Unregister PIDs on normal teardown.
+
+    If any PID is still alive, move it to orphan set instead
+    of dropping it silently.
+    """
+    if not pids:
+        return
+    _killpg = getattr(os, "killpg", None)
+    with _stdio_lock:
+        for pid in pids:
+            _stdio_pids.pop(pid, None)
+        for pid in pids:
+            pid_alive = _pid_exists(pid)
+            pgroup_alive = False
+            pgid = _stdio_pgids.get(pid)
+            if not pid_alive and pgid is not None and _killpg is not None:
+                try:
+                    _killpg(pgid, 0)
+                    pgroup_alive = True
+                except (
+                    ProcessLookupError,
+                    PermissionError,
+                    OSError,
+                ):
+                    pass
+            if pid_alive or pgroup_alive:
+                _orphan_stdio_pids.add(pid)
+            else:
+                _stdio_pgids.pop(pid, None)
+
+
+async def kill_orphaned_mcp_children(
+    include_active: bool = False,
+) -> None:
+    """Reap orphaned MCP stdio subprocesses.
+
+    Sends SIGTERM, waits ``_FORCE_KILL_GRACE`` seconds, then
+    escalates to SIGKILL for survivors.  Uses the spawn-time
+    pgid so reparented grandchildren are also reaped.
+
+    On Windows, SIGTERM is TerminateProcess (hard kill), so
+    the SIGKILL phase is skipped.
+
+    Args:
+        include_active: If True, also kills all PIDs in the
+            active registry (for final shutdown only).
+    """
+    with _stdio_lock:
+        pids: Dict[int, str] = {}
+        for opid in _orphan_stdio_pids:
+            pids[opid] = "orphan"
+        _orphan_stdio_pids.clear()
+        if include_active:
+            pids.update(dict(_stdio_pids))
+            _stdio_pids.clear()
+        pgids: Dict[int, int] = {
+            pid: _stdio_pgids[pid] for pid in pids if pid in _stdio_pgids
+        }
+        for pid in pgids:
+            _stdio_pgids.pop(pid, None)
+
+    if not pids:
+        return
+
+    _sigterm = signal.SIGTERM
+    _sigkill = getattr(signal, "SIGKILL", None)
+    _killpg = getattr(os, "killpg", None)
+    _is_win = os.name == "nt"
+
+    def _send(pid: int, sig: int) -> None:
+        pgid = pgids.get(pid)
+        if pgid is not None and _killpg is not None:
+            try:
+                _killpg(pgid, sig)
+                return
+            except (
+                ProcessLookupError,
+                PermissionError,
+                OSError,
+            ):
+                pass
+        try:
+            os.kill(pid, sig)
+        except (
+            ProcessLookupError,
+            PermissionError,
+            OSError,
+        ):
+            pass
+
+    for pid, name in pids.items():
+        _send(pid, _sigterm)
+        logger.debug(
+            "Sent SIGTERM to orphaned MCP process %d (%s)",
+            pid,
+            name,
+        )
+
+    # On Windows, SIGTERM is TerminateProcess (immediate).
+    if _is_win or _sigkill is None:
+        return
+
+    await asyncio.sleep(_FORCE_KILL_GRACE)
+
+    for pid, name in pids.items():
+        if not _pid_exists(pid):
+            continue
+        _send(pid, _sigkill)
+        logger.warning(
+            "Force-killed MCP process %d (%s) after SIGTERM",
+            pid,
+            name,
+        )
+
+
 class _MCPClientMixin:
     """Mixin providing shared tool-call and lifecycle logic for both clients.
 
@@ -108,10 +391,13 @@ class _MCPClientMixin:
     is_connected: bool
     _oauth_required: bool
     _cached_tools: Any
+    _name_alias_to_real: dict[str, str]
+    _tool_whitelist: set[str] | None
     _stop_event: asyncio.Event
     _reload_event: asyncio.Event
     _ready_event: asyncio.Event
     _lifecycle_task: asyncio.Task | None
+    _child_pids: set[int]
 
     # ------------------------------------------------------------------
     # Transport hook (implemented by each concrete subclass)
@@ -135,6 +421,20 @@ class _MCPClientMixin:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    async def _mark_and_reap_orphans(self) -> None:
+        """Mark tracked child PIDs as orphans if still alive,
+        then reap all orphans.
+
+        Called after each lifecycle iteration and on close
+        timeout.  No-op for non-stdio clients.
+        """
+        pids = getattr(self, "_child_pids", None)
+        if not pids:
+            return
+        _unregister_stdio_pids(pids)
+        self._child_pids = set()
+        await kill_orphaned_mcp_children()
+
     async def _run_lifecycle(self) -> None:  # noqa: C901
         """Run MCP client lifecycle in a dedicated task.
 
@@ -144,66 +444,87 @@ class _MCPClientMixin:
         """
         while not self._stop_event.is_set():
             try:
-                logger.debug(f"Connecting MCP client: {self.name}")
+                logger.debug(
+                    f"Connecting MCP client: {self.name}",
+                )
 
                 async with AsyncExitStack() as stack:
                     read_stream, write_stream = await self._setup_transport(
                         stack,
                     )
 
-                    self.session = ClientSession(read_stream, write_stream)
-                    await stack.enter_async_context(self.session)
+                    self.session = ClientSession(
+                        read_stream,
+                        write_stream,
+                    )
+                    await stack.enter_async_context(
+                        self.session,
+                    )
                     await self.session.initialize()
 
                     self.is_connected = True
                     self._ready_event.set()
-                    logger.info(f"MCP client connected: {self.name}")
+                    logger.info(
+                        f"MCP client connected: {self.name}",
+                    )
 
-                    # Wait for a reload or stop signal (0.1 s poll).
+                    # Wait for a reload or stop signal.
                     while (
                         not self._reload_event.is_set()
                         and not self._stop_event.is_set()
                     ):
                         await asyncio.sleep(0.1)
 
-                    # Clear state before the context manager exits and
-                    # tears down the transport / subprocess.
+                    # Clear state before the context manager
+                    # exits and tears down the transport.
                     self.session = None
                     self.is_connected = False
                     self._cached_tools = None
+                    self._name_alias_to_real = {}
 
                     if self._reload_event.is_set():
-                        logger.info(f"Reloading MCP client: {self.name}")
+                        logger.info(
+                            f"Reloading MCP client: " f"{self.name}",
+                        )
                         self._reload_event.clear()
                         self._ready_event.clear()
                     else:
-                        logger.info(f"Stopping MCP client: {self.name}")
+                        logger.info(
+                            f"Stopping MCP client: " f"{self.name}",
+                        )
 
-                # AsyncExitStack exits here in THIS task — no cross-task issue.
+                # AsyncExitStack exits here in THIS task.
 
             except Exception as e:
-                # 401 means the server requires OAuth; fail fast and signal
-                # connect() so it can raise instead of returning silently.
                 if _is_401_error(e):
                     logger.info(
-                        f"MCP client '{self.name}': server requires OAuth "
-                        "(HTTP 401). Authorize via the UI to connect.",
+                        f"MCP client '{self.name}': server "
+                        "requires OAuth (HTTP 401). "
+                        "Authorize via the UI to connect.",
                     )
                     self._oauth_required = True
                     self._stop_event.set()
                     self._ready_event.set()
                     return
                 logger.error(
-                    f"Error in MCP client lifecycle for {self.name}: {e}",
+                    "Error in MCP client lifecycle " f"for {self.name}: {e}",
                     exc_info=True,
                 )
                 self.session = None
                 self.is_connected = False
                 self._cached_tools = None
+                self._name_alias_to_real = {}
                 self._ready_event.clear()
                 await asyncio.sleep(1)
+            finally:
+                # After each iteration (whether clean exit,
+                # reload, or exception), kill any orphaned
+                # child processes the SDK failed to reap.
+                await self._mark_and_reap_orphans()
 
-        logger.info(f"MCP client lifecycle task exited: {self.name}")
+        logger.info(
+            f"MCP client lifecycle task exited: " f"{self.name}",
+        )
 
     async def connect(self, timeout: float = 30.0) -> None:
         """Connect to the MCP server.
@@ -294,11 +615,48 @@ class _MCPClientMixin:
     # Public API
     # ------------------------------------------------------------------
 
+    def _sanitize_server_tools(
+        self,
+        raw_tools: list,
+    ) -> tuple[list, dict[str, str]]:
+        """Sanitize tool names for model-side compatibility.
+
+        Returns ``(sanitized_tools, alias_to_real)`` where
+        ``alias_to_real`` maps each rewritten name back to the original
+        MCP name (only for tools that were actually renamed).
+        """
+        sanitized: list = []
+        alias_to_real: dict[str, str] = {}
+        taken: set[str] = {
+            t.name for t in raw_tools if _TOOL_NAME_ALLOWED.match(t.name)
+        }
+        for tool in raw_tools:
+            if _TOOL_NAME_ALLOWED.match(tool.name):
+                sanitized.append(tool)
+                continue
+            safe = _sanitize_tool_name(tool.name, taken)
+            taken.add(safe)
+            alias_to_real[safe] = tool.name
+            sanitized.append(tool.model_copy(update={"name": safe}))
+            logger.info(
+                "MCP client '%s': renamed tool '%s' -> '%s' for "
+                "model-side compatibility.",
+                self.name,
+                tool.name,
+                safe,
+            )
+        return sanitized, alias_to_real
+
     async def list_tools(self):
-        """Return all tools available from the MCP server.
+        """Return whitelisted tools from the MCP server.
+
+        Applies name sanitization (so all names match
+        ``^[a-zA-Z0-9_-]+$``) and then filters by ``_tool_whitelist``.
+        The whitelist stores **sanitized** names (the same names the
+        frontend and model see).
 
         Returns:
-            List of available MCP tools
+            List of MCP tools after sanitization and whitelist filtering.
 
         Raises:
             RuntimeError: If not connected
@@ -311,14 +669,49 @@ class _MCPClientMixin:
             self._handle_transport_error(exc)
             raise
 
-        self._cached_tools = res.tools
-        return res.tools
+        rewritten, alias_to_real = self._sanitize_server_tools(res.tools)
+
+        # Whitelist stores sanitized names (what the frontend displays).
+        whitelist = getattr(self, "_tool_whitelist", None)
+        if whitelist is not None:
+            rewritten = [t for t in rewritten if t.name in whitelist]
+            alias_to_real = {
+                k: v for k, v in alias_to_real.items() if k in whitelist
+            }
+
+        self._cached_tools = rewritten
+        self._name_alias_to_real = alias_to_real
+        return rewritten
+
+    async def list_all_tools(self):
+        """Return all tools from the MCP server, ignoring the whitelist.
+
+        Used by management APIs to show available tools so users can
+        configure which ones to enable. Applies name sanitization but
+        skips whitelist filtering.
+        """
+        self._validate_connection()
+
+        try:
+            res = await self.session.list_tools()
+        except Exception as exc:
+            self._handle_transport_error(exc)
+            raise
+
+        sanitized, _ = self._sanitize_server_tools(res.tools)
+        return sanitized
 
     async def call_tool(self, name: str, arguments: dict | None = None):
-        """Call a tool on the MCP server.
+        """Call a tool on the MCP server with its real MCP name.
+
+        Note: this is a pure pass-through and does NOT translate sanitized
+        aliases. Sanitization-aware dispatch lives on
+        :meth:`get_callable_function` (which is what agentscope's toolkit
+        actually invokes). Callers reaching this method directly should
+        pass the real MCP tool name.
 
         Args:
-            name: Tool name
+            name: The real MCP tool name (as returned by the server).
             arguments: Tool arguments (optional)
 
         Returns:
@@ -330,59 +723,136 @@ class _MCPClientMixin:
         self._validate_connection()
 
         try:
-            return await self.session.call_tool(name, arguments or {})
+            timeout = getattr(self, "_tool_call_timeout", None)
+            if timeout is None:
+                return await self.session.call_tool(name, arguments or {})
+            # Forwarded as read_timeout_seconds — the mcp library turns
+            # it into a JSON-RPC deadline so hung backends fail cleanly.
+            return await self.session.call_tool(
+                name,
+                arguments or {},
+                read_timeout_seconds=timedelta(seconds=timeout),
+            )
         except Exception as exc:
             self._handle_transport_error(exc)
             raise
 
-    async def close(self, ignore_errors: bool = True) -> None:
-        """Close the MCP client and stop its background lifecycle task.
+    async def get_callable_function(
+        self,
+        func_name: str,
+        wrap_tool_result: bool = True,
+        execution_timeout: float | None = None,
+    ) -> MCPToolFunction:
+        """Build the ``MCPToolFunction`` agentscope dispatches through, with
+        a session that translates sanitized names back to MCP-real names.
 
-        Unlike the old guard (``if not self.is_connected: return``), this
-        method always attempts to stop the lifecycle task when one is still
-        running.  The old guard was a bug: when the client is in a reconnect
-        loop (``is_connected=False`` but the task is alive and will spawn a
-        new subprocess the moment it wakes from ``asyncio.sleep``), skipping
-        the stop leaked the eventual subprocess permanently.
+        The agentscope toolkit reads ``mcp_tool.name`` from our
+        :meth:`list_tools` (already sanitized) and passes it here as
+        ``func_name``. Without intervention, ``MCPToolFunction.__call__``
+        would dispatch the sanitized name to a server that only knows the
+        real name, returning "Unknown tool".
+
+        We construct ``MCPToolFunction`` ourselves rather than delegating
+        to the inherited implementation so the proxy is wired in at
+        construction time — the returned function then exposes the
+        sanitized ``name`` (correct for the model) and dispatches the real
+        MCP name (correct for the server) without any post-hoc mutation.
+        """
+        self._validate_connection()
+
+        if self._cached_tools is None:
+            await self.list_tools()
+
+        target_tool = next(
+            (t for t in self._cached_tools if t.name == func_name),
+            None,
+        )
+        if target_tool is None:
+            raise ValueError(
+                f"Tool '{func_name}' not found in MCP server '{self.name}'",
+            )
+
+        session: Any = self.session
+        if self._name_alias_to_real:
+            session = _SessionAliasProxy(session, self._name_alias_to_real)
+
+        # Toolkit.register_mcp_client passes execution_timeout=None by
+        # default; fill in the client-configured per-call timeout so it
+        # actually reaches the MCP session.  Explicit callers still win.
+        if execution_timeout is None:
+            execution_timeout = getattr(self, "_tool_call_timeout", None)
+
+        return MCPToolFunction(
+            mcp_name=self.name,
+            tool=target_tool,
+            wrap_tool_result=wrap_tool_result,
+            session=session,
+            timeout=execution_timeout,
+        )
+
+    async def close(self, ignore_errors: bool = True) -> None:
+        """Close the MCP client and stop its lifecycle task.
+
+        Waits up to ``_CLOSE_TIMEOUT`` seconds for the lifecycle
+        task to finish.  If it doesn't, the task is cancelled
+        and any surviving child processes are force-killed.
 
         Args:
-            ignore_errors: When ``True`` (default), exceptions during cleanup
-                are logged but not re-raised.
+            ignore_errors: When ``True`` (default), exceptions
+                during cleanup are logged but not re-raised.
 
         Raises:
-            RuntimeError: If not connected and no task is running, and
-                ``ignore_errors`` is ``False``.
+            RuntimeError: If not connected and no task running,
+                and ``ignore_errors`` is ``False``.
         """
-        has_task = self._lifecycle_task is not None and not (
-            self._lifecycle_task.done()
+        has_task = (
+            self._lifecycle_task is not None
+            and not self._lifecycle_task.done()
         )
 
         if not self.is_connected and not has_task:
             if not ignore_errors:
                 raise RuntimeError(
-                    f"MCP client '{self.name}' is not connected. "
-                    f"Call connect() before closing.",
+                    f"MCP client '{self.name}' is not "
+                    "connected. Call connect() first.",
                 )
             return
 
         try:
-            # Signal stop and wait for the lifecycle task to finish.  This
-            # must happen even when is_connected is False (reconnect loop).
             self._stop_event.set()
             if self._lifecycle_task:
-                await self._lifecycle_task
+                try:
+                    await asyncio.wait_for(
+                        self._lifecycle_task,
+                        timeout=_CLOSE_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "MCP client '%s' close timed out "
+                        "after %.0fs, cancelling task",
+                        self.name,
+                        _CLOSE_TIMEOUT,
+                    )
+                    self._lifecycle_task.cancel()
+                    try:
+                        await asyncio.wait_for(
+                            self._lifecycle_task,
+                            timeout=1.0,
+                        )
+                    except (
+                        asyncio.TimeoutError,
+                        asyncio.CancelledError,
+                        Exception,
+                    ):
+                        pass
+                    await self._mark_and_reap_orphans()
         except Exception as e:
             if not ignore_errors:
                 raise
             logger.warning(
-                f"Error closing MCP client '{self.name}': {e}",
+                f"Error closing MCP client " f"'{self.name}': {e}",
             )
         finally:
-            # Clear the reference unconditionally — including when the current
-            # coroutine is cancelled (CancelledError is BaseException, not
-            # Exception, so it bypasses the except block above).  _stop_event
-            # is already set at this point, so the task will exit on its next
-            # iteration even if we don't hold the reference.
             self._lifecycle_task = None
 
     # ------------------------------------------------------------------
@@ -434,6 +904,7 @@ class _MCPClientMixin:
         )
         self.is_connected = False
         self._cached_tools = None
+        self._name_alias_to_real = {}
         # session is left as-is; see docstring above.
         if not self._stop_event.is_set():
             self._reload_event.set()
@@ -488,8 +959,9 @@ class StdIOStatefulClient(_MCPClientMixin, StatefulClientBase):
             "ignore",
             "replace",
         ] = "strict",
-        tool_call_timeout: float | None = None,
         read_timeout_seconds: float = 60 * 5,
+        tool_whitelist: set[str] | None = None,
+        tool_call_timeout: float | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the StdIO MCP client.
@@ -502,19 +974,16 @@ class StdIOStatefulClient(_MCPClientMixin, StatefulClientBase):
             cwd: The working directory to use when spawning the process
             encoding: The text encoding used when sending/receiving messages
             encoding_error_handler: The text encoding error handler
-            tool_call_timeout: Per-call timeout (seconds).  ``None``
-                keeps the MCP library default (no timeout).  Forwarded
-                to ``mcp.ClientSession.call_tool``'s
-                ``read_timeout_seconds`` for both direct ``call_tool``
-                usage and the ``MCPToolFunction`` callables handed to
-                agentscope's Toolkit, so hung backends become
-                surfaced errors instead of silent forever-waits.
-            read_timeout_seconds: Default MCP tool execution timeout
-                (seconds).  Mirrors the parameter name introduced by
-                upstream v1.1.6 #4061 so callers that expect the
-                upstream naming continue to work; falls back here when
-                ``tool_call_timeout`` is not set.
-            **kwargs: Additional keyword arguments accepted for compatibility
+            read_timeout_seconds: The read timeout seconds
+            tool_whitelist: Only expose these tools (sanitized names).
+                None means expose all.
+            tool_call_timeout: Per-call tool timeout (seconds).  ``None``
+                keeps the MCP library default.  Forwarded as
+                ``read_timeout_seconds`` on each ``call_tool`` and as the
+                default ``execution_timeout`` for ``MCPToolFunction``
+                callables, so hung backends surface as errors instead of
+                silent forever-waits.
+            **kwargs: Extra keyword arguments accepted for compatibility
                 with AgentScope's StdIOStatefulClient.
 
         Raises:
@@ -537,12 +1006,10 @@ class StdIOStatefulClient(_MCPClientMixin, StatefulClientBase):
             encoding_error_handler=encoding_error_handler,
         )
         self._tool_call_timeout = tool_call_timeout
-        # ``read_timeout_seconds`` mirrors upstream v1.1.6 #4061's
-        # naming so external callers (Toolkit, manager) reading it as
-        # an attribute keep working.  Falls back to ``tool_call_timeout``
-        # when explicit, otherwise the documented default.
         self.read_timeout_seconds = (
-            tool_call_timeout if tool_call_timeout is not None else read_timeout_seconds
+            tool_call_timeout
+            if tool_call_timeout is not None
+            else read_timeout_seconds
         )
 
         # Lifecycle management
@@ -556,292 +1023,40 @@ class StdIOStatefulClient(_MCPClientMixin, StatefulClientBase):
         self.session: ClientSession | None = None
         self.is_connected = False
 
-        # Tool cache
+        # Tool cache and whitelist
         self._cached_tools = None
+        self._name_alias_to_real: dict[str, str] = {}
+        self._tool_whitelist = tool_whitelist
 
-        self.timeout = kwargs.get("timeout")
+        # PID tracking for force-kill fallback
+        self._child_pids: set[int] = set()
 
-    async def _run_lifecycle(self) -> None:
-        """Run MCP client lifecycle in a dedicated task.
-
-        This ensures __aenter__ and __aexit__ are called in the same task,
-        avoiding the cross-task cancel scope error.
-        """
+    async def _setup_transport(
+        self,
+        stack: AsyncExitStack,
+    ) -> tuple[Any, Any]:
         from mcp.client.stdio import stdio_client
 
-        while not self._stop_event.is_set():
-            try:
-                logger.debug(f"Connecting MCP client: {self.name}")
+        pids_before = _snapshot_child_pids()
 
-                # Enter context manager in THIS task
-                async with AsyncExitStack() as stack:
-                    context = await stack.enter_async_context(
-                        stdio_client(self.server_params),
-                    )
-                    read_stream, write_stream = context[0], context[1]
-
-                    # Initialize session
-                    self.session = ClientSession(read_stream, write_stream)
-                    await stack.enter_async_context(self.session)
-                    await self.session.initialize()
-
-                    # Mark as connected and signal ready
-                    self.is_connected = True
-                    self._ready_event.set()
-                    logger.info(f"MCP client connected: {self.name}")
-
-                    # Wait for reload or stop signal
-                    while (
-                        not self._reload_event.is_set()
-                        and not self._stop_event.is_set()
-                    ):
-                        await asyncio.sleep(0.1)
-
-                    # Clear state before exiting context
-                    self.session = None
-                    self.is_connected = False
-                    self._cached_tools = None
-
-                    if self._reload_event.is_set():
-                        logger.info(f"Reloading MCP client: {self.name}")
-                        self._reload_event.clear()
-                        self._ready_event.clear()
-                        # Context manager will exit here, then loop restarts
-                    else:
-                        logger.info(f"Stopping MCP client: {self.name}")
-                        # Context manager will exit here, then loop exits
-
-                # Context manager exits cleanly in THIS task
-
-            except Exception as e:
-                logger.error(
-                    f"Error in MCP client lifecycle for {self.name}: {e}",
-                    exc_info=True,
-                )
-                self.session = None
-                self.is_connected = False
-                self._cached_tools = None
-                self._ready_event.clear()
-                await asyncio.sleep(1)
-
-        logger.info(f"MCP client lifecycle task exited: {self.name}")
-
-    async def connect(self, timeout: float = 30.0) -> None:
-        """Connect to MCP server.
-
-        Args:
-            timeout: Connection timeout in seconds (default 30s)
-
-        Raises:
-            RuntimeError: If already connected
-            asyncio.TimeoutError: If connection times out
-        """
-        if self.is_connected:
-            raise RuntimeError(
-                f"MCP client '{self.name}' is already connected. "
-                f"Call close() before connecting again.",
-            )
-
-        # Start lifecycle task
-        self._stop_event.clear()
-        self._lifecycle_task = asyncio.create_task(self._run_lifecycle())
-
-        # Wait for initial connection
-        try:
-            await asyncio.wait_for(self._ready_event.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            logger.error(
-                f"Timeout waiting for MCP client '{self.name}' to connect",
-            )
-            # Clean up failed task
-            self._stop_event.set()
-            if self._lifecycle_task:
-                await self._lifecycle_task
-            raise
-
-    async def close(self, ignore_errors: bool = True) -> None:
-        """Close MCP client and clean up resources.
-
-        Args:
-            ignore_errors: Whether to ignore errors during cleanup
-
-        Raises:
-            RuntimeError: If not connected (unless ignore_errors=True)
-
-        Note:
-            Backport of upstream v1.1.6 #4152: must still stop the
-            ``_lifecycle_task`` even when ``is_connected`` is currently
-            False — that happens during the 1-second sleep between
-            transport-error-driven reconnect attempts, and a naive
-            early return there leaks the lifecycle task forever.
-        """
-        has_running_lifecycle = (
-            self._lifecycle_task is not None and not self._lifecycle_task.done()
-        )
-        if not self.is_connected and not has_running_lifecycle:
-            if not ignore_errors:
-                raise RuntimeError(
-                    f"MCP client '{self.name}' is not connected. "
-                    f"Call connect() before closing.",
-                )
-            return
-
-        try:
-            # Signal stop and wait for lifecycle task to finish.  Even
-            # if the task is currently in the reconnect-sleep window,
-            # ``_stop_event`` flips its outer ``while not self._stop_event.is_set()``
-            # guard before it loops again, so await completes cleanly.
-            self._stop_event.set()
-            if self._lifecycle_task:
-                await self._lifecycle_task
-                self._lifecycle_task = None
-        except Exception as e:
-            if not ignore_errors:
-                raise
-            logger.warning(
-                f"Error closing MCP client '{self.name}': {e}",
-            )
-
-    async def reload(self, timeout: float = 30.0) -> None:
-        """Reload the MCP client (reconnect).
-
-        Args:
-            timeout: Connection timeout in seconds (default 30s)
-
-        Raises:
-            RuntimeError: If not connected
-            asyncio.TimeoutError: If reload times out
-        """
-        if not self.is_connected:
-            raise RuntimeError(
-                f"MCP client '{self.name}' is not connected. "
-                f"Call connect() first.",
-            )
-
-        logger.info(f"Triggering reload for MCP client: {self.name}")
-        self._reload_event.set()
-
-        # Wait for new connection
-        try:
-            await asyncio.wait_for(self._ready_event.wait(), timeout=timeout)
-            logger.info(f"Reload completed for MCP client: {self.name}")
-        except asyncio.TimeoutError:
-            logger.error(
-                f"Timeout waiting for MCP client '{self.name}' to reload",
-            )
-            raise
-
-    async def list_tools(self):
-        """Get all available tools from the server.
-
-        Returns:
-            List of available MCP tools
-
-        Raises:
-            RuntimeError: If not connected
-        """
-        self._validate_connection()
-
-        res = await self.session.list_tools()
-
-        # Cache the tools for later use
-        self._cached_tools = res.tools
-        return res.tools
-
-    async def call_tool(self, name: str, arguments: dict | None = None):
-        """Call a tool on the MCP server.
-
-        Args:
-            name: Tool name
-            arguments: Tool arguments (optional)
-
-        Returns:
-            Tool call result
-
-        Raises:
-            RuntimeError: If not connected
-            asyncio.TimeoutError: If ``tool_call_timeout`` was set and
-                the upstream didn't respond in time.
-        """
-        self._validate_connection()
-
-        return await _call_with_timeout(
-            self.session,
-            name,
-            arguments or {},
-            self._tool_call_timeout,
+        context = await stack.enter_async_context(
+            stdio_client(self.server_params),
         )
 
-    async def get_callable_function(
-        self,
-        func_name: str,
-        wrap_tool_result: bool = True,
-        execution_timeout: float | None = None,
-    ) -> MCPToolFunction:
-        """Override agentscope's default to inject our configured
-        ``tool_call_timeout`` when the caller doesn't specify one.
-
-        Toolkit.register_mcp_client builds each tool via
-        ``get_callable_function`` and passes ``execution_timeout=None``
-        by default; the timeout only reaches the MCP session if we
-        fill it in here.  Explicit callers can still override.
-        """
-        resolved_timeout = (
-            execution_timeout
-            if execution_timeout is not None
-            else self._tool_call_timeout
-        )
-        return await super().get_callable_function(
-            func_name=func_name,
-            wrap_tool_result=wrap_tool_result,
-            execution_timeout=resolved_timeout,
-        )
-
-    def _validate_connection(self) -> None:
-        """Validate the connection to the MCP server.
-
-        Raises:
-            RuntimeError: If not connected or session not initialized
-        """
-        if not self.is_connected:
-            raise RuntimeError(
-                f"MCP client '{self.name}' is not connected. "
-                f"Call connect() first.",
+        new_pids = _snapshot_child_pids() - pids_before
+        if new_pids:
+            self._child_pids = new_pids
+            _register_stdio_pids(new_pids, self.name)
+            logger.debug(
+                "MCP client '%s': tracked child PID(s) %s",
+                self.name,
+                new_pids,
             )
 
-        if not self.session:
-            raise RuntimeError(
-                f"MCP client '{self.name}' session is not initialized. "
-                f"Call connect() first.",
-            )
+        return context[0], context[1]
 
 
-async def _call_with_timeout(
-    session: ClientSession,
-    name: str,
-    arguments: dict,
-    timeout: float | None,
-):
-    """Invoke ``session.call_tool`` with optional bounded wait.
-
-    When ``timeout`` is ``None`` we pass through to the library
-    default (no read timeout).  When ``timeout`` is set we forward
-    it as ``read_timeout_seconds`` — the mcp library converts this
-    into a JSON-RPC deadline and the call fails cleanly (rather than
-    blocking on a hung subprocess).  Either way the coroutine is a
-    proper ``await`` point, so ``task.cancel()`` from outside (e.g.
-    ``/stop``) unwinds the call immediately.
-    """
-    if timeout is None:
-        return await session.call_tool(name, arguments)
-    return await session.call_tool(
-        name,
-        arguments,
-        read_timeout_seconds=timedelta(seconds=timeout),
-    )
-
-
-class HttpStatefulClient(StatefulClientBase):
+class HttpStatefulClient(_MCPClientMixin, StatefulClientBase):
     """HTTP/SSE MCP client with proper cross-task lifecycle management.
 
     Drop-in replacement for agentscope.mcp.HttpStatefulClient that solves
@@ -859,6 +1074,7 @@ class HttpStatefulClient(StatefulClientBase):
         headers: dict[str, str] | None = None,
         timeout: float = 30,
         sse_read_timeout: float = 60 * 5,
+        tool_whitelist: set[str] | None = None,
         tool_call_timeout: float | None = None,
         **client_kwargs: Any,
     ) -> None:
@@ -871,8 +1087,8 @@ class HttpStatefulClient(StatefulClientBase):
             headers: Additional headers to include in the HTTP request
             timeout: The timeout for the HTTP request in seconds
             sse_read_timeout: The timeout for reading SSE in seconds
-            tool_call_timeout: Per-call tool timeout (seconds) — see
-                :class:`StdIOStatefulClient` for full semantics.
+            tool_whitelist: Only expose these tools (sanitized names).
+                None means expose all.
             **client_kwargs: Additional keyword arguments for the client
 
         Raises:
@@ -899,15 +1115,13 @@ class HttpStatefulClient(StatefulClientBase):
         self.headers = headers
         self.timeout = timeout
         self.sse_read_timeout = sse_read_timeout
-        self.client_kwargs = client_kwargs
         self._tool_call_timeout = tool_call_timeout
-        # ``read_timeout_seconds`` mirrors upstream v1.1.6 #4061's
-        # naming so external code reading the attribute keeps working.
-        # For HTTP transports the SSE read timeout is the natural
-        # ceiling; explicit ``tool_call_timeout`` still wins.
         self.read_timeout_seconds = (
-            tool_call_timeout if tool_call_timeout is not None else sse_read_timeout
+            tool_call_timeout
+            if tool_call_timeout is not None
+            else sse_read_timeout
         )
+        self.client_kwargs = client_kwargs
 
         # Lifecycle management
         self._lifecycle_task: asyncio.Task | None = None
@@ -920,247 +1134,51 @@ class HttpStatefulClient(StatefulClientBase):
         self.session: ClientSession | None = None
         self.is_connected = False
 
-        # Tool cache
+        # Tool cache and whitelist
         self._cached_tools = None
+        self._name_alias_to_real: dict[str, str] = {}
+        self._tool_whitelist = tool_whitelist
 
-    async def _run_lifecycle(self) -> None:
-        """Run MCP client lifecycle in a dedicated task."""
-        while not self._stop_event.is_set():
-            try:
-                logger.debug(f"Connecting MCP client: {self.name}")
+        # No stdio children for HTTP clients
+        self._child_pids: set[int] = set()
 
-                # Enter context manager in THIS task
-                async with AsyncExitStack() as stack:
-                    # Select client based on transport
-                    if self.transport == "streamable_http":
-                        # Create httpx.AsyncClient with headers and timeout
-                        timeout_seconds = (
-                            self.timeout.total_seconds()
-                            if isinstance(self.timeout, timedelta)
-                            else self.timeout
-                        )
-                        sse_read_timeout_seconds = (
-                            self.sse_read_timeout.total_seconds()
-                            if isinstance(self.sse_read_timeout, timedelta)
-                            else self.sse_read_timeout
-                        )
-
-                        # Configure httpx client with MCP-recommended timeouts
-                        http_client = httpx.AsyncClient(
-                            headers=self.headers or {},
-                            timeout=httpx.Timeout(
-                                connect=timeout_seconds,
-                                read=sse_read_timeout_seconds,
-                                write=timeout_seconds,
-                                pool=timeout_seconds,
-                            ),
-                            **self.client_kwargs,
-                        )
-
-                        # Add http_client to exit stack for proper cleanup
-                        await stack.enter_async_context(http_client)
-
-                        context = await stack.enter_async_context(
-                            streamable_http_client(
-                                url=self.url,
-                                http_client=http_client,
-                            ),
-                        )
-                    else:
-                        context = await stack.enter_async_context(
-                            sse_client(
-                                url=self.url,
-                                headers=self.headers,
-                                timeout=self.timeout,
-                                sse_read_timeout=self.sse_read_timeout,
-                                **self.client_kwargs,
-                            ),
-                        )
-
-                    read_stream, write_stream = context[0], context[1]
-
-                    # Initialize session
-                    self.session = ClientSession(read_stream, write_stream)
-                    await stack.enter_async_context(self.session)
-                    await self.session.initialize()
-
-                    # Mark as connected and signal ready
-                    self.is_connected = True
-                    self._ready_event.set()
-                    logger.info(f"MCP client connected: {self.name}")
-
-                    # Wait for reload or stop signal
-                    while (
-                        not self._reload_event.is_set()
-                        and not self._stop_event.is_set()
-                    ):
-                        await asyncio.sleep(0.1)
-
-                    # Clear state before exiting context
-                    self.session = None
-                    self.is_connected = False
-                    self._cached_tools = None
-
-                    if self._reload_event.is_set():
-                        logger.info(f"Reloading MCP client: {self.name}")
-                        self._reload_event.clear()
-                        self._ready_event.clear()
-                    else:
-                        logger.info(f"Stopping MCP client: {self.name}")
-
-                # Context manager exits cleanly in THIS task
-
-            except Exception as e:
-                logger.error(
-                    f"Error in MCP client lifecycle for {self.name}: {e}",
-                    exc_info=True,
-                )
-                self.session = None
-                self.is_connected = False
-                self._cached_tools = None
-                self._ready_event.clear()
-                await asyncio.sleep(1)
-
-        logger.info(f"MCP client lifecycle task exited: {self.name}")
-
-    async def connect(self, timeout: float = 30.0) -> None:
-        """Connect to MCP server.
-
-        Args:
-            timeout: Connection timeout in seconds
-
-        Raises:
-            RuntimeError: If already connected
-            asyncio.TimeoutError: If connection times out
-        """
-        if self.is_connected:
-            raise RuntimeError(
-                f"MCP client '{self.name}' is already connected. "
-                f"Call close() before connecting again.",
-            )
-
-        self._stop_event.clear()
-        self._lifecycle_task = asyncio.create_task(self._run_lifecycle())
-
-        try:
-            await asyncio.wait_for(self._ready_event.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            logger.error(
-                f"Timeout waiting for MCP client '{self.name}' to connect",
-            )
-            self._stop_event.set()
-            if self._lifecycle_task:
-                await self._lifecycle_task
-            raise
-
-    async def close(self, ignore_errors: bool = True) -> None:
-        """Close MCP client and clean up resources.
-
-        Args:
-            ignore_errors: Whether to ignore errors during cleanup
-
-        Raises:
-            RuntimeError: If not connected (unless ignore_errors=True)
-
-        Note:
-            Backport of upstream v1.1.6 #4152: see the matching docstring
-            on ``StdIOStatefulClient.close`` — same lifecycle-task leak
-            applies to HTTP/SSE clients during reconnect sleep.
-        """
-        has_running_lifecycle = (
-            self._lifecycle_task is not None and not self._lifecycle_task.done()
-        )
-        if not self.is_connected and not has_running_lifecycle:
-            if not ignore_errors:
-                raise RuntimeError(
-                    f"MCP client '{self.name}' is not connected. "
-                    f"Call connect() before closing.",
-                )
-            return
-
-        try:
-            self._stop_event.set()
-            if self._lifecycle_task:
-                await self._lifecycle_task
-                self._lifecycle_task = None
-        except Exception as e:
-            if not ignore_errors:
-                raise
-            logger.warning(
-                f"Error closing MCP client '{self.name}': {e}",
-            )
-
-    async def list_tools(self):
-        """Get all available tools from the server.
-
-        Returns:
-            List of available MCP tools
-
-        Raises:
-            RuntimeError: If not connected
-        """
-        self._validate_connection()
-
-        res = await self.session.list_tools()
-        self._cached_tools = res.tools
-        return res.tools
-
-    async def call_tool(self, name: str, arguments: dict | None = None):
-        """Call a tool on the MCP server.
-
-        Args:
-            name: Tool name
-            arguments: Tool arguments (optional)
-
-        Returns:
-            Tool call result
-
-        Raises:
-            RuntimeError: If not connected
-            asyncio.TimeoutError: If ``tool_call_timeout`` was set and
-                the upstream didn't respond in time.
-        """
-        self._validate_connection()
-
-        return await _call_with_timeout(
-            self.session,
-            name,
-            arguments or {},
-            self._tool_call_timeout,
-        )
-
-    async def get_callable_function(
+    async def _setup_transport(
         self,
-        func_name: str,
-        wrap_tool_result: bool = True,
-        execution_timeout: float | None = None,
-    ) -> MCPToolFunction:
-        """See :meth:`StdIOStatefulClient.get_callable_function`."""
-        resolved_timeout = (
-            execution_timeout
-            if execution_timeout is not None
-            else self._tool_call_timeout
-        )
-        return await super().get_callable_function(
-            func_name=func_name,
-            wrap_tool_result=wrap_tool_result,
-            execution_timeout=resolved_timeout,
-        )
-
-    def _validate_connection(self) -> None:
-        """Validate the connection to the MCP server.
-
-        Raises:
-            RuntimeError: If not connected or session not initialized
-        """
-        if not self.is_connected:
-            raise RuntimeError(
-                f"MCP client '{self.name}' is not connected. "
-                f"Call connect() first.",
+        stack: AsyncExitStack,
+    ) -> tuple[Any, Any]:
+        if self.transport == "streamable_http":
+            timeout_seconds = (
+                self.timeout.total_seconds()
+                if isinstance(self.timeout, timedelta)
+                else self.timeout
             )
-
-        if not self.session:
-            raise RuntimeError(
-                f"MCP client '{self.name}' session is not initialized. "
-                f"Call connect() first.",
+            sse_read_timeout_seconds = (
+                self.sse_read_timeout.total_seconds()
+                if isinstance(self.sse_read_timeout, timedelta)
+                else self.sse_read_timeout
             )
+            http_client = httpx.AsyncClient(
+                headers=self.headers or {},
+                timeout=httpx.Timeout(
+                    connect=timeout_seconds,
+                    read=sse_read_timeout_seconds,
+                    write=timeout_seconds,
+                    pool=timeout_seconds,
+                ),
+                **self.client_kwargs,
+            )
+            await stack.enter_async_context(http_client)
+            context = await stack.enter_async_context(
+                streamable_http_client(url=self.url, http_client=http_client),
+            )
+        else:
+            context = await stack.enter_async_context(
+                sse_client(
+                    url=self.url,
+                    headers=self.headers,
+                    timeout=self.timeout,
+                    sse_read_timeout=self.sse_read_timeout,
+                    **self.client_kwargs,
+                ),
+            )
+        return context[0], context[1]
