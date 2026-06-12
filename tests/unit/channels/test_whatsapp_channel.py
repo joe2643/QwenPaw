@@ -1273,6 +1273,7 @@ class TestUpdateConfigDeadClientRestart:
     async def test_healthy_client_allows_in_place_patch(self):
         ch = _make_channel()
         ch._connected = True  # client is alive
+        ch._client.is_connected = True
         result = await ch.update_config(
             {
                 "enabled": True,
@@ -1283,6 +1284,26 @@ class TestUpdateConfigDeadClientRestart:
         assert result is True
         # Soft field took effect without restart.
         assert ch._send_read_receipts is False
+
+    @pytest.mark.asyncio
+    async def test_eof_zombie_forces_full_restart(self):
+        """The 2026-06-07 zombie: a server-forced logout surfaced only as a
+        websocket EOF (no DisconnectedEv), so ``_connected`` stayed stuck at
+        True while the underlying socket was dead.  ``update_config`` must
+        consult the authoritative ``is_connected`` and force a restart, else
+        a Console re-pair + Save keeps the dead client and WhatsApp never
+        comes back.
+        """
+        ch = _make_channel()
+        ch._connected = True  # stale — DisconnectedEv never fired
+        ch._client.is_connected = False  # whatsmeow says the socket is dead
+        result = await ch.update_config(
+            {
+                "enabled": True,
+                "auth_dir": ch._auth_dir,
+            },
+        )
+        assert result is False
 
 
 # ===================================================================

@@ -398,6 +398,19 @@ async def put_channel(
     setattr(agent.config.channels, channel_name, channel_config)
     save_agent_config(agent.agent_id, agent.config)
 
+    # WhatsApp: if the user just re-linked via the Console QR / pair flow,
+    # a temporary pairing client (see /channels/whatsapp/qrcode and
+    # /channels/whatsapp/pair) is still connected to the freshly-paired
+    # device.  WhatsApp permits only one socket per device and neonize holds
+    # an exclusive SQLite lock on neonize.db, so the channel restart the
+    # reload below triggers would collide with it (one connection gets
+    # kicked with a stream-end / inbound messages silently dropped).  Tear
+    # the pairing client down first so the restarted channel owns the single
+    # connection cleanly and Save actually brings WhatsApp back. No-op when
+    # no pairing is in progress.
+    if channel_name == "whatsapp":
+        await _teardown_whatsapp_pair_client(agent.agent_id)
+
     # Hot reload config (async, non-blocking)
     schedule_agent_reload(request, agent.agent_id)
 
@@ -988,6 +1001,45 @@ def _get_wa_pair_state(agent_id: str) -> dict:
             "task": None,
         }
     return _whatsapp_pair_states[agent_id]
+
+
+async def _teardown_whatsapp_pair_client(agent_id: str) -> None:
+    """Disconnect + cancel the temporary WhatsApp pairing client.
+
+    The Console QR / pair endpoints (``/channels/whatsapp/qrcode`` and
+    ``/channels/whatsapp/pair``) open a short-lived ``NewAClient`` against
+    the same ``neonize.db`` the live channel uses, purely to drive the
+    QR / pair-code handshake.  Once pairing succeeds that client stays
+    connected, holding WhatsApp's single-socket-per-device slot and the
+    SQLite lock.  Call this before restarting the channel so the restart
+    doesn't fight it.  Best-effort and idempotent: never raises, and is a
+    no-op when no pairing client is registered.
+    """
+    import asyncio
+
+    state = _get_wa_pair_state(agent_id)
+    client = state.get("client")
+    if client is not None:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+    task = state.get("task")
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await asyncio.wait_for(task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            pass
+    state.update(
+        {
+            "client": None,
+            "code": None,
+            "status": "idle",
+            "qr_data": None,
+            "task": None,
+        },
+    )
 
 
 def _get_wa_auth_dir(agent) -> str:

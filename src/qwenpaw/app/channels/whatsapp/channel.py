@@ -617,11 +617,34 @@ class WhatsAppChannel(BaseChannel):
         # connected".  Force a full restart so the channel teardown +
         # fresh start picks up any newly-paired credentials in
         # ``neonize.db`` and fires ``ConnectedEv`` cleanly.
-        if not self._connected:
+        #
+        # ``self._connected`` alone is NOT trustworthy here: a server-forced
+        # logout that surfaces only as a websocket EOF read error (no
+        # ``DisconnectedEv`` / ``ConnectFailureEv`` / ``KeepAliveTimeoutEv``)
+        # leaves ``_connected`` stuck at True even though the socket is dead
+        # — the exact zombie this guard exists to catch.  Seen live
+        # 2026-06-07: the client logged "Received stream end frame" + EOF,
+        # the ``whatsmeow_device`` row in neonize.db was wiped, yet
+        # ``_connected`` stayed True, so a Console re-pair + Save took the
+        # in-place path and kept the dead client (WhatsApp never came back).
+        # Cross-check the authoritative whatsmeow state via ``is_connected``
+        # (queries the Go client directly).  If either signal says dead,
+        # force the restart so a re-pair in the Console actually takes effect
+        # on Save.
+        client_alive = bool(self._connected)
+        if client_alive and self._client is not None:
+            try:
+                client_alive = bool(self._client.is_connected)
+            except Exception:
+                # A client too broken to even answer is_connected is dead.
+                client_alive = False
+        if not client_alive:
             logger.info(
                 "whatsapp: update_config: neonize client is dead "
-                "(_connected=False) — triggering full restart so the "
+                "(_connected=%s, live=%s) — triggering full restart so the "
                 "fresh client re-reads device credentials.",
+                self._connected,
+                client_alive,
             )
             return False
 
@@ -3040,7 +3063,14 @@ class WhatsAppChannel(BaseChannel):
             elif t == ContentType.VIDEO:
                 await self._client.send_video(jid, file_path)
             elif t == ContentType.AUDIO:
-                await self._client.send_audio(jid, file_path, ptt=True)
+                # WhatsApp voice notes (PTT) are meant for OGG/Opus.  Sending
+                # MP3/M4A music with ptt=True can be accepted by Web/Desktop but
+                # rejected or muted by WhatsApp Android before download/share.
+                # Use normal audio messages for music formats; keep PTT only for
+                # opus/ogg-style voice-note files.
+                suffix = os.path.splitext(file_path)[1].lower()
+                ptt = suffix in {".ogg", ".opus"}
+                await self._client.send_audio(jid, file_path, ptt=ptt)
             else:  # FILE
                 # Extract filename from path to fix the "Untitled" issue on WhatsApp
                 filename = os.path.basename(file_path)
