@@ -337,6 +337,17 @@ LLM_ACQUIRE_TIMEOUT = EnvVarLoader.get_float(
     min_value=10.0,
 )
 
+# Fallback model used when a Mythos-class Claude model (claude-fable-*)
+# ends a response with stop_reason="refusal" and no content (streaming
+# safety classifier).  The call is retried once on the SAME provider
+# with this model id; Opus has no Mythos-class streaming classifier.
+# Set to an empty string to disable — the user then just sees the
+# refusal notice.
+LLM_REFUSAL_FALLBACK_MODEL = EnvVarLoader.get_str(
+    "QWENPAW_LLM_REFUSAL_FALLBACK_MODEL",
+    "claude-opus-4-8",
+)
+
 # Tool guard approval timeout (seconds).
 try:
     TOOL_GUARD_APPROVAL_TIMEOUT_SECONDS = max(

@@ -36,8 +36,10 @@ except ImportError:  # pragma: no cover - compatibility fallback
 from .utils.message_request_normalizer import (
     normalize_messages_for_model_request,
 )
+from ..constant import LLM_REFUSAL_FALLBACK_MODEL
 from ..exceptions import ProviderError, ModelFormatterError
 from ..providers import ProviderManager
+from ..providers.refusal_fallback_model import RefusalFallbackChatModel
 from ..providers.retry_chat_model import (
     RetryChatModel,
     RetryConfig,
@@ -1163,10 +1165,12 @@ def create_model_and_formatter(
     model_slot = None
     retry_config = None
     rate_limit_config = None
+    agent_language = None
     if agent_id:
         try:
             agent_config = load_agent_config(agent_id)
             model_slot = agent_config.active_model
+            agent_language = getattr(agent_config, "language", None)
             retry_config = RetryConfig(
                 enabled=agent_config.running.llm_retry_enabled,
                 max_retries=agent_config.running.llm_max_retries,
@@ -1219,8 +1223,90 @@ def create_model_and_formatter(
         retry_config=retry_config,
         rate_limit_config=rate_limit_config,
     )
+    wrapped_model = _wrap_refusal_fallback(
+        wrapped_model,
+        provider_id,
+        retry_config,
+        rate_limit_config,
+        language=agent_language,
+    )
 
     return wrapped_model, formatter
+
+
+# One-liner embedded at the top of fallback replies so users can see the
+# answer came from the fallback model.  Embedded (not sent separately):
+# a trailing standalone notice message gets dropped or replaces the real
+# reply under the channels' preamble-buffer logic.
+_REFUSAL_NOTICE_TEMPLATES = {
+    "zh": "ℹ️ 原模型 {primary} 被安全分類器拒絕，此回覆已由 {fallback} 完成\n",
+    "en": (
+        "ℹ️ The primary model ({primary}) refused this reply "
+        "(safety classifier); completed with {fallback} instead\n"
+    ),
+    "ru": (
+        "ℹ️ Основная модель ({primary}) отклонила этот ответ "
+        "(классификатор безопасности); выполнено моделью {fallback}\n"
+    ),
+}
+
+
+def _wrap_refusal_fallback(
+    wrapped_model: ChatModelBase,
+    provider_id: str,
+    retry_config: Optional[RetryConfig],
+    rate_limit_config: Optional[RateLimitConfig],
+    language: Optional[str] = None,
+) -> ChatModelBase:
+    """Add a one-shot refusal fallback for Mythos-class Claude models.
+
+    claude-fable-* models can end a response with
+    ``stop_reason="refusal"`` and no content (streaming safety
+    classifier); the call is then retried once on the same provider
+    with ``LLM_REFUSAL_FALLBACK_MODEL``.  Other models — and a
+    fallback id equal to the primary — return the stack unchanged.
+    The fallback model is built lazily on first refusal, with its own
+    TokenRecording/Retry wrapping so usage is attributed correctly.
+    """
+    primary_name = getattr(wrapped_model, "model_name", "") or ""
+    fallback_id = (LLM_REFUSAL_FALLBACK_MODEL or "").strip()
+    if (
+        not fallback_id
+        or not primary_name.startswith("claude-fable")
+        or fallback_id == primary_name
+    ):
+        return wrapped_model
+
+    def _build_fallback() -> ChatModelBase:
+        provider = ProviderManager.get_instance().get_provider(provider_id)
+        if provider is None:
+            raise ProviderError(
+                message=(
+                    f"Provider '{provider_id}' not found for "
+                    f"refusal fallback model '{fallback_id}'."
+                ),
+            )
+        fallback = provider.get_chat_model_instance(fallback_id)
+        fallback = TokenRecordingModelWrapper(provider_id, fallback)
+        return RetryChatModel(
+            fallback,
+            retry_config=retry_config,
+            rate_limit_config=rate_limit_config,
+        )
+
+    lang_key = (language or "en").split("-")[0].lower()
+    template = _REFUSAL_NOTICE_TEMPLATES.get(
+        lang_key,
+        _REFUSAL_NOTICE_TEMPLATES["en"],
+    )
+    notice = template.format(primary=primary_name, fallback=fallback_id)
+
+    return RefusalFallbackChatModel(
+        wrapped_model,
+        _build_fallback,
+        fallback_id,
+        notice_text=notice,
+    )
 
 
 def _create_formatter_instance(

@@ -689,6 +689,16 @@ ANTHROPIC_MODELS: List[ModelInfo] = []
 # with heredocs) don't get truncated mid-stream.
 CLAUDE_OAUTH_MODELS: List[ModelInfo] = [
     ModelInfo(
+        id="claude-fable-5",
+        name="Claude Fable 5",
+        supports_image=True,
+        supports_video=False,
+        probe_source="documentation",
+        max_tokens=128000,
+        max_input_length=1000000,
+        generate_kwargs={"max_tokens": 128000},
+    ),
+    ModelInfo(
         id="claude-opus-4-8",
         name="Claude Opus 4.8",
         supports_image=True,

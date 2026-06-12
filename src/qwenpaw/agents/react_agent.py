@@ -79,7 +79,10 @@ from ..constant import (
     MEDIA_UNSUPPORTED_PLACEHOLDER,
     WORKING_DIR,
 )
-from ..exceptions import ModelContextLengthExceededException
+from ..exceptions import (
+    ModelContextLengthExceededException,
+    ModelRefusalException,
+)
 from ..providers.model_capability_cache import get_capability_cache
 
 if TYPE_CHECKING:
@@ -1525,6 +1528,14 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             return await self._reasoning_with_media_fallback(tool_choice)
         except asyncio.CancelledError:
             raise
+        except ModelRefusalException as refusal_exc:
+            # Anthropic's streaming safety classifier hard-stopped the
+            # response with no content (stop_reason="refusal", Fable 5 /
+            # Mythos-class).  Caught HERE — not around the first model
+            # call inside _reasoning_with_media_fallback — so the
+            # media-retry calls are covered too; a refusal anywhere in
+            # the turn surfaces the notice, not an error tombstone.
+            return await self._build_refusal_reply(refusal_exc)
         except Exception as e:
             await self._record_reasoning_failure(e, tool_choice)
             raise
@@ -1587,6 +1598,9 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             # doesn't go silent; the user can then ``/new`` or ``/compact``.
             return await self._build_context_exceeded_reply(ctx_exc)
         except Exception as e:
+            # ModelRefusalException also lands here and re-raises (it is
+            # not a media error) — the outer ``_reasoning`` catches it,
+            # covering the media-retry calls below as well.
             if not self._is_bad_request_or_media_error(e):
                 raise
 
@@ -1773,6 +1787,30 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         ),
     }
 
+    # User-facing text per agent language for a safety-classifier refusal
+    # (Anthropic ``stop_reason="refusal"`` with no content).  Without this
+    # the turn ends silently and the channel sees nothing.
+    _REFUSAL_TEXT = {
+        "zh": (
+            "⚠️ 模型的安全分類器中止了這次回覆（refusal），未產生任何內容。"
+            "請換個說法重試；若持續出現，可用 /compact 壓縮歷史，"
+            "或用 /model 切換模型。"
+        ),
+        "en": (
+            "⚠️ The model's safety classifier aborted this reply "
+            "(stop_reason=refusal); no content was produced. "
+            "Please rephrase and retry; if it keeps happening, "
+            "run /compact to compress the history or /model to "
+            "switch models."
+        ),
+        "ru": (
+            "⚠️ Классификатор безопасности модели прервал этот ответ "
+            "(refusal); содержимое не сгенерировано. Переформулируйте "
+            "запрос; если повторяется — /compact для сжатия истории "
+            "или /model для смены модели."
+        ),
+    }
+
     async def _build_context_exceeded_reply(
         self,
         exc: ModelContextLengthExceededException,
@@ -1783,20 +1821,12 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
         parser now raises ``ModelContextLengthExceededException`` (see
         ``openai_chat_model_compat``).  Without this handler the agent
         run would propagate the error and the channel would see an empty
-        reply.  Instead, we:
-
-        1. Replace the empty assistant placeholder that the parent's
-           ``_reasoning`` finally-block added (when the stream raised
-           mid-iteration) with a real TextBlock so the next turn's
-           history doesn't carry an empty entry.
-        2. Print the message with ``last=True`` so streaming channels
-           emit it as the final chunk.
-        3. Return it for the ReAct loop to use as ``reply_msg`` — no
-           tool_use → the loop exits naturally.
+        reply; see :meth:`_surface_notice_reply` for how the notice is
+        delivered.
         """
-        from agentscope.message import TextBlock  # local: avoid cycle on import
-
-        lang = (self._language or "en").lower()
+        # split("-") so regioned codes ("zh-CN") match their base entry
+        # instead of silently falling back to English.
+        lang = (self._language or "en").lower().split("-")[0]
         text = self._CONTEXT_EXCEEDED_TEXT.get(
             lang,
             self._CONTEXT_EXCEEDED_TEXT["en"],
@@ -1812,6 +1842,48 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             if hasattr(exc, "details")
             else "?",
         )
+
+        return await self._surface_notice_reply(text)
+
+    async def _build_refusal_reply(self, exc: ModelRefusalException) -> Msg:
+        """Convert a safety-classifier refusal into a user-visible reply.
+
+        Anthropic's Mythos-class streaming classifier ends the response
+        with ``stop_reason="refusal"`` and no content; the provider
+        wrapper surfaces it as :class:`ModelRefusalException` (see
+        ``anthropic_provider``).  Same surfacing path as
+        :meth:`_build_context_exceeded_reply` so the channel doesn't go
+        silent.
+        """
+        lang = (self._language or "en").lower().split("-")[0]
+        text = self._REFUSAL_TEXT.get(lang, self._REFUSAL_TEXT["en"])
+
+        details = getattr(exc, "details", None) or {}
+        logger.warning(
+            "Surfacing ModelRefusalException to user "
+            "(model=%s, response_id=%s)",
+            details.get("model_name", "unknown"),
+            details.get("response_id", "?"),
+        )
+
+        return await self._surface_notice_reply(text)
+
+    async def _surface_notice_reply(self, text: str) -> Msg:
+        """Materialize *text* as the assistant's reply for this turn.
+
+        Shared tail of the error-surfacing paths (context overflow,
+        safety refusal):
+
+        1. Replace the empty assistant placeholder that the parent's
+           ``_reasoning`` finally-block added (when the stream raised
+           mid-iteration) with a real TextBlock so the next turn's
+           history doesn't carry an empty entry.
+        2. Print the message with ``last=True`` so streaming channels
+           emit it as the final chunk.
+        3. Return it for the ReAct loop to use as ``reply_msg`` — no
+           tool_use → the loop exits naturally.
+        """
+        from agentscope.message import TextBlock  # local: avoid cycle on import
 
         # Try to mutate the empty placeholder the parent's `_reasoning`
         # finally already inserted, so memory doesn't keep an empty entry.
@@ -1850,7 +1922,7 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
                 await self.memory.add(msg)
             except Exception:  # pylint: disable=broad-exception-caught
                 logger.warning(
-                    "Failed to append context-exceeded reply to memory",
+                    "Failed to append notice reply to memory",
                     exc_info=True,
                 )
 
@@ -1858,7 +1930,7 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
             await self.print(msg, True)
         except Exception:  # pylint: disable=broad-exception-caught
             logger.warning(
-                "Failed to print context-exceeded reply",
+                "Failed to print notice reply",
                 exc_info=True,
             )
 
@@ -1985,6 +2057,12 @@ class QwenPawAgent(CodingModeMixin, ToolGuardMixin, ReActAgent):
                             model_key,
                             str(e)[:160],
                         )
+        except ModelRefusalException as refusal_exc:
+            # The safety classifier can fire on the summarize call itself
+            # or on its media-retry calls; the inner generic handler
+            # re-raises it (not a media error), so refusals from every
+            # call site land here.  Surface the notice either way.
+            return await self._build_refusal_reply(refusal_exc)
         finally:
             self._in_summarizing = False
             if should_strip and self._uses_request_time_media_normalization():

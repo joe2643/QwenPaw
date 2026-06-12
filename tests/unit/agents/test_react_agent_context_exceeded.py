@@ -56,6 +56,9 @@ def _make_fake_self(
         print=fake_print,
         print_calls=print_calls,
     )
+    fake._surface_notice_reply = (
+        lambda text: QwenPawAgent._surface_notice_reply(fake, text)
+    )
     return fake
 
 
@@ -173,6 +176,9 @@ async def test_memory_failure_does_not_raise() -> None:
         memory=_BrokenMemory([]),
         print=fake_print,
     )
+    fake._surface_notice_reply = (
+        lambda text: QwenPawAgent._surface_notice_reply(fake, text)
+    )
     msg = await QwenPawAgent._build_context_exceeded_reply(
         fake,
         ModelContextLengthExceededException("m", details={}),
@@ -192,6 +198,9 @@ async def test_print_failure_does_not_raise() -> None:
         name="test-agent",
         memory=_FakeMemory([]),
         print=broken_print,
+    )
+    fake._surface_notice_reply = (
+        lambda text: QwenPawAgent._surface_notice_reply(fake, text)
     )
     msg = await QwenPawAgent._build_context_exceeded_reply(
         fake,

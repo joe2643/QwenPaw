@@ -101,6 +101,35 @@ class SkillsError(AgentRuntimeErrorException):
         super().__init__("SKILLS_ERROR", message, details)
 
 
+class ModelRefusalException(AgentRuntimeErrorException):
+    """Raised when the model API ends a response with
+    ``stop_reason="refusal"`` and no usable content.
+
+    Anthropic's Mythos-class models (e.g. claude-fable-5) run a streaming
+    safety classifier that can hard-stop a response mid-flight.  The HTTP
+    call itself succeeds, so without this typed exception the agent loop
+    would treat the empty response as a normal completion and the channel
+    would go silent.
+    """
+
+    def __init__(
+        self,
+        model_name: str,
+        response_id: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        details = dict(details or {})
+        details["model_name"] = model_name
+        if response_id:
+            details["response_id"] = response_id
+        super().__init__(
+            "MODEL_REFUSAL",
+            f"Model '{model_name}' ended the response with "
+            'stop_reason="refusal" and produced no content',
+            details,
+        )
+
+
 # ==================== LLM API Exception Converter ====================
 
 

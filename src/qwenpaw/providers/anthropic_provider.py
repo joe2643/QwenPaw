@@ -6,7 +6,9 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
+import os
 import time
+from datetime import datetime
 from typing import Any, Dict, List
 
 import httpx
@@ -21,6 +23,7 @@ from qwenpaw.providers.multimodal_prober import (
     evaluate_image_probe_answer,
 )
 from qwenpaw.providers.provider import ModelInfo, Provider
+from qwenpaw.exceptions import ModelRefusalException
 from qwenpaw.local_models.tag_parser import (
     parse_tool_calls_from_text,
     text_contains_tool_call_tag,
@@ -465,21 +468,164 @@ def _inject_cache_metadata(resp: Any, buf: dict[str, int]) -> None:
     usage.metadata = md
 
 
+# ------------------------------------------------------------------ #
+# Model fallback / safety-reject detection (Fable 5 / Mythos-class)   #
+# ------------------------------------------------------------------ #
+# Mythos-class models (claude-fable-5) silently fall back to another
+# model (e.g. claude-opus-4-8) when a safety classifier blocks the
+# request, and may emit unusual ``stop_reason`` values on refusals.
+# We log every requested-vs-actual model mismatch and any non-standard
+# stop_reason to a JSONL file so pipeline failures can be diagnosed.
+_FALLBACK_LOG_PATH = os.path.expanduser(
+    "~/.copaw/logs/claude_model_fallback.jsonl",
+)
+_KNOWN_STOP_REASONS = frozenset(
+    {"end_turn", "tool_use", "max_tokens", "stop_sequence", "pause_turn"},
+)
+
+
+def _log_model_anomaly(
+    requested_model: str | None,
+    actual_model: str | None,
+    stop_reason: str | None,
+    response_id: str | None,
+    kind: str,
+) -> None:
+    """Append one JSONL record describing a model fallback or an
+    unexpected stop_reason.  Best-effort — never raises into the
+    request path.
+    """
+    try:
+        entry = {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "kind": kind,  # "model_fallback" | "unusual_stop_reason"
+            "requested_model": requested_model,
+            "actual_model": actual_model,
+            "stop_reason": stop_reason,
+            "response_id": response_id,
+        }
+        logger.warning("Claude model anomaly: %s", entry)
+        os.makedirs(os.path.dirname(_FALLBACK_LOG_PATH), exist_ok=True)
+        with open(_FALLBACK_LOG_PATH, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:  # pragma: no cover — logging must never break calls
+        logger.debug("fallback-log write failed", exc_info=True)
+
+
+def _resp_has_visible_content(resp: Any) -> bool:
+    """True when *resp* carries a non-empty text or tool_use block."""
+    for block in getattr(resp, "content", None) or []:
+        btype = getattr(block, "type", None)
+        if btype == "tool_use":
+            return True
+        if btype == "text" and (getattr(block, "text", "") or "").strip():
+            return True
+    return False
+
+
+def _check_response_model(
+    requested_model: str | None,
+    actual_model: str | None,
+    stop_reason: str | None,
+    response_id: str | None,
+) -> None:
+    """Compare requested vs actual model + stop_reason and log anomalies."""
+    if (
+        requested_model
+        and actual_model
+        and actual_model != requested_model
+    ):
+        _log_model_anomaly(
+            requested_model,
+            actual_model,
+            stop_reason,
+            response_id,
+            "model_fallback",
+        )
+    if stop_reason and stop_reason not in _KNOWN_STOP_REASONS:
+        _log_model_anomaly(
+            requested_model,
+            actual_model,
+            stop_reason,
+            response_id,
+            "unusual_stop_reason",
+        )
+
+
 async def _peek_stream_for_cache(
     sdk_stream: Any,
-    cache_buf: dict[str, int],
+    cache_buf: dict[str, int] | None,
+    requested_model: str | None = None,
 ) -> Any:
     """Pass-through wrapper around an Anthropic SDK ``AsyncStream`` that
     copies cache token counts out of the ``message_start`` event into
     ``cache_buf``.  Anthropic only reports ``cache_*_input_tokens`` on
     that single event; later ``message_delta`` events carry only output
     token deltas, so a one-shot capture is enough.
+
+    Also watches ``message_start`` for the *actual* responding model and
+    ``message_delta`` for the final ``stop_reason`` so Mythos-class
+    safety fallbacks (Fable 5 → Opus) get logged.
+
+    Raises :class:`ModelRefusalException` when the stream ends with
+    ``stop_reason="refusal"`` without having produced any visible
+    content (text or tool_use) — otherwise the agent loop would treat
+    the empty response as a normal completion and the channel would go
+    silent.
     """
+    actual_model: str | None = None
+    response_id: str | None = None
+    has_visible_content = False
     async for event in sdk_stream:
-        if getattr(event, "type", None) == "message_start":
+        etype = getattr(event, "type", None)
+        if etype == "message_start":
             msg = getattr(event, "message", None)
             if msg is not None:
-                _read_cache_into_buf(getattr(msg, "usage", None), cache_buf)
+                if cache_buf is not None:
+                    _read_cache_into_buf(getattr(msg, "usage", None), cache_buf)
+                actual_model = getattr(msg, "model", None)
+                response_id = getattr(msg, "id", None)
+                if (
+                    requested_model
+                    and actual_model
+                    and actual_model != requested_model
+                ):
+                    _check_response_model(
+                        requested_model,
+                        actual_model,
+                        None,
+                        response_id,
+                    )
+        elif etype == "content_block_start":
+            block = getattr(event, "content_block", None)
+            if getattr(block, "type", None) == "tool_use":
+                has_visible_content = True
+        elif etype == "content_block_delta":
+            delta = getattr(event, "delta", None)
+            if getattr(delta, "text", None) or getattr(
+                delta,
+                "partial_json",
+                None,
+            ):
+                has_visible_content = True
+        elif etype == "message_delta":
+            delta = getattr(event, "delta", None)
+            stop_reason = getattr(delta, "stop_reason", None)
+            if stop_reason and stop_reason not in _KNOWN_STOP_REASONS:
+                # Model mismatch (if any) was already logged at
+                # message_start — only record the stop_reason here.
+                _log_model_anomaly(
+                    requested_model,
+                    actual_model,
+                    stop_reason,
+                    response_id,
+                    "unusual_stop_reason",
+                )
+                if stop_reason == "refusal" and not has_visible_content:
+                    raise ModelRefusalException(
+                        requested_model or actual_model or "unknown",
+                        response_id=response_id,
+                    )
         yield event
 
 
@@ -527,17 +673,39 @@ class ClaudeOAuthChatModel(AnthropicChatModel):
             # Absent when the model is invoked outside our wrapper
             # (e.g., direct ``client.messages.create`` access).
             cache_buf = _CURRENT_CACHE_BUF.get()
+            requested_model = call_kwargs.get("model")
             result = await original_create(**call_kwargs)
 
             if call_kwargs.get("stream"):
-                if cache_buf is not None:
-                    return _peek_stream_for_cache(result, cache_buf)
-                return result
+                # Always wrap: even without a cache buffer we want
+                # fallback/stop_reason anomaly detection (Fable 5).
+                return _peek_stream_for_cache(
+                    result,
+                    cache_buf,
+                    requested_model,
+                )
 
             if cache_buf is not None:
                 _read_cache_into_buf(
                     getattr(result, "usage", None),
                     cache_buf,
+                )
+            _check_response_model(
+                requested_model,
+                getattr(result, "model", None),
+                getattr(result, "stop_reason", None),
+                getattr(result, "id", None),
+            )
+            if getattr(
+                result,
+                "stop_reason",
+                None,
+            ) == "refusal" and not _resp_has_visible_content(result):
+                raise ModelRefusalException(
+                    requested_model
+                    or getattr(result, "model", None)
+                    or "unknown",
+                    response_id=getattr(result, "id", None),
                 )
             return result
 
