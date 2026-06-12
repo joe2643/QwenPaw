@@ -300,71 +300,22 @@ def test_get_save_path_migrates_legacy_session_into_channel(
 # ---------------------------------------------------------------------------
 
 
-def test_migrate_legacy_weixin_session_files_renames_and_archives(
+def test_migrate_legacy_weixin_session_files_is_noop_in_fork(
     tmp_path: Path,
 ):
-    # ``user_42_weixin--sid@im.wechat.json`` is the legacy form.
+    """The fork keeps ``weixin`` as the canonical channel name, so the
+    upstream weixin→wechat migration is intentionally a no-op stub —
+    legacy-shaped files must be left exactly where they are."""
     legacy_name = "user_42_weixin--sid@im.wechat.json"
-    canonical_name = "user_42_wechat--sid@im.wechat.json"
     (tmp_path / legacy_name).write_text('{"v": 1}', encoding="utf-8")
 
     migrate_legacy_weixin_session_files(str(tmp_path))
 
-    assert (tmp_path / canonical_name).exists()
-    archive = tmp_path / ".weixin-legacy" / legacy_name
-    assert archive.exists(), "original legacy file should be archived"
-    # Live file should NOT remain at the legacy path.
-    assert not (tmp_path / legacy_name).exists()
-
-
-def test_migrate_legacy_weixin_session_files_archives_only_when_present(
-    tmp_path: Path,
-):
-    legacy_name = "u_weixin--sid.json"
-    canonical_name = "u_wechat--sid.json"
-    legacy = tmp_path / legacy_name
-    legacy.write_text('{"legacy": true}', encoding="utf-8")
-    # Canonical already exists with different content — must stay intact.
-    (tmp_path / canonical_name).write_text(
-        '{"live": true}',
-        encoding="utf-8",
-    )
-
-    migrate_legacy_weixin_session_files(str(tmp_path))
-
-    canonical = json.loads(
-        (tmp_path / canonical_name).read_text("utf-8"),
-    )
-    assert canonical == {
-        "live": True,
-    }, "live canonical file must not be overwritten"
-    assert (tmp_path / ".weixin-legacy" / legacy_name).exists()
-    assert not legacy.exists()
+    assert (tmp_path / legacy_name).exists(), "fork must not move files"
+    assert not (tmp_path / ".weixin-legacy").exists()
+    assert not (tmp_path / "user_42_wechat--sid@im.wechat.json").exists()
 
 
 def test_migrate_legacy_weixin_session_files_noop_on_missing_dir():
     # Must not raise when the directory does not exist.
     migrate_legacy_weixin_session_files("/path/that/does/not/exist/xyz")
-
-
-def test_migrate_legacy_weixin_session_files_noop_when_no_legacy(
-    tmp_path: Path,
-):
-    (tmp_path / "u_wechat--sid.json").write_text("{}", encoding="utf-8")
-
-    migrate_legacy_weixin_session_files(str(tmp_path))
-
-    # No archive dir created when there is nothing to migrate.
-    assert not (tmp_path / ".weixin-legacy").exists()
-
-
-# ---------------------------------------------------------------------------
-# Module exports — defensive check for the migration constant.
-# ---------------------------------------------------------------------------
-
-
-def test_archive_dir_constant_excluded_from_session_scans():
-    # Callers list ``*.json`` non-recursively; the archive dir lives one
-    # level down so it must not start with a dot-stripped name that
-    # collides with session files.
-    assert session_mod._WEIXIN_LEGACY_ARCHIVE_DIR.startswith(".")
