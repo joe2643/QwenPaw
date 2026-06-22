@@ -32,7 +32,10 @@ import ChatActionGroup from "./components/ChatActionGroup";
 import ChatSessionDrawer from "./components/ChatSessionDrawer";
 import { useSidebarModeStore } from "../../stores/sidebarModeStore";
 import TurnUsageAction from "./components/TurnUsageAction";
-import { wrapChatResponseUsageStream } from "./turnUsage";
+import {
+  patchContextMaxInputLength,
+  wrapChatResponseUsageStream,
+} from "./turnUsage";
 import ChatHeaderTitle from "./components/ChatHeaderTitle";
 import ChatSessionInitializer from "./components/ChatSessionInitializer";
 import { ApprovalCard } from "../../components/ApprovalCard/ApprovalCard";
@@ -696,16 +699,7 @@ function useMultimodalCapabilities(
     }
   }, [locationPathname, fetchMultimodalCaps]);
 
-  // Listen for model-switched event from ModelSelector
-  useEffect(() => {
-    const handler = () => {
-      fetchMultimodalCaps();
-    };
-    window.addEventListener("model-switched", handler);
-    return () => window.removeEventListener("model-switched", handler);
-  }, [fetchMultimodalCaps]);
-
-  return multimodalCaps;
+  return { multimodalCaps, fetchMultimodalCaps };
 }
 
 function useMessageHistoryNavigation(
@@ -1534,7 +1528,7 @@ export default function ChatPage() {
 
   // Use custom hooks for better separation of concerns
   const isComposingRef = useIMEComposition(isChatActive);
-  const multimodalCaps = useMultimodalCapabilities(
+  const { multimodalCaps, fetchMultimodalCaps } = useMultimodalCapabilities(
     refreshKey,
     location.pathname,
     isChatActive,
@@ -1547,6 +1541,20 @@ export default function ChatPage() {
   const chatIdRef = useRef(chatId);
   const navigateRef = useRef(navigate);
   const chatRef = useRef<IAgentScopeRuntimeWebUIRef>(null);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      void fetchMultimodalCaps();
+      const maxInputLength = (e as CustomEvent<{ maxInputLength?: number }>)
+        .detail?.maxInputLength;
+      if (typeof maxInputLength === "number") {
+        patchContextMaxInputLength(chatRef, maxInputLength);
+      }
+    };
+    window.addEventListener("model-switched", handler);
+    return () => window.removeEventListener("model-switched", handler);
+  }, [fetchMultimodalCaps]);
+
   const pendingClearHistoryRef = useRef(false);
   const whisperSpeechRef = useRef<WhisperSpeechButtonRef>(null);
   const [whisperEnabled, setWhisperEnabled] = useState(false);
