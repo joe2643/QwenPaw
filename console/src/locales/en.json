@@ -2568,13 +2568,13 @@
     "approved": "Tool call approved",
     "denied": "Tool call denied",
     "approveFailed": "Failed to approve",
-    "cancelTask": "Cancel Task",
     "denyFailed": "Failed to deny",
     "timeoutAutoDenied": "Timed out, auto denied",
     "acknowledge": "Got it",
-    "approvePattern": "Approve Pattern",
-    "approveExact": "Approve Exact",
-    "approvalScope": "Approval scope"
+    "approvePattern": "Always Allow",
+    "approveExact": "Just Once",
+    "approvalScope": "Approval scope",
+    "details": "Details"
   },
   "pluginManager": {
     "title": "Plugin Manager",
